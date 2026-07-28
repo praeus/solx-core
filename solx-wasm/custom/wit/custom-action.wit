@@ -1,0 +1,51 @@
+package sol:actions@0.1.0;
+
+/// Shared types used by sol custom action interfaces.
+interface types {
+  /// Result returned after executing an action.
+  record action-result {
+    success: bool,
+    message: option<string>,
+    output: option<string>,
+  }
+}
+
+/// Host interface for executing another sol action from within a custom WASM component.
+/// All calls are permission-gated against the caller's permission sandbox.
+interface action-exec {
+  use types.{action-result};
+  /// Execute a named sol action with a JSON-encoded payload.
+  exec: func(action-name: string, payload: string) -> result<action-result, string>;
+}
+
+/// Host interface for reading artifact bytes from within a custom WASM component.
+/// The caller must have artifact-read permission for the named artifact.
+interface artifact-read {
+  /// Read the raw bytes of an artifact by name.
+  read: func(name: string) -> result<list<u8>, string>;
+}
+
+/// Host-provided logging (maps to the host tracing/logging subsystem).
+interface logger {
+  log: func(message: string);
+}
+
+/// The interface every sol custom action component must export.
+interface runner {
+  use types.{action-result};
+  run: func(action-name: option<string>, params: string) -> result<action-result, string>;
+}
+
+/// World for user-supplied custom WASM action components.
+///
+/// Custom components only get permission-gated access to action dispatch and
+/// artifact reads.  Direct DB, filesystem, model, and system-ops access is
+/// not available — all sensitive operations must go through named sol actions.
+///
+/// Build target: wasm32-wasip2
+world custom-action {
+  import action-exec;
+  import artifact-read;
+  import logger;
+  export runner;
+}

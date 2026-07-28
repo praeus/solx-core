@@ -1,0 +1,42 @@
+[package]
+name        = "sol-actions-lib"
+version     = "0.1.0"
+edition     = "2021"
+links       = "sol_custom_wit"
+description = "Helper crate for authors building custom WASM action components"
+# Files to include when this crate is `cargo publish`ed.  The default set
+# covers `src/`, `Cargo.toml`, and the license/readme; we extend it to also
+# include the canonical `wit/` directory and `build.rs`.
+include = [
+    "src/**/*",
+    "wit/**/*",
+    "build.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE*",
+]
+
+# Helper crate for authors building custom WASM action components.
+# Links against the `custom-action` WIT world defined in `wit/custom-action.wit`
+# which provides only permission-gated action dispatch and artifact reads.
+#
+# The `wit/custom-action.wit` file in this crate is the canonical home for the
+# `custom-action` WIT world.  Other crates that need to build WASM components
+# against this world should depend on `sol-actions-lib` and read the WIT from
+# the `DEP_SOL_CUSTOM_WIT_CUSTOM_WIT` env var (emitted by this crate's
+# build script) rather than vendoring the full `sol-actions.wit` (which
+# exposes privileged backend/frontend worlds that custom actions must not
+# import).
+#
+# Build your custom component:
+#   cargo build --target wasm32-wasip2 --release
+#
+# Register the output as a sol Artifact and create an Action with
+# trusted = false (the default for user-supplied components).
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+wit-bindgen = "0.36"
+serde_json  = { version = "1", default-features = false, features = ["alloc"] }

@@ -1,0 +1,21 @@
+[package]
+name = "solx-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Type registry for solx: JSON-schema types organized by path and type groups."
+
+[dependencies]
+solx-surface = { workspace = true }
+solx-config = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+libsql = { workspace = true }
+jsonschema = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"

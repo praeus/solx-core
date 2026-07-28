@@ -1,0 +1,15 @@
+[package]
+name = "solx-files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "On-disk byte store for files attached to solx documents and actions."
+
+[dependencies]
+solx-surface = { workspace = true }
+solx-config = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true }

@@ -1,0 +1,15 @@
+[package]
+name = "solx-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Config service for solx-config.json with cross-process-safe read-modify-write."
+
+[dependencies]
+solx-surface = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+fs2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

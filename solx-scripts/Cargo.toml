@@ -1,0 +1,14 @@
+[package]
+name = "solx-scripts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parser/executor for the solx shell pipeline scripting language (decoupled from the CLI)."
+
+[dependencies]
+solx-surface = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

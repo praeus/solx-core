@@ -1,0 +1,22 @@
+[package]
+name = "solx-actions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Action store for solx: own database, execution (command/webhook), file refs."
+
+[dependencies]
+solx-surface = { workspace = true }
+solx-config = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+libsql = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+solx-types = { workspace = true }
+tokio = { workspace = true }
+tempfile = "3"

@@ -1,0 +1,52 @@
+[workspace]
+members = [
+    "solx-surface",
+    "solx-config",
+    "solx-types",
+    "solx-files",
+    "solx-docs",
+    "solx-actions",
+    "solx-scripts",
+    "solx-packages",
+    "solx-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# Foundation (dependency-light) — kept in sync across crates.
+serde       = { version = "1", features = ["derive"] }
+serde_json  = { version = "1", features = ["preserve_order"] }
+uuid        = { version = "1", features = ["v4", "serde"] }
+chrono      = { version = "0.4", features = ["serde"] }
+thiserror   = "1"
+async-trait = "0.1"
+schemars    = { version = "0.8", features = ["uuid1", "chrono", "preserve_order"] }
+
+# Runtime / backend (only pulled in by impl crates, never by solx-surface).
+tokio      = { version = "1", features = ["full"] }
+libsql     = "0.6"
+tantivy    = "0.22"
+jsonschema = { version = "0.28", default-features = false }
+base64     = "0.22"
+anyhow     = "1"
+clap       = { version = "4.5", features = ["derive"] }
+fs2        = "0.4"
+reqwest    = { version = "0.12", features = ["json", "rustls-tls"] }
+url        = "2"
+rand       = "0.8"
+tracing    = "0.1"
+
+# Local crates
+solx-surface  = { path = "solx-surface" }
+solx-config   = { path = "solx-config" }
+solx-types    = { path = "solx-types" }
+solx-files    = { path = "solx-files" }
+solx-docs     = { path = "solx-docs" }
+solx-actions  = { path = "solx-actions" }
+solx-scripts  = { path = "solx-scripts" }
+solx-packages = { path = "solx-packages" }

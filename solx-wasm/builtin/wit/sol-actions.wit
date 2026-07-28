@@ -1,0 +1,272 @@
+package sol:actions@0.1.0;
+
+// ── Shared types ──────────────────────────────────────────────────────────────
+
+/// Shared types used by all sol action interfaces.
+interface types {
+    /// Snapshot of a document as returned by host DB operations.
+    record document-info {
+        id: string,
+        name: string,
+        type-name: option<string>,
+        /// JSON-encoded document contents object.
+        content: option<string>,
+    }
+
+    /// Result returned after executing an action.
+    record action-result {
+        success: bool,
+        message: option<string>,
+        /// Optional JSON-encoded result value (may be any JSON value).
+        output: option<string>,
+    }
+}
+
+// ── Host interfaces (backend only) ────────────────────────────────────────────
+
+/// Host-provided document database operations.
+/// Only available to backend action components executed by wasmtime.
+interface document-ops {
+    use types.{document-info};
+
+    /// Fetch a document by name.
+    get-document: func(name: string) -> result<document-info, string>;
+
+    /// Create a new document of the given type.
+    /// `content` is a JSON-encoded object matching the type schema.
+    create-document: func(
+        type-name: string,
+        name: string,
+        content: string,
+    ) -> result<document-info, string>;
+
+    /// Replace a document's entire contents (full overwrite).
+    update-document: func(name: string, content: string) -> result<document-info, string>;
+
+    /// Delete a document by name.
+    delete-document: func(name: string) -> result<_, string>;
+
+    /// Read a single field value from a document's JSON contents.
+    /// Returns the JSON-encoded field value.
+    get-field: func(document-name: string, field: string) -> result<string, string>;
+
+    /// Set a single field in a document's JSON contents (shallow merge into
+    /// existing contents — other fields are preserved).
+    set-field: func(
+        document-name: string,
+        field: string,
+        /// JSON-encoded value to assign to the field.
+        value: string,
+    ) -> result<_, string>;
+}
+
+/// Host-provided logging (maps to the host tracing/logging subsystem).
+interface logger {
+    log: func(message: string);
+}
+
+/// Generic entity CRUD — mirrors the entity_new/get/set/delete/list Tauri
+/// commands.  All payloads are JSON-encoded strings.
+/// Available to both backend (via wasmtime host functions) and frontend
+/// (via the TypeScript entityOps shim in browser-actions.ts) worlds.
+interface entity-ops {
+    use types.{action-result};
+    /// Create a new entity.  `payload` is a JSON object matching the type's
+    /// input schema.  Returns the created entity as a JSON string.
+    entity-new: func(type-name: string, name: string, payload: string) -> result<string, string>;
+    /// Fetch an entity by type and name.  Returns the entity as a JSON string.
+    entity-get: func(type-name: string, name: string) -> result<string, string>;
+    /// Update an entity.  `payload` is a JSON object matching the type's
+    /// input schema.  Returns the updated entity as a JSON string.
+    entity-set: func(type-name: string, name: string, payload: string) -> result<string, string>;
+    /// Delete an entity by type and name.
+    entity-delete: func(type-name: string, name: string) -> result<_, string>;
+    /// List all entities of a type.  `params` is a JSON object with optional
+    /// filter, sort, and pagination fields (see ListOptions schema).
+    /// Pass `{}` for an unfiltered full list.
+    entity-list: func(type-name: string, params: string) -> result<string, string>;
+    /// Execute an entity of type `Action` (only valid for `Action` type).
+    /// `payload` is the JSON-encoded params object.  Returns an
+    /// `action-result` record as a JSON string on success.
+    entity-exec: func(type-name: string, name: string, payload: string) -> result<string, string>;
+}
+
+/// Host-provided filesystem and process operations.
+/// Only available to backend action components executed by wasmtime.
+interface system-ops {
+    /// Read a file as a UTF-8 string.
+    read-file: func(path: string) -> result<string, string>;
+    /// Write a UTF-8 string to a file (creates or overwrites).
+    write-file: func(path: string, content: string) -> result<_, string>;
+    /// List the entries (file and directory names) in a directory.
+    list-dir: func(path: string) -> result<list<string>, string>;
+    /// Copy one file from `source-path` to `destination-path`.
+    /// Parent directories for destination are created as needed.
+    copy-file: func(source-path: string, destination-path: string) -> result<_, string>;
+    /// Recursively copy an entire directory tree from `source-path` to
+    /// `destination-path`.
+    copy-dir: func(source-path: string, destination-path: string) -> result<_, string>;
+    /// Return the resolved local sol DB home directory.
+    db-home: func() -> result<string, string>;
+    /// Generate a new random UUID v4 string.
+    gen-uuid: func() -> string;
+    /// Read a variable from the internal WASM environment store.
+    ///
+    /// Only variables seeded from the `env_mappings` allowlist in
+    /// `sol-config.json`, or previously written by `set-env`, are visible.
+    /// System process environment variables are never exposed directly.
+    get-env: func(key: string) -> option<string>;
+    /// Write a variable to the internal WASM environment store.
+    ///
+    /// The value is stored in an in-process map shared across all WASM
+    /// invocations for this sol session.  It does NOT modify the system
+    /// process environment.
+    set-env: func(key: string, value: string);
+    /// Fetch page HTML from an http/https URL.
+    fetch-html: func(url: string) -> result<string, string>;
+    /// Fetch page HTML from a URL and run extraction in one host call.
+    /// Returns the JSON extraction result payload.
+    fetch-and-extract: func(
+        source-document-name: string,
+        url: string,
+        knowledge-base-name: option<string>,
+        selected-type-name: option<string>,
+        /// Free-form instructions steering what the extraction LLM pulls out
+        /// or how it shapes the resulting document (e.g. "focus on the
+        /// comments", "use the Invoice type, omit boilerplate").
+        extraction-prompt: option<string>,
+    ) -> result<string, string>;
+}
+
+/// Host-provided scoped secret storage.
+///
+/// Unlike `system-ops::get-env`/`set-env` (a single store shared by every
+/// trusted action), these calls are scoped to the calling action: the host
+/// looks up the decryption key for `name` in the calling action's own
+/// `action_config.secrets` map. If that action's config has no entry for
+/// `name`, the call fails/returns none without ever touching the
+/// underlying credential store — an action can only reach a secret it was
+/// explicitly configured with a key for.
+/// Only available to backend action components executed by wasmtime.
+interface secrets {
+    /// Read a secret by name, decrypted with the key configured for the
+    /// calling action. Returns `none` if not found, or if the calling
+    /// action has no key configured for `name`.
+    get-secret: func(name: string) -> option<string>;
+    /// Encrypt and store a secret by name, using the key configured for
+    /// the calling action. Fails if the calling action has no key
+    /// configured for `name`.
+    set-secret: func(name: string, value: string) -> result<_, string>;
+}
+
+/// Host-provided language model inference operations (Ollama).
+/// Only available to backend action components executed by wasmtime.
+interface model-ops {
+    /// Send a chat completion to a named model.
+    ///
+    /// `model-name` — sol Model entity name (used to look up provider and model-id).
+    /// `messages`   — JSON array of `{ "role": "user"|"assistant"|"system", "content": "..." }`.
+    ///
+    /// Returns the assistant reply as a JSON string on success.
+    model-chat: func(model-name: string, messages: string) -> result<string, string>;
+
+    /// Single-turn text generation (non-chat) using a named model.
+    ///
+    /// `model-name` — sol Model entity name.
+    /// `prompt`     — plain-text prompt string.
+    ///
+    /// Returns the generated text as a plain string.
+    model-generate: func(model-name: string, prompt: string) -> result<string, string>;
+
+    /// List registered sol Model entity names.
+    ///
+    /// Returns a JSON array of model name strings.
+    model-list: func() -> result<string, string>;
+}
+
+/// Host-provided Python script execution.
+/// Only available to trusted backend-action components.
+interface python-ops {
+    /// Evaluate a Python script string with JSON input and return JSON output.
+    ///
+    /// `script` is the raw Python source code.
+    /// `input` is a JSON-encoded string passed to the script as the `inputs` variable.
+    /// `site-packages-path` is an optional host-path to a directory of
+    ///   pre-installed pure-Python packages to add to sys.path.
+    ///
+    /// Returns the JSON-encoded value of the script's `outputs` variable.
+    eval-python: func(
+        script: string,
+        input: string,
+        site-packages-path: option<string>,
+    ) -> result<string, string>;
+}
+
+// ── Exported interface ────────────────────────────────────────────────────────
+
+/// The interface every sol action component must export.
+interface runner {
+    use types.{action-result};
+
+    /// Execute an action.
+    ///
+    /// `action-name`: identifies which built-in action to invoke when this
+    ///   component bundles multiple actions (e.g. the sol-actions standard
+    ///   library).  Single-purpose components may ignore it.
+    ///
+    /// `params`: JSON-encoded parameter object whose shape is defined by the
+    ///   action's parameter type schema.
+    run: func(
+        action-name: option<string>,
+        params: string,
+    ) -> result<action-result, string>;
+}
+
+// ── Worlds ────────────────────────────────────────────────────────────────────
+
+/// World for action components executed on the backend via wasmtime.
+/// The host provides full entity database access through imported interfaces.
+///
+/// Build target: wasm32-wasip2
+/// Host runtime: wasmtime (in sol-browser/src-tauri) via the component model
+world backend-action {
+    import document-ops;
+    import entity-ops;
+    import system-ops;
+    import secrets;
+    import model-ops;
+    import python-ops;
+    import logger;
+    export runner;
+}
+
+// ── Custom (user-supplied) action interfaces ──────────────────────────────────
+
+/// Host interface for executing another sol action from within a custom WASM component.
+/// All calls are permission-gated against the caller's permission sandbox.
+interface action-exec {
+    use types.{action-result};
+    /// Execute a named sol action with a JSON-encoded payload.
+    exec: func(action-name: string, payload: string) -> result<action-result, string>;
+}
+
+/// Host interface for reading artifact bytes from within a custom WASM component.
+/// The caller must have artifact-read permission for the named artifact.
+interface artifact-read {
+    /// Read the raw bytes of an artifact by name.
+    read: func(name: string) -> result<list<u8>, string>;
+}
+
+/// World for user-supplied custom WASM action components.
+///
+/// Custom components only get permission-gated access to action dispatch and
+/// artifact reads.  Direct DB, filesystem, model, and system-ops access is
+/// not available — all sensitive operations must go through named sol actions.
+///
+/// Build target: wasm32-wasip2
+world custom-action {
+    import action-exec;
+    import artifact-read;
+    import logger;
+    export runner;
+}

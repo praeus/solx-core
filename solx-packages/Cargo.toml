@@ -1,0 +1,13 @@
+[package]
+name = "solx-packages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Install/uninstall solx packages by running their install.solx scripts and registering them."
+
+[dependencies]
+solx-surface = { workspace = true }
+solx-config = { workspace = true }
+solx-scripts = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
