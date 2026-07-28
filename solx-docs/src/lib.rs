@@ -65,17 +65,41 @@ impl LocalDocManager {
         let db = Db::open(db_path).await?;
         let conn = db.connect().await?;
         conn.execute_batch(DDL).await.map_err(map_db)?;
-        let index = DocIndex::open(index_dir)?;
-        Ok(LocalDocManager {
+        let (index, created_fresh) = DocIndex::open(index_dir)?;
+        let manager = LocalDocManager {
             db,
             index: Mutex::new(index),
             types,
-        })
+        };
+        // A freshly-created index (first run, or an incompatible on-disk
+        // schema that was just wiped and recreated) has no documents in it —
+        // repopulate from the database so search results survive an index
+        // schema upgrade.
+        if created_fresh {
+            manager.reindex_all().await?;
+        }
+        Ok(manager)
     }
 
     /// The type manager this store validates against.
     pub fn types(&self) -> Arc<dyn TypeManager> {
         self.types.clone()
+    }
+
+    /// Re-index every document currently in the database. Called
+    /// automatically by [`Self::open`] after a fresh/recreated search index;
+    /// safe to call at any time (e.g. to recover from an out-of-band index
+    /// corruption). Returns the number of documents re-indexed.
+    pub async fn reindex_all(&self) -> Result<usize> {
+        let conn = self.db.connect().await?;
+        let mut rows = conn.query(SELECT, ()).await.map_err(map_db)?;
+        let mut count = 0usize;
+        while let Some(row) = rows.next().await.map_err(map_db)? {
+            let doc = row_to_doc(&row)?;
+            self.reindex(&doc).await?;
+            count += 1;
+        }
+        Ok(count)
     }
 
     async fn reindex(&self, doc: &Document) -> Result<()> {
@@ -92,24 +116,24 @@ impl LocalDocManager {
         }
 
         // Schema-aware content walking: resolve the type to get its schema,
-        // then walk contents to extract DocRef names and rich-text plain text.
-        // Fall back to naive flatten_strings if the type can't be resolved.
+        // then walk contents to extract DocRef targets and rich-text plain
+        // text. Fall back to naive flatten_strings if the type can't be
+        // resolved.
         let type_schema = self.types.resolve(&doc.type_ref).await.ok().map(|t| t.schema);
-        match type_schema {
+        let doc_ref_names = match type_schema {
             Some(ref schema) => {
                 let extract = walk_contents(&doc.contents, schema);
                 for part in &extract.content_text_parts {
                     content_text.push_str(part);
                     content_text.push(' ');
                 }
-                // doc_ref_names are also added to content_text for full-text
-                // discoverability (they're already in content_text_parts).
-                let _ = extract.doc_ref_names;
+                extract.doc_ref_names
             }
             None => {
                 flatten_strings(&doc.contents, &mut content_text);
+                Vec::new()
             }
-        }
+        };
 
         let name_raw = full_ref(&doc.path, &doc.name)?;
         let mut idx = self.index.lock().unwrap();
@@ -121,6 +145,7 @@ impl LocalDocManager {
             doc.title.as_deref(),
             doc.summary.as_deref(),
             &doc.type_ref,
+            &doc_ref_names,
             &content_text,
         )
     }
@@ -498,5 +523,116 @@ mod tests {
             ..Default::default()
         };
         assert!(m.post("/people", "x", bad).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn search_facets_by_linked_document() {
+        let (_d, m) = setup().await;
+
+        // A type with a DocRef-typed field.
+        let ty = solx_surface::entities::TypeInput {
+            schema: Some(json!({
+                "type": "object",
+                "properties": { "manager": { "$ref": "#/$defs/DocRef" } }
+            })),
+            ..Default::default()
+        };
+        m.types().post("/types/custom", "Employee", ty).await.unwrap();
+
+        m.post(
+            "/people",
+            "ada",
+            DocumentInput {
+                type_ref: Some("/types/docs/Document".into()),
+                contents: json!({}),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        m.post(
+            "/people",
+            "charles",
+            DocumentInput {
+                type_ref: Some("/types/custom/Employee".into()),
+                contents: json!({ "manager": { "path": "/people", "name": "ada" } }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let res = m
+            .search(SearchQuery {
+                linked_to: Some("/people/ada".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.total, 1);
+        assert_eq!(res.hits[0].name, "charles");
+
+        let res_none = m
+            .search(SearchQuery {
+                linked_to: Some("/people/nonexistent".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(res_none.total, 0);
+    }
+
+    #[tokio::test]
+    async fn reindex_all_repopulates_after_incompatible_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let types = Arc::new(LocalTypeManager::open(&dir.path().join("types.db")).await.unwrap());
+        let db_path = dir.path().join("docs.db");
+        let idx_path = dir.path().join("idx");
+
+        {
+            let m = LocalDocManager::open(&db_path, &idx_path, types.clone())
+                .await
+                .unwrap();
+            m.post(
+                "/a",
+                "one",
+                DocumentInput {
+                    type_ref: Some("/types/docs/Document".into()),
+                    contents: json!({ "body": "searchable content" }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        // Simulate a stale on-disk index missing a required field (e.g. from
+        // before `doc_ref_names` was added) by replacing it with a minimal
+        // incompatible schema.
+        {
+            use tantivy::schema::{SchemaBuilder, STORED, STRING};
+            let mut b = SchemaBuilder::new();
+            b.add_text_field("id", STRING | STORED);
+            let schema = b.build();
+            std::fs::remove_dir_all(&idx_path).unwrap();
+            std::fs::create_dir_all(&idx_path).unwrap();
+            tantivy::Index::create_in_dir(&idx_path, schema).unwrap();
+        }
+
+        // Reopening must detect the incompatibility, recreate the index, and
+        // automatically repopulate it from the documents database.
+        let m2 = LocalDocManager::open(&db_path, &idx_path, types.clone())
+            .await
+            .unwrap();
+        let res = m2
+            .search(SearchQuery {
+                q: Some("searchable".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.total, 1);
+        assert_eq!(res.hits[0].name, "one");
     }
 }

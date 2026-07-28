@@ -1,20 +1,19 @@
 //! Tantivy full-text + faceted search over documents.
 //!
 //! Facets supported: `path_prefix` (matches a directory and everything under
-//! it, via indexed ancestor terms) and `type_ref` (exact). Free-text `q` runs
-//! over the document name + a flattened bag of its string content, with bare
-//! terms auto-converted to prefix queries.
+//! it, via indexed ancestor terms), `type_ref` (exact), and `linked_to`
+//! (exact — documents whose contents contain a `DocRef` to the given target).
+//! Free-text `q` runs over the document name + a flattened bag of its string
+//! content, with bare terms auto-converted to prefix queries.
 //!
 //! When a type schema is available, content walking is schema-aware:
-//! `DocRef` fields are extracted for faceted linking, and rich-text fields
-//! (`x-sol-editor: "rich_text"` or `$ref` to `RichTextDoc`) are converted to
-//! plain text before indexing.
+//! `DocRef` fields are extracted into the `doc_ref_names` facet (and folded
+//! into free-text too), and rich-text fields (`x-sol-editor: "rich_text"` or
+//! `$ref` to `RichTextDoc`) are converted to plain text before indexing.
 
 use std::path::Path;
 
-use solx_surface::entities::Document;
 use solx_surface::error::{Result, SolxError};
-use solx_surface::managers::SearchManager;
 use solx_surface::query::{SearchHit, SearchQuery, SearchResults};
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, QueryParser, RegexQuery, TermQuery};
@@ -36,6 +35,7 @@ const REQUIRED_FIELDS: &[&str] = &[
     "summary",
     "type_ref",
     "path_prefixes",
+    "doc_ref_names",
     "content_text",
 ];
 
@@ -49,6 +49,7 @@ struct Fields {
     summary: Field,
     type_ref: Field,
     path_prefixes: Field,
+    doc_ref_names: Field,
     content_text: Field,
 }
 
@@ -62,6 +63,7 @@ fn build_schema() -> (Schema, Fields) {
     let summary = b.add_text_field("summary", STRING | STORED);
     let type_ref = b.add_text_field("type_ref", STRING | STORED);
     let path_prefixes = b.add_text_field("path_prefixes", STRING);
+    let doc_ref_names = b.add_text_field("doc_ref_names", STRING);
     let content_text = b.add_text_field("content_text", TEXT);
     let schema = b.build();
     let fields = Fields {
@@ -73,6 +75,7 @@ fn build_schema() -> (Schema, Fields) {
         summary,
         type_ref,
         path_prefixes,
+        doc_ref_names,
         content_text,
     };
     (schema, fields)
@@ -89,6 +92,7 @@ fn fields_from(schema: &Schema) -> Result<Fields> {
         summary: f("summary")?,
         type_ref: f("type_ref")?,
         path_prefixes: f("path_prefixes")?,
+        doc_ref_names: f("doc_ref_names")?,
         content_text: f("content_text")?,
     })
 }
@@ -102,21 +106,26 @@ pub struct DocIndex {
 }
 
 impl DocIndex {
-    pub fn open(index_dir: &Path) -> Result<Self> {
+    /// Open an existing index at `index_dir`, or create a fresh one. Returns
+    /// whether the index was just (re)created from scratch — either because
+    /// it didn't exist yet, or because an incompatible on-disk schema was
+    /// wiped and recreated — so the caller can repopulate it from the
+    /// document database (see [`crate::LocalDocManager::reindex_all`]).
+    pub fn open(index_dir: &Path) -> Result<(Self, bool)> {
         std::fs::create_dir_all(index_dir)?;
         let (desired, _) = build_schema();
-        let index = if index_dir.join("meta.json").exists() {
+        let (index, created_fresh) = if index_dir.join("meta.json").exists() {
             let opened = Index::open_in_dir(index_dir).map_err(se)?;
             if REQUIRED_FIELDS.iter().all(|n| opened.schema().get_field(n).is_ok()) {
-                opened
+                (opened, false)
             } else {
                 drop(opened);
                 std::fs::remove_dir_all(index_dir)?;
                 std::fs::create_dir_all(index_dir)?;
-                Index::create_in_dir(index_dir, desired.clone()).map_err(se)?
+                (Index::create_in_dir(index_dir, desired.clone()).map_err(se)?, true)
             }
         } else {
-            Index::create_in_dir(index_dir, desired.clone()).map_err(se)?
+            (Index::create_in_dir(index_dir, desired.clone()).map_err(se)?, true)
         };
         let fields = fields_from(&index.schema())?;
         let writer = index.writer(50_000_000).map_err(se)?;
@@ -125,15 +134,19 @@ impl DocIndex {
             .reload_policy(ReloadPolicy::Manual)
             .try_into()
             .map_err(se)?;
-        Ok(DocIndex {
-            index,
-            writer,
-            reader,
-            fields,
-        })
+        Ok((
+            DocIndex {
+                index,
+                writer,
+                reader,
+                fields,
+            },
+            created_fresh,
+        ))
     }
 
     /// Index (or re-index) one document.
+    #[allow(clippy::too_many_arguments)]
     pub fn index_doc(
         &mut self,
         id: &str,
@@ -143,6 +156,7 @@ impl DocIndex {
         title: Option<&str>,
         summary: Option<&str>,
         type_ref: &str,
+        doc_ref_names: &[String],
         content_text: &str,
     ) -> Result<()> {
         // delete-then-add by the unique name_raw key
@@ -162,6 +176,9 @@ impl DocIndex {
         doc.add_text(self.fields.type_ref, type_ref);
         for anc in ancestors(path) {
             doc.add_text(self.fields.path_prefixes, &anc);
+        }
+        for target in doc_ref_names {
+            doc.add_text(self.fields.doc_ref_names, target);
         }
         doc.add_text(self.fields.content_text, content_text);
         self.writer.add_document(doc).map_err(se)?;
@@ -251,6 +268,9 @@ impl DocIndex {
         if let Some(tr) = query.type_ref.as_deref().filter(|s| !s.is_empty()) {
             clauses.push(term_clause(self.fields.type_ref, tr));
         }
+        if let Some(target) = query.linked_to.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            clauses.push(term_clause(self.fields.doc_ref_names, target));
+        }
 
         Ok(Box::new(BooleanQuery::new(clauses)))
     }
@@ -295,33 +315,6 @@ fn ancestors(path: &str) -> Vec<String> {
         out.push(cur.clone());
     }
     out
-}
-
-impl SearchManager for DocIndex {
-    fn search(&self, query: &SearchQuery) -> Result<SearchResults> {
-        self.search(query)
-    }
-
-    fn index_document(&self, _doc: &Document) -> Result<()> {
-        // This is a no-op at the DocIndex level — the caller (LocalDocManager)
-        // must resolve the type schema and call `index_doc` with the extracted
-        // content. The trait method exists for the mock path.
-        Err(SolxError::Other(
-            "DocIndex::index_document requires pre-extracted content; use index_doc directly"
-                .into(),
-        ))
-    }
-
-    fn remove_document(&self, _name_raw: &str) -> Result<()> {
-        // &self can't call &mut self delete_doc. The real deletion happens
-        // via the Mutex<DocIndex> in LocalDocManager.
-        Ok(())
-    }
-
-    fn commit(&self) -> Result<()> {
-        // Same tension — commit needs &mut self.
-        Ok(())
-    }
 }
 
 // ── Schema-aware content walking ────────────────────────────────────────────
@@ -373,10 +366,11 @@ pub fn walk_contents(
 
         match ref_target {
             "#/$defs/DocRef" => {
-                // Extract the doc ref name for faceted linking.
-                if let Some(ref_name) = field_value.get("name").and_then(|v| v.as_str()) {
-                    out.doc_ref_names.push(ref_name.to_string());
-                    out.content_text_parts.push(ref_name.to_string());
+                // Extract the doc ref target's full reference for faceted
+                // linking (`linked_to` in SearchQuery).
+                if let Some(target) = doc_ref_target_string(field_value) {
+                    out.doc_ref_names.push(target.clone());
+                    out.content_text_parts.push(target);
                 }
             }
             _ => {
@@ -420,6 +414,25 @@ fn collect_strings(val: &serde_json::Value, out: &mut Vec<String>) {
             }
         }
         _ => {}
+    }
+}
+
+/// Build the full reference (`/path/name`) a `DocRef` value points at, from
+/// its `path`/`name` fields. Falls back to a bare `name` when `path` is
+/// absent (a legacy/relative reference), and to `None` when neither is set.
+fn doc_ref_target_string(field_value: &serde_json::Value) -> Option<String> {
+    let name = field_value
+        .get("name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let path = field_value
+        .get("path")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    match (path, name) {
+        (Some(p), Some(n)) => solx_surface::path::full_ref(p, n).ok(),
+        (None, Some(n)) => Some(n.to_string()),
+        _ => None,
     }
 }
 

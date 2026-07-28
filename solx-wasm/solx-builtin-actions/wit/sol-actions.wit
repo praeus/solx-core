@@ -124,18 +124,6 @@ interface system-ops {
     set-env: func(key: string, value: string);
     /// Fetch page HTML from an http/https URL.
     fetch-html: func(url: string) -> result<string, string>;
-    /// Fetch page HTML from a URL and run extraction in one host call.
-    /// Returns the JSON extraction result payload.
-    fetch-and-extract: func(
-        source-document-name: string,
-        url: string,
-        knowledge-base-name: option<string>,
-        selected-type-name: option<string>,
-        /// Free-form instructions steering what the extraction LLM pulls out
-        /// or how it shapes the resulting document (e.g. "focus on the
-        /// comments", "use the Invoice type, omit boilerplate").
-        extraction-prompt: option<string>,
-    ) -> result<string, string>;
 }
 
 /// Host-provided scoped secret storage.
@@ -157,49 +145,6 @@ interface secrets {
     /// the calling action. Fails if the calling action has no key
     /// configured for `name`.
     set-secret: func(name: string, value: string) -> result<_, string>;
-}
-
-/// Host-provided language model inference operations (Ollama).
-/// Only available to backend action components executed by wasmtime.
-interface model-ops {
-    /// Send a chat completion to a named model.
-    ///
-    /// `model-name` — sol Model entity name (used to look up provider and model-id).
-    /// `messages`   — JSON array of `{ "role": "user"|"assistant"|"system", "content": "..." }`.
-    ///
-    /// Returns the assistant reply as a JSON string on success.
-    model-chat: func(model-name: string, messages: string) -> result<string, string>;
-
-    /// Single-turn text generation (non-chat) using a named model.
-    ///
-    /// `model-name` — sol Model entity name.
-    /// `prompt`     — plain-text prompt string.
-    ///
-    /// Returns the generated text as a plain string.
-    model-generate: func(model-name: string, prompt: string) -> result<string, string>;
-
-    /// List registered sol Model entity names.
-    ///
-    /// Returns a JSON array of model name strings.
-    model-list: func() -> result<string, string>;
-}
-
-/// Host-provided Python script execution.
-/// Only available to trusted backend-action components.
-interface python-ops {
-    /// Evaluate a Python script string with JSON input and return JSON output.
-    ///
-    /// `script` is the raw Python source code.
-    /// `input` is a JSON-encoded string passed to the script as the `inputs` variable.
-    /// `site-packages-path` is an optional host-path to a directory of
-    ///   pre-installed pure-Python packages to add to sys.path.
-    ///
-    /// Returns the JSON-encoded value of the script's `outputs` variable.
-    eval-python: func(
-        script: string,
-        input: string,
-        site-packages-path: option<string>,
-    ) -> result<string, string>;
 }
 
 // ── Exported interface ────────────────────────────────────────────────────────
@@ -234,8 +179,6 @@ world backend-action {
     import entity-ops;
     import system-ops;
     import secrets;
-    import model-ops;
-    import python-ops;
     import logger;
     export runner;
 }

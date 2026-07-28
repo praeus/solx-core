@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "solx-builtin-actions",
+    "solx-custom-actions-lib",
+]
+resolver = "2"

@@ -51,17 +51,6 @@ pub trait DocManager: Send + Sync {
     async fn search(&self, query: SearchQuery) -> Result<SearchResults>;
 }
 
-/// Full-text + faceted search over documents (and eventually actions).
-///
-/// Extracted as a separate trait so it can be mocked in tests and swapped
-/// independently of the document store backend.
-pub trait SearchManager: Send + Sync {
-    fn search(&self, query: &SearchQuery) -> Result<SearchResults>;
-    fn index_document(&self, doc: &Document) -> Result<()>;
-    fn remove_document(&self, name_raw: &str) -> Result<()>;
-    fn commit(&self) -> Result<()>;
-}
-
 /// Action store: CRUD + execution (wasm/web/command, with oauth for web).
 #[async_trait]
 pub trait ActionManager: Send + Sync {

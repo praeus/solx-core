@@ -87,6 +87,10 @@ enum Commands {
         path: Option<String>,
         #[arg(long = "type")]
         type_ref: Option<String>,
+        /// Restrict to documents that link to this target (its full
+        /// reference, e.g. as returned by `solx get doc`).
+        #[arg(long = "linked-to")]
+        linked_to: Option<String>,
         #[arg(long)]
         limit: Option<usize>,
         #[arg(long)]
@@ -107,6 +111,12 @@ enum Commands {
     ListPackages,
     /// Emit a JSON value (handy as a pipeline source in scripts).
     Json { value: String },
+    /// Generate a base64-encoded random key (for secrets encryption).
+    Random {
+        /// Number of random bytes (default 32, for AES-256).
+        #[arg(default_value = "32")]
+        bytes: usize,
+    },
 }
 
 /// The wired-together local backend. All fields are `Arc`, so cloning `App`
@@ -193,9 +203,10 @@ async fn run_command(app: &Arc<App>, command: Commands, piped: Option<Value>) ->
             query,
             path,
             type_ref,
+            linked_to,
             limit,
             offset,
-        } => handle_search(app, query, path, type_ref, limit, offset).await,
+        } => handle_search(app, query, path, type_ref, linked_to, limit, offset).await,
         Commands::Script { expr, file } => handle_script(app, expr, file).await,
         Commands::InstallPackage { path } => {
             let runner = AppRunner { app: app.clone() };
@@ -215,6 +226,12 @@ async fn run_command(app: &Arc<App>, command: Commands, piped: Option<Value>) ->
             &app.config,
         ))?),
         Commands::Json { value } => serde_json::from_str(&value).context("parse json value"),
+        Commands::Random { bytes } => {
+            use rand::RngCore;
+            let mut buf = vec![0u8; bytes];
+            rand::thread_rng().fill_bytes(&mut buf);
+            Ok(serde_json::json!(base64::engine::general_purpose::STANDARD.encode(&buf)))
+        }
     }
 }
 
@@ -364,6 +381,7 @@ async fn handle_search(
     query: String,
     path: Option<String>,
     type_ref: Option<String>,
+    linked_to: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
 ) -> Result<Value> {
@@ -371,7 +389,7 @@ async fn handle_search(
         q: Some(query).filter(|s| !s.is_empty()),
         path_prefix: path,
         type_ref,
-        groups: Vec::new(),
+        linked_to,
         limit,
         offset,
     };

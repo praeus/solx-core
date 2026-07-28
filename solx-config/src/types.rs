@@ -2,20 +2,7 @@
 //! `serde_json::Value` so unknown fields survive; this struct is only used to
 //! read a convenient typed snapshot.
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
-
-/// A shell-command action allowlist entry. A `Command` action's `fn_name` must
-/// resolve to one of these keys or execution is refused.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommandActionDef {
-    pub command: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-}
 
 /// A record of an installed package.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,12 +44,6 @@ pub struct SolxConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub types_db: Option<String>,
 
-    /// Shell-command allowlist for `Command` actions.
-    #[serde(default)]
-    pub command_actions: HashMap<String, CommandActionDef>,
-    /// URL-prefix allowlist for `Webhook` actions. Empty ⇒ all allowed.
-    #[serde(default)]
-    pub allowed_webhook_base_urls: Vec<String>,
     /// Installed package registry.
     #[serde(default)]
     pub installed_packages: Vec<InstalledPackage>,

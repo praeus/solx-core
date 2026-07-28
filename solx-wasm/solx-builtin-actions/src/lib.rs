@@ -24,14 +24,10 @@
 //! | `entity_new_model` … `entity_list_models`       | `entity-ops` | Model CRUD              |
 //! | `entity_new_permission` … `entity_list_permissions` | `entity-ops` | Permission CRUD     |
 //! | `entity_new_schedule` … `entity_list_schedules` | `entity-ops` | Schedule CRUD           |
-//! | `entity_new_knowledge_base` / `entity_new_catalog` … | `entity-ops` | KnowledgeBase CRUD |
 //! | `entity_new_link` … `entity_list_links`              | `entity-ops` | Link CRUD                |
 //! | `entity_new_action_link` … `entity_list_action_links` | `entity-ops` | ActionLink CRUD       |
 //! | `entity_new_document_link` … `entity_list_document_links` | `entity-ops` | DocumentLink CRUD |
 //! | `entity_assign_model_role`                          | `entity-ops` | Assign/clear model for a role |
-//! | `model_chat`                           | `model-ops`     | Multi-turn model chat                |
-//! | `model_generate`                       | `model-ops`     | Single-turn text generation          |
-//! | `model_list`                           | `model-ops`     | List registered models               |
 //! | `file_read`                            | `system-ops`    | Read file contents                   |
 //! | `file_write`                           | `system-ops`    | Write file contents                  |
 //! | `dir_list`                             | `system-ops`    | List directory entries               |
@@ -42,7 +38,6 @@
 //! | `get_secret`                           | `secrets`       | Read a secret scoped to the caller   |
 //! | `set_secret`                           | `secrets`       | Write a secret scoped to the caller  |
 //! | `fetch_html`                           | `system-ops`    | Fetch page HTML by URL              |
-//! | `fetch_and_extract`                    | `system-ops`    | Fetch URL and extract in one step   |
 //!
 //! ### Browser-only actions (TypeScript-dispatched, NOT in this WASM bundle)
 //!
@@ -170,13 +165,6 @@ impl Guest for SolActions {
             "entity_delete_schedule" => entity_delete("Schedule", &params),
             "entity_list_schedules" => entity_list("Schedule", &params),
 
-            // ── Entity-ops: KnowledgeBase / Catalog (alias) ─────────────────
-            "entity_new_knowledge_base" | "entity_new_catalog" => entity_new("KnowledgeBase", &params),
-            "entity_get_knowledge_base" | "entity_get_catalog" => entity_get("KnowledgeBase", &params),
-            "entity_set_knowledge_base" | "entity_set_catalog" => entity_set("KnowledgeBase", &params),
-            "entity_delete_knowledge_base" | "entity_delete_catalog" => entity_delete("KnowledgeBase", &params),
-            "entity_list_knowledge_bases" | "entity_list_catalogs" => entity_list("KnowledgeBase", &params),
-
             // ── Entity-ops: Link ────────────────────────────────────────────
             "entity_new_link" => entity_new("Link", &params),
             "entity_get_link" => entity_get("Link", &params),
@@ -205,11 +193,6 @@ impl Guest for SolActions {
             "entity_set_model_role" => entity_set("ModelRole", &params),
             "entity_list_model_roles" => entity_list("ModelRole", &params),
 
-            // ── Model inference (model-ops) ──────────────────────────────────
-            "model_chat" => action_model_chat(&params),
-            "model_generate" => action_model_generate(&params),
-            "model_list" => action_model_list(),
-            
             // ── System operations ────────────────────────────────────────────
             "file_read" => action_file_read(&params),
             "file_write" => action_file_write(&params),
@@ -221,7 +204,6 @@ impl Guest for SolActions {
             "get_secret" => action_get_secret(&params),
             "set_secret" => action_set_secret(&params),
             "fetch_html" => action_fetch_html(&params),
-            "fetch_and_extract" => action_fetch_and_extract(&params),
 
             "" => Err(
                 "action-name is required for the sol-actions bundle (e.g. \"entity_new_document\")"
@@ -742,46 +724,6 @@ fn action_fetch_html(params: &str) -> Result<ActionResult, String> {
     )
 }
 
-/// Fetch HTML from a URL and run extraction in one host call.
-///
-/// Params:
-/// `{ "source_document_name": "doc", "url": "https://example.com", "knowledge_base_name": "kb", "selected_type_name": "RichTextDocument", "extraction_prompt": "focus on the comments" }`
-fn action_fetch_and_extract(params: &str) -> Result<ActionResult, String> {
-    use sol::actions::logger;
-    use sol::actions::system_ops;
-
-    let v = parse_params(params)?;
-    let source_document_name = require_str(&v, "source_document_name")?;
-    let url = require_str(&v, "url")?;
-    let knowledge_base_name = v
-        .get("knowledge_base_name")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let selected_type_name = v
-        .get("selected_type_name")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let extraction_prompt = v
-        .get("extraction_prompt")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-
-    logger::log(&format!(
-        "[sol-actions] fetch_and_extract  source_document_name={source_document_name} url={url}"
-    ));
-
-    let result = system_ops::fetch_and_extract(
-        source_document_name,
-        url,
-        knowledge_base_name.as_deref(),
-        selected_type_name.as_deref(),
-        extraction_prompt.as_deref(),
-    )?;
-    let parsed: Value = serde_json::from_str(&result).unwrap_or(Value::String(result));
-
-    ok_result("Fetched and extracted URL", Some(parsed))
-}
-
 /// Create or update an Artifact from uploaded file bytes (base64 string).
 ///
 /// Params:
@@ -902,71 +844,6 @@ fn action_document_attach_artifact(params: &str) -> Result<ActionResult, String>
     )
 }
 
-// ── Model inference actions ───────────────────────────────────────────────────
-
-/// Send a chat completion to a language model.
-///
-/// Params: `{ "model_name": "ministral-3b", "messages": [{"role": "user", "content": "Hello"}] }`
-fn action_model_chat(params: &str) -> Result<ActionResult, String> {
-    use sol::actions::logger;
-    use sol::actions::model_ops;
-
-    let v = parse_params(params)?;
-    let model_name = require_str(&v, "model_name")
-        .or_else(|_| require_str(&v, "model"))
-        .unwrap_or("instructor");
-    let messages = v
-        .get("messages")
-        .ok_or("missing required field: messages")?;
-    let messages_str = messages.to_string();
-
-    logger::log(&format!("[sol-actions] model_chat  model={model_name}"));
-
-    let response = model_ops::model_chat(model_name, &messages_str)?;
-    let response_val: Value =
-        serde_json::from_str(&response).unwrap_or(Value::String(response));
-
-    ok_result(
-        format!("Chat completed with model '{model_name}'"),
-        Some(response_val),
-    )
-}
-
-/// Single-turn text generation using a language model.
-///
-/// Params: `{ "model_name": "ministral-3b", "prompt": "Once upon a time" }`
-fn action_model_generate(params: &str) -> Result<ActionResult, String> {
-    use sol::actions::logger;
-    use sol::actions::model_ops;
-
-    let v = parse_params(params)?;
-    // Accept "model" as an alias; fall back to "instructor" if neither is present
-    // so that planner omissions degrade gracefully rather than hard-failing.
-    let model_name = require_str(&v, "model_name")
-        .or_else(|_| require_str(&v, "model"))
-        .unwrap_or("instructor");
-    let prompt = require_str(&v, "prompt")?;
-
-    logger::log(&format!("[sol-actions] model_generate  model={model_name}"));
-
-    let text = model_ops::model_generate(model_name, prompt)?;
-
-    ok_result(
-        format!("Generated text with model '{model_name}'"),
-        Some(Value::String(text)),
-    )
-}
-
-/// List registered sol Model entity names.
-fn action_model_list() -> Result<ActionResult, String> {
-    use sol::actions::model_ops;
-
-    let json = model_ops::model_list()?;
-    let val: Value = serde_json::from_str(&json).unwrap_or(Value::Array(vec![]));
-
-    ok_result("Listed available models", Some(val))
-}
-
 // ── Unit tests (native target only) ──────────────────────────────────────────
 //
 // The WIT-generated host-import stubs in `sol::actions::*` are only valid
@@ -1065,15 +942,9 @@ mod tests {
             "entity_delete_permission", "entity_list_permissions",
             "entity_new_schedule", "entity_get_schedule", "entity_set_schedule",
             "entity_delete_schedule", "entity_list_schedules",
-            "entity_new_knowledge_base", "entity_new_catalog",
-            "entity_get_knowledge_base", "entity_get_catalog",
-            "entity_set_knowledge_base", "entity_set_catalog",
-            "entity_delete_knowledge_base", "entity_delete_catalog",
-            "entity_list_knowledge_bases", "entity_list_catalogs",
-            "model_chat", "model_generate", "model_list",
             "file_read", "file_write", "dir_list", "file_copy", "dir_copy", "get_env", "set_env",
             "get_secret", "set_secret",
-            "fetch_html", "fetch_and_extract",
+            "fetch_html",
         ];
 
         // Verify none of the known names is the empty string (which would hit the
@@ -1103,7 +974,6 @@ mod tests {
             "new_document", "create_document", "get_field", "set_field",
             "document_attach_artifact",
             "entity_new_document", "entity_get_document",
-            "model_chat", "model_generate", "model_list",
             "file_read", "file_write", "dir_list",
         ]
         .into_iter()

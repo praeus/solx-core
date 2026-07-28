@@ -20,7 +20,7 @@ use fs2::FileExt;
 use serde_json::{Map, Value};
 use solx_surface::error::{Result, SolxError};
 
-pub use types::{CommandActionDef, InstalledPackage, SolxConfig};
+pub use types::{InstalledPackage, SolxConfig};
 
 const CONFIG_FILE: &str = "solx-config.json";
 

@@ -2,12 +2,15 @@
 //!
 //! Actions are organized by `path` + `name` (unique together) and reference
 //! their parameter/result types by full path string. Execution dispatches by
-//! `action_type`: `Command` (config allowlist) and `Webhook` (HTTP, URL
-//! allowlist) are implemented here. WASM components and full OAuth loopback are
-//! deferred to a later iteration.
+//! `action_type`: `Command` (shell), `Webhook` (HTTP), `Internal` (native
+//! handlers like OAuth loopback), and `Wasm` (deferred to a later iteration).
 
 mod db;
 mod exec;
+pub mod internal;
+pub mod oauth_loopback;
+pub mod secrets;
+pub mod webhook_auth;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -81,6 +84,7 @@ fn action_type_to_str(t: Option<ActionType>) -> String {
         Some(ActionType::Wasm) => "wasm",
         Some(ActionType::Webhook) => "webhook",
         Some(ActionType::Command) => "command",
+        Some(ActionType::Internal) => "internal",
         None => "",
     }
     .to_string()
@@ -91,6 +95,7 @@ fn action_type_from_str(s: &str) -> Option<ActionType> {
         "wasm" => Some(ActionType::Wasm),
         "webhook" => Some(ActionType::Webhook),
         "command" => Some(ActionType::Command),
+        "internal" => Some(ActionType::Internal),
         _ => None,
     }
 }
@@ -336,7 +341,7 @@ impl ActionManager for LocalActionManager {
         let result = match action.action_type {
             Some(ActionType::Command) => {
                 let fn_name = action.fn_name.as_deref().ok_or_else(|| {
-                    SolxError::Exec("command action has no fn_name (allowlist key)".into())
+                    SolxError::Exec("command action has no fn_name (the command to run)".into())
                 })?;
                 exec::run_command(&self.config, fn_name, &action.action_config, &params)?
             }
@@ -344,7 +349,15 @@ impl ActionManager for LocalActionManager {
                 let url = action.fn_name.as_deref().ok_or_else(|| {
                     SolxError::Exec("webhook action has no fn_name (URL)".into())
                 })?;
-                exec::run_webhook(&self.config, url, &action.action_config, &params).await?
+                exec::run_webhook(self, &action.path, &action.name, url, &action.action_config, &params).await?
+            }
+            Some(ActionType::Internal) => {
+                let fn_name = action.fn_name.as_deref().ok_or_else(|| {
+                    SolxError::Exec("internal action has no fn_name (operation)".into())
+                })?;
+                internal::run_internal(fn_name, &params)
+                    .await
+                    .map_err(|e| SolxError::Exec(e))?
             }
             Some(ActionType::Wasm) => return Err(exec::unsupported("WASM")),
             None => {
@@ -401,23 +414,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exec_command_via_allowlist() {
-        let (_d, cfg, m) = setup().await;
-        // Register the command in the allowlist. Echo a bare number so the
-        // output is valid JSON on both cmd.exe and sh without quote handling.
-        let key = "echo_num";
-        cfg.mutate(|obj| {
-            obj.insert(
-                "command_actions".into(),
-                serde_json::json!({ key: { "command": "echo 42" } }),
-            );
-            Ok(())
-        })
-        .unwrap();
-
+    async fn exec_command_runs_fn_name_directly() {
+        let (_d, _c, m) = setup().await;
+        // fn_name is the literal command to run — no config registration
+        // needed. Echo a bare number so the output is valid JSON on both
+        // cmd.exe and sh without quote handling.
         let input = ActionInput {
             action_type: Some(ActionType::Command),
-            fn_name: Some(key.into()),
+            fn_name: Some("echo 42".into()),
             ..Default::default()
         };
         m.post("/tools", "echo", input).await.unwrap();

@@ -50,7 +50,8 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use sol_core::db::DbManager;
+use solx_surface::entities::ActionInput;
+use solx_surface::managers::ActionManager;
 
 // ── Cache ────────────────────────────────────────────────────────────────────
 
@@ -144,10 +145,12 @@ struct RefreshOutcome {
 /// the `RotatedRefreshToken` field on [`RefreshOutcome`] for callers
 /// that want to do their own persistence.
 pub async fn resolve_auth(
-    db: &dyn DbManager,
-    action_name: &str,
+    actions: &dyn ActionManager,
+    path: &str,
+    name: &str,
     action_config: &Value,
 ) -> Result<Option<String>, String> {
+    let action_name = name;
     let Some(auth) = action_config.get("auth") else {
         return Ok(None);
     };
@@ -177,7 +180,7 @@ pub async fn resolve_auth(
             Ok(Some(format!("Bearer {token}")))
         }
         "oauth_refresh" => {
-            let outcome = exchange_refresh_token(db, action_name, action_config, auth).await?;
+            let outcome = exchange_refresh_token(actions, path, name, action_config, auth).await?;
             // Touch the rotated_refresh_token field so the compiler
             // doesn't flag it as unused — the persistence side-effect
             // inside `exchange_refresh_token` already wrote the new
@@ -411,8 +414,9 @@ impl RefreshStorage {
 }
 
 async fn exchange_refresh_token(
-    db: &dyn DbManager,
-    action_name: &str,
+    actions: &dyn ActionManager,
+    path: &str,
+    name: &str,
     action_config: &Value,
     auth: &Value,
 ) -> Result<RefreshOutcome, String> {
@@ -458,10 +462,10 @@ async fn exchange_refresh_token(
         .unwrap_or(true);
 
     if let (Some(ref new_rt), true) = (rotated.as_ref(), persistence_enabled) {
-        persist_rotated_refresh_token(db, action_name, action_config, auth, new_rt).await;
+        persist_rotated_refresh_token(actions, path, name, action_config, auth, new_rt).await;
     } else if let Some(ref new_rt) = rotated {
         tracing::info!(
-            "received rotated refresh_token for action '{action_name}' but \
+            "received rotated refresh_token for action '{name}' but \
              persistence is disabled (auth.persist_rotated_refresh=false); \
              new token is NOT persisted"
         );
@@ -480,8 +484,9 @@ async fn exchange_refresh_token(
 /// has already been issued, so the most we can do is tell the user
 /// "the next refresh may fail; rotate manually".
 async fn persist_rotated_refresh_token(
-    db: &dyn DbManager,
-    action_name: &str,
+    actions: &dyn ActionManager,
+    path: &str,
+    name: &str,
     action_config: &Value,
     auth: &Value,
     new_refresh_token: &str,
@@ -492,15 +497,15 @@ async fn persist_rotated_refresh_token(
             // Patch the action's action_config.auth.refresh_token in place.
             // We merge with the existing field set so other auth.* fields
             // (client_id, scope, etc.) survive.
-            match db.get_action(action_name).await {
-                Ok(mut action) => {
+            match actions.get(path, name).await {
+                Ok(action) => {
                     let mut new_cfg = action
                         .action_config
                         .clone()
                         .unwrap_or_else(|| serde_json::json!({}));
                     if !new_cfg.is_object() {
                         tracing::warn!(
-                            "action '{action_name}' action_config is not an object; \
+                            "action '{name}' action_config is not an object; \
                              cannot persist rotated refresh_token"
                         );
                         return;
@@ -517,44 +522,19 @@ async fn persist_rotated_refresh_token(
                             serde_json::Value::String(new_refresh_token.to_string()),
                         );
                     }
-                    use sol_core::entities::ActionInput;
                     let input = ActionInput {
-                        name: action.name.clone(),
-                        caption: None,
-                        description: None,
-                        capabilities: None,
-                        parameters_in: None,
-                        parameters_out: None,
-                        phrases: None,
-                        category: None,
-                        parameter_type_name: None,
-                        result_type_name: None,
-                        artifact_names: None,
-                        bin_name: None,
-                        fn_name: None,
-                        permission_name: None,
-                        allowed_permission_names: None,
-                        trusted: None,
-                        action_type: None,
                         action_config: Some(new_cfg),
+                        ..Default::default()
                     };
-                    if let Err(e) = db.update_action(&action.name, &input).await {
+                    if let Err(e) = actions.post(path, name, input).await {
                         tracing::warn!(
-                            "failed to persist rotated refresh_token for action '{action_name}': {e}"
+                            "failed to persist rotated refresh_token for action '{name}': {e}"
                         );
-                    } else {
-                        // Reflect locally for the rest of this request (no
-                        // impact: resolve_auth has already cached the
-                        // access token; the next call will read the new
-                        // refresh_token from DB).
-                        action.action_config = action
-                            .action_config
-                            .map(|_| serde_json::json!({}));
                     }
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "failed to load action '{action_name}' to persist rotated refresh_token: {e}"
+                        "failed to load action '{name}' to persist rotated refresh_token: {e}"
                     );
                 }
             }
@@ -577,11 +557,11 @@ async fn persist_rotated_refresh_token(
                 );
             }
         }
-        RefreshStorage::Secret { name, key } => {
-            if let Err(e) = crate::secrets::set_secret(&name, new_refresh_token, &key) {
+        RefreshStorage::Secret { name: secret_name, key } => {
+            if let Err(e) = crate::secrets::set_secret(&secret_name, new_refresh_token, &key) {
                 tracing::warn!(
-                    "failed to persist rotated refresh_token to secret '{name}' \
-                     for action '{action_name}': {e}"
+                    "failed to persist rotated refresh_token to secret '{secret_name}' \
+                     for action '{name}': {e}"
                 );
             }
         }
@@ -685,17 +665,41 @@ fn urlencoding(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use solx_surface::entities::{Action, ActionExecResult};
+    use solx_surface::query::{ListOptions, Page};
 
     fn clear() {
         cache().lock().unwrap().clear();
     }
 
-    /// None of these tests need a real DbManager; the bearer/auth-block
-    /// tests never reach `db`. We use the shared in-memory `MockDbManager`
-    /// so the signature compiles and persistence is exercised by dedicated
-    /// tests below.
-    fn mock_db() -> std::sync::Arc<dyn DbManager> {
-        std::sync::Arc::new(sol_core::db::mock::MockDbManager::new())
+    /// Stub ActionManager. None of the bearer/auth-block tests reach the
+    /// `actions` parameter — they only exercise the inline/keyring/cache
+    /// paths. If a test ever does reach it, the panic tells us the test
+    /// needs a real mock.
+    struct StubActionManager;
+
+    #[async_trait]
+    impl ActionManager for StubActionManager {
+        async fn post(&self, _path: &str, _name: &str, _input: ActionInput) -> solx_surface::error::Result<Action> {
+            panic!("stub ActionManager::post should not be called by these tests")
+        }
+        async fn get(&self, _path: &str, _name: &str) -> solx_surface::error::Result<Action> {
+            panic!("stub ActionManager::get should not be called by these tests")
+        }
+        async fn delete(&self, _path: &str, _name: &str) -> solx_surface::error::Result<()> {
+            panic!("stub ActionManager::delete should not be called by these tests")
+        }
+        async fn list(&self, _opts: ListOptions) -> solx_surface::error::Result<Page<Action>> {
+            panic!("stub ActionManager::list should not be called by these tests")
+        }
+        async fn exec(&self, _path: &str, _name: &str, _params: Value) -> solx_surface::error::Result<ActionExecResult> {
+            panic!("stub ActionManager::exec should not be called by these tests")
+        }
+    }
+
+    fn stub_actions() -> StubActionManager {
+        StubActionManager
     }
 
     #[serial_test::serial]
@@ -703,7 +707,7 @@ mod tests {
     async fn no_auth_block_returns_none() {
         clear();
         let cfg = json!({});
-        let out = resolve_auth(mock_db().as_ref(), "a", &cfg).await.unwrap();
+        let out = resolve_auth(&stub_actions(), "/test", "a", &cfg).await.unwrap();
         assert!(out.is_none());
     }
 
@@ -712,7 +716,7 @@ mod tests {
     async fn bearer_returns_static_token() {
         clear();
         let cfg = json!({ "auth": { "type": "bearer", "token": "abc123" } });
-        let out = resolve_auth(mock_db().as_ref(), "a", &cfg).await.unwrap().unwrap();
+        let out = resolve_auth(&stub_actions(), "/test", "a", &cfg).await.unwrap().unwrap();
         assert_eq!(out, "Bearer abc123");
     }
 
@@ -721,7 +725,7 @@ mod tests {
     async fn bearer_missing_token_errors() {
         clear();
         let cfg = json!({ "auth": { "type": "bearer" } });
-        let err = resolve_auth(mock_db().as_ref(), "bearer_missing_action", &cfg).await.unwrap_err();
+        let err = resolve_auth(&stub_actions(), "/test", "bearer_missing_action", &cfg).await.unwrap_err();
         assert!(err.contains("requires field 'token'"), "{err}");
     }
 
@@ -730,7 +734,7 @@ mod tests {
     async fn unknown_auth_type_errors_helpfully() {
         clear();
         let cfg = json!({ "auth": { "type": "magic_link" } });
-        let err = resolve_auth(mock_db().as_ref(), "a", &cfg).await.unwrap_err();
+        let err = resolve_auth(&stub_actions(), "/test", "a", &cfg).await.unwrap_err();
         assert!(err.contains("unsupported action_config.auth.type 'magic_link'"), "{err}");
         assert!(
             err.contains("'bearer'"),
@@ -743,7 +747,7 @@ mod tests {
     async fn auth_block_missing_type_errors() {
         clear();
         let cfg = json!({ "auth": { "token": "x" } });
-        let err = resolve_auth(mock_db().as_ref(), "a", &cfg).await.unwrap_err();
+        let err = resolve_auth(&stub_actions(), "/test", "a", &cfg).await.unwrap_err();
         assert!(err.contains("missing required field 'type'"), "{err}");
     }
 
@@ -752,11 +756,11 @@ mod tests {
     async fn cache_hit_avoids_second_call() {
         clear();
         let cfg = json!({ "auth": { "type": "bearer", "token": "abc123", "ttl_secs": 60 } });
-        let _ = resolve_auth(mock_db().as_ref(), "a", &cfg).await.unwrap();
+        let _ = resolve_auth(&stub_actions(), "/test", "a", &cfg).await.unwrap();
         // Second call should hit the cache and still return the same token
         // even if we mutate the config to make the bearer path fail.
         let mutated = json!({ "auth": { "type": "bearer" /* no token */ } });
-        let out = resolve_auth(mock_db().as_ref(), "a", &mutated).await.unwrap().unwrap();
+        let out = resolve_auth(&stub_actions(), "/test", "a", &mutated).await.unwrap().unwrap();
         assert_eq!(out, "Bearer abc123");
     }
 
@@ -766,8 +770,8 @@ mod tests {
         clear();
         let cfg_a = json!({ "auth": { "type": "bearer", "token": "for-a", "ttl_secs": 60 } });
         let cfg_b = json!({ "auth": { "type": "bearer", "token": "for-b", "ttl_secs": 60 } });
-        assert_eq!(resolve_auth(mock_db().as_ref(), "a", &cfg_a).await.unwrap().unwrap(), "Bearer for-a");
-        assert_eq!(resolve_auth(mock_db().as_ref(), "b", &cfg_b).await.unwrap().unwrap(), "Bearer for-b");
+        assert_eq!(resolve_auth(&stub_actions(), "/test", "a", &cfg_a).await.unwrap().unwrap(), "Bearer for-a");
+        assert_eq!(resolve_auth(&stub_actions(), "/test", "b", &cfg_b).await.unwrap().unwrap(), "Bearer for-b");
     }
 
     #[serial_test::serial]
@@ -775,13 +779,13 @@ mod tests {
     async fn clear_auth_cache_forces_refresh() {
         clear();
         let cfg = json!({ "auth": { "type": "bearer", "token": "first" } });
-        assert_eq!(resolve_auth(mock_db().as_ref(), "a", &cfg).await.unwrap().unwrap(), "Bearer first");
+        assert_eq!(resolve_auth(&stub_actions(), "/test", "a", &cfg).await.unwrap().unwrap(), "Bearer first");
 
         // Mutate config (e.g. user rotated the bearer); clear cache; verify
         // the new token is returned.
         let cfg2 = json!({ "auth": { "type": "bearer", "token": "second" } });
         clear_auth_cache("a");
-        assert_eq!(resolve_auth(mock_db().as_ref(), "a", &cfg2).await.unwrap().unwrap(), "Bearer second");
+        assert_eq!(resolve_auth(&stub_actions(), "/test", "a", &cfg2).await.unwrap().unwrap(), "Bearer second");
     }
 
     #[serial_test::serial]
@@ -811,7 +815,7 @@ mod tests {
                 "client_secret": "csec"
             }
         });
-        let out = resolve_auth(mock_db().as_ref(), "a", &cfg).await.unwrap();
+        let out = resolve_auth(&stub_actions(), "/test", "a", &cfg).await.unwrap();
         assert!(out.is_none(), "oauth_authorization_code must not inject a Bearer header; got {out:?}");
     }
 
@@ -829,7 +833,7 @@ mod tests {
                 "client_id": "cid"
             }
         });
-        let _ = resolve_auth(mock_db().as_ref(), "a", &cfg).await.unwrap();
+        let _ = resolve_auth(&stub_actions(), "/test", "a", &cfg).await.unwrap();
         // Cache should remain empty.
         assert!(cache_get("a").is_none(), "oauth_authorization_code must not write to the auth cache");
     }
@@ -858,7 +862,7 @@ mod tests {
                 "token": { "keyring_service": "sol", "keyring_account": "bearer-x" }
             }
         });
-        let out = resolve_auth(mock_db().as_ref(), "keyring_action", &cfg)
+        let out = resolve_auth(&stub_actions(), "/test", "keyring_action", &cfg)
             .await
             .unwrap()
             .unwrap();
@@ -889,7 +893,7 @@ mod tests {
                 "token": "inline-value"
             }
         });
-        let out = resolve_auth(mock_db().as_ref(), "inline_wins_action", &cfg)
+        let out = resolve_auth(&stub_actions(), "/test", "inline_wins_action", &cfg)
             .await
             .unwrap()
             .unwrap();

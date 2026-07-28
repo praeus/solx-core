@@ -75,9 +75,11 @@ pub struct SearchQuery {
     /// Facet: restrict to a type reference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_ref: Option<String>,
-    /// Facet: any of these type groups.
-    #[serde(default)]
-    pub groups: Vec<String>,
+    /// Facet: restrict to documents whose contents contain a `DocRef` to this
+    /// target, given as the target's full reference (`/path/name`, as
+    /// returned by `solx get doc`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -144,10 +144,13 @@ pub struct DocumentInput {
 pub enum ActionType {
     /// A built-in WASM component function (`bin_name` = artifact, `fn_name` = export).
     Wasm,
-    /// An HTTP call (`fn_name` = URL), gated by the webhook allowlist.
+    /// An HTTP call — `fn_name` is the literal URL to POST to.
     Webhook,
-    /// A shell command (`fn_name` = key into the config command allowlist).
+    /// A shell command — `fn_name` is the literal command to execute.
     Command,
+    /// Internal dispatcher handler — `fn_name` selects the operation
+    /// (`oauth_start`, `oauth_await`, `oauth_stop`, etc.).
+    Internal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
