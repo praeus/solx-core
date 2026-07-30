@@ -8,7 +8,9 @@ members = [
     "solx-actions",
     "solx-scripts",
     "solx-packages",
+    "solx-manager",
     "solx-cli",
+    "solx-mcp",
 ]
 resolver = "2"
 
@@ -50,3 +52,4 @@ solx-docs     = { path = "solx-docs" }
 solx-actions  = { path = "solx-actions" }
 solx-scripts  = { path = "solx-scripts" }
 solx-packages = { path = "solx-packages" }
+solx-manager  = { path = "solx-manager" }

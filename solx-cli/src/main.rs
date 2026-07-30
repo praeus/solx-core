@@ -15,17 +15,13 @@ use base64::Engine as _;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::{Map, Value};
 
-use solx_actions::LocalActionManager;
-use solx_config::ConfigService;
-use solx_docs::LocalDocManager;
-use solx_files::LocalFileStore;
+use solx_manager::App;
 use solx_scripts::{execute_script, CommandRunner};
 use solx_surface::entities::{ActionInput, DocumentInput, TypeInput};
 use solx_surface::error::SolxError;
-use solx_surface::managers::{ActionManager, DocManager, FileStore, TypeManager};
+use solx_surface::managers::Solx;
 use solx_surface::path::split_ref;
 use solx_surface::query::{ListOptions, SearchQuery};
-use solx_types::LocalTypeManager;
 
 #[derive(Parser)]
 #[command(name = "solx", about = "Structured documents and extensible actions via CLI", version)]
@@ -119,52 +115,6 @@ enum Commands {
     },
 }
 
-/// The wired-together local backend. All fields are `Arc`, so cloning `App`
-/// shares the same underlying managers.
-#[derive(Clone)]
-struct App {
-    config: Arc<ConfigService>,
-    types: Arc<dyn TypeManager>,
-    docs: Arc<dyn DocManager>,
-    actions: Arc<dyn ActionManager>,
-    files: Arc<dyn FileStore>,
-}
-
-impl App {
-    async fn build() -> Result<Arc<Self>> {
-        let config = Arc::new(ConfigService::open().context("open config")?);
-
-        let types: Arc<dyn TypeManager> = Arc::new(
-            LocalTypeManager::open(&config.types_db_path())
-                .await
-                .context("open types db")?,
-        );
-        let docs: Arc<dyn DocManager> = Arc::new(
-            LocalDocManager::open(
-                &config.docs_db_path(),
-                &config.search_index_dir().join("docs"),
-                types.clone(),
-            )
-            .await
-            .context("open docs db")?,
-        );
-        let actions: Arc<dyn ActionManager> = Arc::new(
-            LocalActionManager::open(&config.actions_db_path(), config.clone(), types.clone())
-                .await
-                .context("open actions db")?,
-        );
-        let files: Arc<dyn FileStore> = Arc::new(LocalFileStore::from_config(&config));
-
-        Ok(Arc::new(App {
-            config,
-            types,
-            docs,
-            actions,
-            files,
-        }))
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -248,7 +198,7 @@ async fn handle_post(
     if let Entity::File = entity {
         let local = file.ok_or_else(|| anyhow!("post file requires --file <local path>"))?;
         let bytes = std::fs::read(&local).with_context(|| format!("read {local}"))?;
-        let stored = app.files.put(&reference, bytes).await.map_err(to_anyhow)?;
+        let stored = app.files().put(&reference, bytes).await.map_err(to_anyhow)?;
         return Ok(serde_json::json!({ "rel_path": stored }));
     }
 
@@ -264,19 +214,19 @@ async fn handle_post(
             let input: DocumentInput =
                 serde_json::from_value(body).context("parse document input")?;
             Ok(serde_json::to_value(
-                app.docs.post(&path, &name, input).await.map_err(to_anyhow)?,
+                app.docs().post(&path, &name, input).await.map_err(to_anyhow)?,
             )?)
         }
         Entity::Action => {
             let input: ActionInput = serde_json::from_value(body).context("parse action input")?;
             Ok(serde_json::to_value(
-                app.actions.post(&path, &name, input).await.map_err(to_anyhow)?,
+                app.actions().post(&path, &name, input).await.map_err(to_anyhow)?,
             )?)
         }
         Entity::Type => {
             let input: TypeInput = serde_json::from_value(body).context("parse type input")?;
             Ok(serde_json::to_value(
-                app.types.post(&path, &name, input).await.map_err(to_anyhow)?,
+                app.types().post(&path, &name, input).await.map_err(to_anyhow)?,
             )?)
         }
         Entity::File => unreachable!(),
@@ -285,7 +235,7 @@ async fn handle_post(
 
 async fn handle_get(app: &Arc<App>, entity: Entity, reference: String) -> Result<Value> {
     if let Entity::File = entity {
-        let bytes = app.files.get(&reference).await.map_err(to_anyhow)?;
+        let bytes = app.files().get(&reference).await.map_err(to_anyhow)?;
         let (content, encoding) = match String::from_utf8(bytes.clone()) {
             Ok(s) => (s, "utf8"),
             Err(_) => (
@@ -302,13 +252,13 @@ async fn handle_get(app: &Arc<App>, entity: Entity, reference: String) -> Result
     let (path, name) = split_ref(&reference).map_err(to_anyhow)?;
     match entity {
         Entity::Doc => Ok(serde_json::to_value(
-            app.docs.get(&path, &name).await.map_err(to_anyhow)?,
+            app.docs().get(&path, &name).await.map_err(to_anyhow)?,
         )?),
         Entity::Action => Ok(serde_json::to_value(
-            app.actions.get(&path, &name).await.map_err(to_anyhow)?,
+            app.actions().get(&path, &name).await.map_err(to_anyhow)?,
         )?),
         Entity::Type => Ok(serde_json::to_value(
-            app.types.get(&path, &name).await.map_err(to_anyhow)?,
+            app.types().get(&path, &name).await.map_err(to_anyhow)?,
         )?),
         Entity::File => unreachable!(),
     }
@@ -316,13 +266,13 @@ async fn handle_get(app: &Arc<App>, entity: Entity, reference: String) -> Result
 
 async fn handle_delete(app: &Arc<App>, entity: Entity, reference: String) -> Result<Value> {
     if let Entity::File = entity {
-        app.files.delete(&reference).await.map_err(to_anyhow)?;
+        app.files().delete(&reference).await.map_err(to_anyhow)?;
     } else {
         let (path, name) = split_ref(&reference).map_err(to_anyhow)?;
         match entity {
-            Entity::Doc => app.docs.delete(&path, &name).await.map_err(to_anyhow)?,
-            Entity::Action => app.actions.delete(&path, &name).await.map_err(to_anyhow)?,
-            Entity::Type => app.types.delete(&path, &name).await.map_err(to_anyhow)?,
+            Entity::Doc => app.docs().delete(&path, &name).await.map_err(to_anyhow)?,
+            Entity::Action => app.actions().delete(&path, &name).await.map_err(to_anyhow)?,
+            Entity::Type => app.types().delete(&path, &name).await.map_err(to_anyhow)?,
             Entity::File => unreachable!(),
         }
     }
@@ -341,7 +291,7 @@ async fn handle_exec(
     };
     let (path, name) = split_ref(&reference).map_err(to_anyhow)?;
     Ok(serde_json::to_value(
-        app.actions.exec(&path, &name, params).await.map_err(to_anyhow)?,
+        app.actions().exec(&path, &name, params).await.map_err(to_anyhow)?,
     )?)
 }
 
@@ -360,17 +310,17 @@ async fn handle_list(
     };
     match entity {
         Entity::Doc => Ok(serde_json::to_value(
-            app.docs.list(opts).await.map_err(to_anyhow)?,
+            app.docs().list(opts).await.map_err(to_anyhow)?,
         )?),
         Entity::Action => Ok(serde_json::to_value(
-            app.actions.list(opts).await.map_err(to_anyhow)?,
+            app.actions().list(opts).await.map_err(to_anyhow)?,
         )?),
         Entity::Type => Ok(serde_json::to_value(
-            app.types.list(opts).await.map_err(to_anyhow)?,
+            app.types().list(opts).await.map_err(to_anyhow)?,
         )?),
         Entity::File => {
             let prefix = opts.path_prefix.unwrap_or_default();
-            let files = app.files.list(&prefix).await.map_err(to_anyhow)?;
+            let files = app.files().list(&prefix).await.map_err(to_anyhow)?;
             Ok(serde_json::json!({ "files": files }))
         }
     }
@@ -394,7 +344,7 @@ async fn handle_search(
         offset,
     };
     Ok(serde_json::to_value(
-        app.docs.search(q).await.map_err(to_anyhow)?,
+        app.docs().search(q).await.map_err(to_anyhow)?,
     )?)
 }
 

@@ -1,6 +1,6 @@
 # solx — Design, Structure & Progress
 
-_Last updated: 2026-07-27_
+_Last updated: 2026-07-29_
 
 This document describes the new `solx` system: why it exists, the architecture
 and key design decisions, and the current implementation status. It is the
@@ -73,7 +73,10 @@ solx-core/
   solx-actions/    action store (own DB) + execution
   solx-scripts/    shell pipeline language over a CommandRunner trait
   solx-packages/   package install/uninstall
+  solx-manager/    wires the local manager impls together (the App/Solx assembly)
   solx-cli/        the `solx` binary
+  solx-mcp/        MCP server exposing actions/docs/types/files as tools (stdio)
+solx-wasm/         sibling workspace: SDK for third-party custom WASM actions
 ```
 
 ### Dependency graph (acyclic)
@@ -87,7 +90,9 @@ solx-docs     →  solx-surface, solx-config          (+ TypeManager injected)
 solx-actions  →  solx-surface, solx-config          (+ TypeManager injected)
 solx-scripts  →  solx-surface
 solx-packages →  solx-surface, solx-config, solx-scripts
-solx-cli      →  all of the above
+solx-manager  →  solx-surface, solx-config, solx-types, solx-files, solx-docs, solx-actions
+solx-cli      →  solx-manager, solx-actions (constants), solx-scripts, solx-packages
+solx-mcp      →  solx-manager, solx-surface, solx-config, rmcp
 ```
 
 Note that `solx-docs` and `solx-actions` do **not** depend on the `solx-types`
@@ -149,9 +154,9 @@ run at once, it is designed for cross-process safety:
 - The write path edits the file as a raw `serde_json::Value`, so **unknown
   fields** written by other tools or newer versions survive.
 
-Config holds directory locations, the per-entity DB filenames, the
-`command_actions` allowlist (shell execution), the `allowed_webhook_base_urls`
-allowlist (web actions), and the installed-package registry.
+Config holds directory locations, the per-entity DB filenames, and the
+installed-package registry. There is currently **no allowlist for shell or
+webhook execution** — see §6 and §10's "Suggested next steps".
 
 ---
 
@@ -161,13 +166,32 @@ Actions are stored with their parameter/result type references, an
 `action_type`, and an `action_config`. On `exec`, parameters are validated
 against the parameter type (if declared), then dispatched:
 
-- **Command** — runs a shell command whose key is in the `command_actions`
-  allowlist; parameters are passed as JSON via stdin and the `SOLX_PARAMS` env
-  var; stdout is parsed as JSON (or returned as a string).
-- **Webhook** — HTTP POST to a URL permitted by `allowed_webhook_base_urls`,
-  with optional bearer-token / custom headers from `action_config`.
-
-Both are gated by config allowlists — the "whitelist" mechanism.
+- **Command** — `fn_name` is the literal shell command solx-core runs (via
+  `cmd /C` on Windows, `sh -c` elsewhere); parameters are passed as JSON on
+  **stdin only** (no env var — see §10's gotchas); stdout is parsed as JSON
+  (or returned as a string). A bare filename in `fn_name` is **not** resolved
+  against `action_config.cwd` by cmd.exe/sh — use an explicit `.\name.exe` /
+  `./name` prefix for a binary that lives in `cwd`.
+- **Webhook** — HTTP POST to `fn_name` (the URL), with optional bearer-token /
+  custom headers from `action_config`, plus
+  `oauth_refresh`/`oauth_service_account`/`oauth_authorization_code` flows.
+  There is no URL allowlist — any action posted to the DB can POST anywhere
+  (see §10).
+- **Internal** — native Rust dispatch, no shell/HTTP/WASM (`solx-actions/src/internal.rs`).
+  This is where the entire `/builtin` catalogue lives: entity CRUD
+  (`entity_post/get/delete/list_{document,type,action}`), document field ops,
+  full-text/faceted search, general-purpose file-store access, an
+  in-process environment store, HTML fetch, scoped secrets, and the OAuth
+  2.0 authorization-code loopback (see [`built-in-actions.md`](built-in-actions.md)
+  for the full reference).
+- **Wasm** — a *custom*, third-party component executed under wasmtime
+  (`solx-actions/src/wasm_host.rs`), sandboxed to `action-exec` (recurse
+  into any other action, including every built-in above) and `artifact-read`
+  (unrestricted file reads). There is no first-party/"trusted" WASM world
+  anymore — every built-in operation moved to `Internal` dispatch instead
+  (native dispatch has no sync/async host-function bridging and needs no
+  separate guest build/packaging step), so `Action.trusted` no longer
+  affects WASM execution.
 
 ---
 
@@ -230,38 +254,99 @@ Entities: `doc`, `action`, `type`, `file`.
 
 | Crate | Highlights | Tests |
 |-------|-----------|-------|
-| `solx-surface` | DTOs, error, wire types, path helpers, manager traits | path normalize / full_ref / split_ref |
+| `solx-surface` | DTOs, error, wire types, path helpers, manager traits, `Solx` facade | path normalize / full_ref / split_ref |
 | `solx-config` | cross-process RMW, mtime reload, package registry | unknown-field preservation, cross-instance reload, registry |
 | `solx-files` | put/get/delete/list, traversal rejection, conventional paths | roundtrip, traversal rejected |
-| `solx-types` | own DB, schema validation + enrichment, seed incl. `BlogPostWithComments` | seed, post/get/validate, list+delete, enrich |
+| `solx-types` | own DB, schema validation + enrichment, seed incl. `BlogPostWithComments` + `/builtin/types/*` param schemas | seed, post/get/validate, list+delete, enrich |
 | `solx-docs` | own DB, cross-DB type validation, Tantivy full-text + path facet | post/get/list/search/delete, invalid-contents rejection |
-| `solx-actions` | own DB, `Command` + `Webhook` execution with allowlists | CRUD, command exec via allowlist, wasm-unsupported |
+| `solx-actions` | own DB, `Command`/`Webhook`/`Internal`/`Wasm` execution; the entire `/builtin` catalogue (30 actions) is native `Internal` dispatch | CRUD, command exec, internal dispatch (entity CRUD/search/files/env/secrets/OAuth), wasm host trait impls |
 | `solx-scripts` | pipeline language over `CommandRunner` | assign+substitute, quote-aware tokenize |
 | `solx-packages` | install/uninstall via script runner + config registry | (exercised via CLI) |
-| `solx-cli` | wires local impls; `post/get/delete/exec/list/search/script` | end-to-end smoke test |
+| `solx-manager` | implements `Solx`; shared manager wiring for `solx-cli` and `solx-mcp` | (exercised via both consumers' tests) |
+| `solx-cli` | wires `solx-manager`; `post/get/delete/exec/list/search/script` | end-to-end smoke test + `examples/*.sh` |
+| `solx-mcp` | MCP server (stdio, `rmcp`); every action is a dynamic tool, no separate CRUD tool layer | in-process client/server integration test |
 
 An end-to-end CLI run verified: custom type → document validated against it →
 `list --path` → path-faceted `search` → action CRUD → file put/get/list → a
 `script` pipeline resolving `$d.type_ref` across a captured variable, and
-confirmed the three separate database files are created.
+confirmed the three separate database files are created. The
+`solx-cli/examples/*.sh` suite additionally exercises command/webhook/builtin/
+OAuth actions end-to-end against a real compiled binary.
 
 ### Deferred (flagged, not silently dropped)
 
-- **WASM action execution** — returns a clear "not implemented" error. Porting
-  the wasmtime component host and the built-in action ABI is a sizeable
-  follow-up.
-- **Full OAuth loopback** — webhook actions support bearer-token/header auth
-  from `action_config`, but the interactive RFC 8252 loopback flow is not yet
-  ported.
 - **Type-group facet in document search** — groups are stored on types; doc
   search currently facets on `path` and `type_ref` only.
-- **Client/server crates** — `solx-client` / `solx-server` are not built yet;
-  the trait seam is in place for them.
+- **Client/server crates** — `solx-client` / `solx-server` (HTTP) are not
+  built yet; the trait seam is in place for them. `solx-mcp` (stdio) exists
+  as an alternative surface for models specifically.
+- **`param_type_ref` schemas for custom actions** — only the built-in
+  catalogue's actions have real JSON-Schema `param_type_ref`s seeded; a
+  user-created action gets the permissive fallback in `solx-mcp`'s tool list
+  unless it sets its own.
+- **`result_type_ref`** — present on the `Action` entity but not enforced
+  anywhere; metadata only.
 
 ### Suggested next steps
 
-1. Aggregate `Solx` facade implementation in the CLI (or a small `solx-core`
-   assembly crate) to simplify wiring and the future server.
-2. WASM component host for built-in actions.
-3. `solx-server` (HTTP) + `solx-client` (proxy) once a transport is chosen.
-4. Optionally, an MCP surface exposing the same tools to models.
+1. ~~Aggregate `Solx` facade implementation~~ — done (`solx-manager`).
+2. ~~WASM component host~~ — done, then narrowed to custom-only actions once
+   the built-in catalogue moved to native `Internal` dispatch.
+3. ~~An MCP surface exposing the same tools to models~~ — done (`solx-mcp`).
+4. `solx-server` (HTTP) + `solx-client` (proxy) once a transport is chosen —
+   still open; `solx-manager`'s `Solx` trait is the seam for it.
+5. MCP Resources/Prompts (e.g. `solx://doc/{path}/{name}` URI templates) for
+   GUI/context-attachment MCP clients — `solx-mcp` is tools-only today.
+6. Real config-level allowlists for `Command`/`Webhook` actions — `exec.rs`
+   currently runs `fn_name` directly with no allowlist check. Deliberately
+   deferred rather than designed now, to avoid adding permission-system
+   complexity while solx-core's core surface is still being built out;
+   everything running through it today is trusted by construction
+   ("posted to the DB = trusted"). Recorded here so the gap isn't lost:
+   - **Package signing and verification at install time**, so
+     `install-package` can refuse a package whose signature doesn't check
+     out rather than trusting any local directory unconditionally.
+   - **A permissions module gated on caller identity** — flagged as
+     difficult/extensive, since it requires solx-core to track *who* (which
+     human/model/action) is invoking a given action, which nothing today
+     does.
+   - **File-operation sandboxing to the files directory** — already true
+     today (`solx-files` rejects path traversal / absolute paths); keep this
+     true as the rest of this hardening is built out.
+   - **Secrets masking in `action_config`** — action configs can embed
+     credentials; these should be redacted when read back by anything other
+     than the action that owns them.
+
+### Known gotchas (found integrating `solx-omniparse`/`solx-quickjs` from
+`solx-packages`, verified against real installs/builds/execs, not just code
+reading)
+
+- **`.solx` scripts have no comment syntax at all.** The whole file is split
+  purely on `;` (quote-aware); there's no `#`/`//`/`;`-at-line-start comment
+  concept like old sol's dialect had. A `; some note` line with no closing
+  `;` silently glues onto the next real statement and corrupts it. Keep
+  package/operator documentation in the package's `README.md`, not inline in
+  `install.solx`/`uninstall.solx`.
+- **A `Command` action's `fn_name` needs an explicit relative-path prefix**
+  (`.\name.exe` on Windows, `./name` on POSIX) to resolve a binary that lives
+  in `action_config.cwd` — `cmd /C name.exe` does **not** search the child
+  process's current directory for a bare filename the way an interactively
+  typed command does.
+- **`componentize-qjs` (used by `solx-quickjs`) requires the JS entry file to
+  export a `runner` object** matching the WIT interface identifier —
+  `export const runner = { run(actionName, params) { ... } }` — not a bare
+  top-level `export function run(...)`. The latter compiles fine but fails at
+  *runtime* with `interface 'sol:actions/runner@0.1.0' not found: FromJs {
+  from: "undefined", to: "object" }`. This was the actual root cause of an
+  initially-mysterious content-independent `unreachable` wasm trap that
+  looked like a wasmtime version mismatch (see next point) but wasn't.
+- **`wasmtime`/`wasmtime-wasi` were bumped from 28 to 47** in `solx-actions`
+  (`wasm_host.rs`) to test the above trap's original hypothesis. The version
+  bump was not actually the fix (pinning the exact version `componentize-qjs`
+  itself uses, 45.0.3, reproduced the identical trap), but it's still a good
+  idea to have taken — solx-core was 17 major versions behind, and 47 is now
+  verified working end-to-end with a real `componentize-qjs`-built component.
+  Required API updates: `WasiView::ctx` now returns `WasiCtxView<'_>` instead
+  of separate `ctx()`/`table()` methods; `wasmtime_wasi::add_to_linker_sync`
+  moved to `wasmtime_wasi::p2::add_to_linker_sync`; the bindgen-generated
+  `add_to_linker` now needs an explicit `HasSelf<HostState>` type argument.

@@ -182,6 +182,13 @@ pub struct Action {
     pub action_config: Option<Value>,
     #[serde(default)]
     pub files: Vec<FileRef>,
+    /// Whether this action's WASM component runs in the full `backend-action`
+    /// world (trusted — full entity/file/secret access) or the restricted
+    /// `custom-action` world (untrusted — only action-exec/artifact-read).
+    /// Only meaningful for `ActionType::Wasm`. Defaults to `false`; built-in
+    /// seeded actions are the exception.
+    #[serde(default)]
+    pub trusted: bool,
     #[serde(default = "default_now")]
     pub created_at: DateTime<Utc>,
     #[serde(default = "default_now")]
@@ -215,6 +222,10 @@ pub struct ActionInput {
     pub action_config: Option<Value>,
     #[serde(default)]
     pub files: Vec<FileRef>,
+    /// `None` means "leave unchanged" on update / defaults to `false` on
+    /// create — see [`Action::trusted`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted: Option<bool>,
 }
 
 /// Result of executing an action.

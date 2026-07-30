@@ -15,10 +15,16 @@ language. No LLM, extraction, browser, permissions, or knowledge bases.
 | `solx-types`    | Type registry (own DB): JSON-schema types by path + type groups; validation; seeds primitives + `BlogPostWithComments`. |
 | `solx-files`    | On-disk byte store for files attached to docs/actions (no DB). |
 | `solx-docs`     | Document store (own DB): links, file refs, type validation via `solx-types`, Tantivy full-text + path-faceted search. |
-| `solx-actions`  | Action store (own DB): execution of `Command` (config allowlist) and `Webhook` (URL allowlist) actions. WASM + full OAuth loopback are deferred. |
+| `solx-actions`  | Action store (own DB): execution of `Command`, `Webhook`, `Internal` (native dispatch — the whole `/builtin` catalogue: entity CRUD, search, files, secrets, OAuth loopback, see [`docs/built-in-actions.md`](docs/built-in-actions.md)), and `Wasm` (sandboxed third-party components only). |
 | `solx-scripts`  | The solx shell pipeline language (`;` / `|` / `$var`), decoupled from the CLI via a `CommandRunner` trait. |
 | `solx-packages` | Install/uninstall packages by running their `install.solx` script and recording them in config. |
-| `solx-cli`      | The `solx` binary. Wires the local manager impls and dispatches `post`/`get`/`delete`/`exec`/`list`/`search`/`script`. |
+| `solx-manager`  | Wires the local manager impls together (implements the `Solx` facade) — shared by `solx-cli` and `solx-mcp`. |
+| `solx-cli`      | The `solx` binary. Dispatches `post`/`get`/`delete`/`exec`/`list`/`search`/`script`. |
+| `solx-mcp`      | MCP server (stdio) exposing every action as a dynamic tool to LLM clients — no separate CRUD tool layer, discovery is just `tools/list` against the live actions DB. |
+
+A sibling `solx-wasm/` workspace (outside the `solx-core` Cargo workspace,
+different build target) holds `solx-custom-actions-lib`, the SDK for
+authoring third-party custom WASM actions.
 
 Each of docs, actions, and types owns a **separate** libsql/SQLite database
 (`db/solx-docs.db`, `db/solx-actions.db`, `db/solx-types.db`); cross-entity

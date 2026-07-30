@@ -19,13 +19,22 @@ tokio = { workspace = true }
 base64 = { workspace = true }
 rand = { workspace = true }
 tracing = { workspace = true }
-keyring = "3"
+# Without a platform feature, keyring 3.x silently falls back to an
+# in-memory mock store (writes vanish once the process exits) rather than
+# erroring — enable all three native backends unconditionally, matching
+# the crate's own docs.rs cross-platform build config; Cargo only pulls in
+# each backend's deps on its matching `target_os`.
+keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native-sync-persistent"] }
 aes-gcm = "0.10"
 axum = "0.7"
 jsonwebtoken = "9"
 anyhow = { workspace = true }
+solx-files = { workspace = true }
+wasmtime = { version = "47", features = ["component-model"] }
+wasmtime-wasi = "47"
 
 [dev-dependencies]
 solx-types = { workspace = true }
+solx-docs = { workspace = true }
 tempfile = "3"
 serial_test = "3"

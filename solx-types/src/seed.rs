@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS types (\
 
 const CORE_PATH: &str = "/types/core";
 const DOCS_PATH: &str = "/types/docs";
+/// Must match `solx_actions::seed::BUILTIN_TYPES_PATH` — kept as an
+/// independent literal (not a shared Rust constant) since `solx-types` does
+/// not depend on `solx-actions` (dependencies point the other way).
+const BUILTIN_TYPES_PATH: &str = "/builtin/types";
 
 /// A built-in type to seed: (path, name, description, schema, groups).
 pub struct SeedType {
@@ -67,7 +71,325 @@ pub fn builtin_types() -> Vec<SeedType> {
         groups: vec!["document-type"],
     });
 
+    out.extend(builtin_action_param_types());
+
     out
+}
+
+/// Parameter schemas for the built-in internal actions seeded by
+/// `solx-actions/src/seed.rs` (`param_type_ref` points at
+/// `{BUILTIN_TYPES_PATH}/{name}`).
+fn builtin_action_param_types() -> Vec<SeedType> {
+    let path_and_name = json!({
+        "path": { "type": "string", "description": "Directory-style path, e.g. /research/ai. Defaults to the root '/'." },
+        "name": { "type": "string", "description": "Single path segment identifying the entity." },
+    });
+
+    vec![
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "EntityRefParams",
+            description: "Reference to an entity by path+name (get/delete).",
+            schema: json!({
+                "type": "object",
+                "required": ["name"],
+                "properties": path_and_name,
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "ListParams",
+            description: "Pagination/filtering options for a list operation.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "path_prefix": { "type": "string" },
+                    "limit": { "type": "integer" },
+                    "offset": { "type": "integer" },
+                    "filter_field": { "type": "string" },
+                    "filter_value": { "type": "string" },
+                    "sort_by": { "type": "string" },
+                    "sort_order": { "type": "string", "enum": ["asc", "desc"] },
+                    "date_after": { "type": "string" },
+                    "date_before": { "type": "string" },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "DocumentCrudParams",
+            description: "Params for entity_new_document / entity_set_document.",
+            schema: json!({
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                    "path": path_and_name["path"],
+                    "name": path_and_name["name"],
+                    "title": { "type": "string" },
+                    "summary": { "type": "string" },
+                    "type_ref": { "type": "string", "description": "Full reference of the document's type, e.g. /types/core/Object. Required on create." },
+                    "contents": {},
+                    "author": { "type": "string" },
+                    "pub_date": { "type": "string" },
+                    "confidence": { "type": "number" },
+                    "links": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["kind", "target"],
+                            "properties": {
+                                "kind": { "type": "string", "enum": ["doc_ref", "url"] },
+                                "target": { "type": "string" },
+                                "field": { "type": "string" },
+                                "title": { "type": "string" },
+                                "description": { "type": "string" },
+                            }
+                        }
+                    },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "TypeCrudParams",
+            description: "Params for entity_new_type / entity_set_type.",
+            schema: json!({
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                    "path": path_and_name["path"],
+                    "name": path_and_name["name"],
+                    "description": { "type": "string" },
+                    "schema": { "type": "object", "description": "A JSON Schema document. Required on create." },
+                    "groups": { "type": "array", "items": { "type": "string" } },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "ActionCrudParams",
+            description: "Params for entity_new_action / entity_set_action.",
+            schema: json!({
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                    "path": path_and_name["path"],
+                    "name": path_and_name["name"],
+                    "caption": { "type": "string" },
+                    "description": { "type": "string" },
+                    "capabilities": { "type": "array", "items": { "type": "string" } },
+                    "phrases": { "type": "array", "items": { "type": "string" } },
+                    "category": { "type": "string" },
+                    "param_type_ref": { "type": "string" },
+                    "result_type_ref": { "type": "string" },
+                    "action_type": { "type": "string", "enum": ["wasm", "webhook", "command", "internal"], "description": "Required on create." },
+                    "fn_name": { "type": "string", "description": "Command string / URL / internal op name / WASM export, depending on action_type." },
+                    "bin_name": { "type": "string", "description": "WASM artifact file name (wasm actions only)." },
+                    "action_config": {},
+                    "trusted": { "type": "boolean" },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "SearchDocumentsParams",
+            description: "Full-text + faceted search over documents.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "q": { "type": "string", "description": "Free-text query." },
+                    "path_prefix": { "type": "string" },
+                    "type_ref": { "type": "string" },
+                    "linked_to": { "type": "string", "description": "Full reference of a document this search's hits must link to." },
+                    "limit": { "type": "integer" },
+                    "offset": { "type": "integer" },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "FilePutParams",
+            description: "Write bytes to a rel-path under the files root.",
+            schema: json!({
+                "type": "object",
+                "required": ["rel_path", "content"],
+                "properties": {
+                    "rel_path": { "type": "string" },
+                    "content": { "type": "string" },
+                    "encoding": { "type": "string", "enum": ["utf8", "base64"], "description": "Defaults to utf8." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "FileGetParams",
+            description: "Read or delete a file at a rel-path under the files root.",
+            schema: json!({
+                "type": "object",
+                "required": ["rel_path"],
+                "properties": { "rel_path": { "type": "string" } }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "FileListParams",
+            description: "List stored rel-paths under a prefix.",
+            schema: json!({
+                "type": "object",
+                "properties": { "prefix": { "type": "string" } }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "OauthStartParams",
+            description: "Start a local OAuth 2.0 authorization-code loopback listener.",
+            schema: json!({
+                "type": "object",
+                "properties": { "port": { "type": "integer", "description": "Defaults to 8765." } }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "OauthAwaitParams",
+            description: "Block until the OAuth loopback for a state_value receives its callback.",
+            schema: json!({
+                "type": "object",
+                "required": ["state_value"],
+                "properties": {
+                    "state_value": { "type": "string" },
+                    "timeout_secs": { "type": "integer" },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "OauthStopParams",
+            description: "Stop an OAuth loopback listener.",
+            schema: json!({
+                "type": "object",
+                "required": ["state_value"],
+                "properties": { "state_value": { "type": "string" } }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "GetFieldParams",
+            description: "Read one field from a document's contents.",
+            schema: json!({
+                "type": "object",
+                "required": ["name", "field"],
+                "properties": {
+                    "path": { "type": "string", "description": "Defaults to the root '/'." },
+                    "name": { "type": "string" },
+                    "field": { "type": "string" },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "SetFieldParams",
+            description: "Write one field on a document's contents (shallow merge — other fields are preserved).",
+            schema: json!({
+                "type": "object",
+                "required": ["name", "field"],
+                "properties": {
+                    "path": { "type": "string", "description": "Defaults to the root '/'." },
+                    "name": { "type": "string" },
+                    "field": { "type": "string" },
+                    "value": {},
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "FileCopyParams",
+            description: "Copy a file, or recursively copy a directory, within the files root.",
+            schema: json!({
+                "type": "object",
+                "required": ["source", "dest"],
+                "properties": {
+                    "source": { "type": "string" },
+                    "dest": { "type": "string" },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "GetEnvParams",
+            description: "Read a variable from the in-process environment store.",
+            schema: json!({
+                "type": "object",
+                "required": ["key"],
+                "properties": { "key": { "type": "string" } }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "SetEnvParams",
+            description: "Write a variable to the in-process environment store.",
+            schema: json!({
+                "type": "object",
+                "required": ["key", "value"],
+                "properties": {
+                    "key": { "type": "string" },
+                    "value": { "type": "string" },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "FetchHtmlParams",
+            description: "Fetch a URL and return its HTML.",
+            schema: json!({
+                "type": "object",
+                "required": ["url"],
+                "properties": { "url": { "type": "string" } }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "GetSecretParams",
+            description: "Read a secret scoped to the calling action.",
+            schema: json!({
+                "type": "object",
+                "required": ["name"],
+                "properties": { "name": { "type": "string" } }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "SetSecretParams",
+            description: "Write a secret scoped to the calling action.",
+            schema: json!({
+                "type": "object",
+                "required": ["name", "value"],
+                "properties": {
+                    "name": { "type": "string" },
+                    "value": { "type": "string" },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+    ]
 }
 
 /// Hand-written schema for `BlogPostWithComments`, mirroring the shape of the

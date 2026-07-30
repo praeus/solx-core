@@ -1,6 +1,44 @@
 [workspace]
-members = [
-    "solx-builtin-actions",
-    "solx-custom-actions-lib",
+
+[package]
+name        = "solx-custom-actions-lib"
+version     = "0.1.0"
+edition     = "2021"
+links       = "sol_custom_wit"
+description = "Helper crate for authors building custom WASM action components"
+# Files to include when this crate is `cargo publish`ed.  The default set
+# covers `src/`, `Cargo.toml`, and the license/readme; we extend it to also
+# include the canonical `wit/` directory and `build.rs`.
+include = [
+    "src/**/*",
+    "wit/**/*",
+    "build.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE*",
 ]
-resolver = "2"
+
+# Helper crate for authors building custom WASM action components.
+# Links against the `custom-action` WIT world defined in `wit/custom-action.wit`,
+# which provides only permission-gated action dispatch (`action-exec` — recurse
+# into any solx action by full reference, including every built-in) and
+# artifact reads (`artifact-read`).
+#
+# The `wit/custom-action.wit` file in this crate is the canonical home for the
+# `custom-action` WIT world; `solx-actions`' wasmtime host
+# (`solx-actions/src/wasm_host.rs`) binds directly against this same file by
+# relative path.
+#
+# Build your custom component:
+#   cargo build --target wasm32-wasip2 --release
+#
+# Register the output as a solx file/artifact and create an Action with
+# action_type = "wasm" (trusted is not meaningful for WASM actions anymore —
+# every WASM action runs under the same custom-action sandbox).
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+wit-bindgen = "0.36"
+serde_json  = { version = "1", default-features = false, features = ["alloc"] }

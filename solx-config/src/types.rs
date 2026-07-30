@@ -2,6 +2,8 @@
 //! `serde_json::Value` so unknown fields survive; this struct is only used to
 //! read a convenient typed snapshot.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// A record of an installed package.
@@ -47,4 +49,11 @@ pub struct SolxConfig {
     /// Installed package registry.
     #[serde(default)]
     pub installed_packages: Vec<InstalledPackage>,
+
+    /// WASM guest env-var allowlist: guest key -> system/process env var
+    /// name to read. Only keys listed here are ever visible to a WASM
+    /// action via `system-ops::get-env` — the guest never sees the raw
+    /// process environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_mappings: Option<HashMap<String, String>>,
 }

@@ -63,37 +63,40 @@ fn cache() -> &'static Mutex<HashMap<String, CacheEntry>> {
     AUTH_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Clear the cached access token for `action_name`. Useful for tests and
-/// for an explicit "log out and force refresh" path.
-pub fn clear_auth_cache(action_name: &str) {
+/// solx identity is `(path, name)`, not `name` alone — two actions with the
+/// same bare name under different paths are a normal configuration (e.g.
+/// `/prod/refresh-token` and `/staging/refresh-token`). The cache key must
+/// incorporate both, or two such actions would silently share (and clobber)
+/// each other's cached bearer token.
+fn cache_key(path: &str, name: &str) -> String {
+    solx_surface::path::full_ref(path, name).unwrap_or_else(|_| format!("{path}/{name}"))
+}
+
+/// Clear the cached access token for the action at `path`/`name`. Useful
+/// for tests and for an explicit "log out and force refresh" path.
+pub fn clear_auth_cache(path: &str, name: &str) {
     if let Ok(mut c) = cache().lock() {
-        c.remove(action_name);
+        c.remove(&cache_key(path, name));
     }
 }
 
-fn cache_get(action_name: &str) -> Option<String> {
-    cache()
-        .lock()
-        .ok()
-        .and_then(|c| {
-            c.get(action_name).and_then(|(tok, expires_at)| {
-                if *expires_at > Instant::now() {
-                    Some(tok.clone())
-                } else {
-                    None
-                }
-            })
+fn cache_get(key: &str) -> Option<String> {
+    cache().lock().ok().and_then(|c| {
+        c.get(key).and_then(|(tok, expires_at)| {
+            if *expires_at > Instant::now() {
+                Some(tok.clone())
+            } else {
+                None
+            }
         })
+    })
 }
 
-fn cache_put(action_name: &str, token: String, expires_in_secs: u64) {
+fn cache_put(key: &str, token: String, expires_in_secs: u64) {
     // Refresh 60s before the actual expiry to avoid races.
     let ttl = expires_in_secs.saturating_sub(60).max(1);
     if let Ok(mut c) = cache().lock() {
-        c.insert(
-            action_name.to_string(),
-            (token, Instant::now() + Duration::from_secs(ttl)),
-        );
+        c.insert(key.to_string(), (token, Instant::now() + Duration::from_secs(ttl)));
     }
 }
 
@@ -150,7 +153,7 @@ pub async fn resolve_auth(
     name: &str,
     action_config: &Value,
 ) -> Result<Option<String>, String> {
-    let action_name = name;
+    let key = cache_key(path, name);
     let Some(auth) = action_config.get("auth") else {
         return Ok(None);
     };
@@ -160,7 +163,7 @@ pub async fn resolve_auth(
         .ok_or_else(|| "action_config.auth is missing required field 'type'".to_string())?;
 
     // Cache fast path for all three types.
-    if let Some(tok) = cache_get(action_name) {
+    if let Some(tok) = cache_get(&key) {
         return Ok(Some(format!("Bearer {tok}")));
     }
 
@@ -176,7 +179,7 @@ pub async fn resolve_auth(
                 .get("ttl_secs")
                 .and_then(Value::as_u64)
                 .unwrap_or(3600);
-            cache_put(action_name, token.clone(), ttl);
+            cache_put(&key, token.clone(), ttl);
             Ok(Some(format!("Bearer {token}")))
         }
         "oauth_refresh" => {
@@ -189,7 +192,7 @@ pub async fn resolve_auth(
             // Respect the server-reported `expires_in` when the
             // provider sends one. Fall back to 1h.
             let ttl_secs = outcome.expires_in_secs.unwrap_or(3600);
-            cache_put(action_name, outcome.access_token.clone(), ttl_secs);
+            cache_put(&key, outcome.access_token.clone(), ttl_secs);
             Ok(Some(format!("Bearer {}", outcome.access_token)))
         }
         "oauth_service_account" => {
@@ -198,7 +201,7 @@ pub async fn resolve_auth(
                 .get("ttl_secs")
                 .and_then(Value::as_u64)
                 .unwrap_or(3600);
-            cache_put(action_name, token.clone(), ttl);
+            cache_put(&key, token.clone(), ttl);
             Ok(Some(format!("Bearer {token}")))
         }
         "oauth_authorization_code" => {
@@ -271,7 +274,7 @@ impl RefreshRequest {
 ///
 /// `secret_field_name` selects which `<field>_secret` field to look at;
 /// pass `None` to opt out of the secret-store indirection entirely.
-fn secret_field(
+pub(crate) fn secret_field(
     action_config: &Value,
     auth: &Value,
     field: &str,
@@ -330,6 +333,30 @@ fn secret_field(
          (inline string, keyring reference{comma}{secret_hint})",
         comma = if secret_hint.is_empty() { "" } else { ", " }
     ))
+}
+
+/// Like [`secret_field`], but returns `Ok(None)` instead of `Err` when
+/// *nothing at all* is configured for `field` — some OAuth flows
+/// legitimately have no value here (e.g. a public/PKCE client has no
+/// `client_secret`). If something *is* configured (inline, keyring
+/// reference, or a `_secret` pointer) but fails to resolve, that's still a
+/// hard error — a configured-but-broken secret should never fail silently.
+pub(crate) fn optional_secret_field(
+    action_config: &Value,
+    auth: &Value,
+    field: &str,
+    secret_field_name: Option<&str>,
+    auth_type_label: &str,
+) -> Result<Option<String>, String> {
+    let inline_present = auth.get(field).is_some();
+    let pointer_present = secret_field_name
+        .and_then(|f| auth.get(f).and_then(Value::as_str))
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if !inline_present && !pointer_present {
+        return Ok(None);
+    }
+    secret_field(action_config, auth, field, secret_field_name, auth_type_label).map(Some)
 }
 
 /// Variant of [`secret_field`] for non-secret fields. Inline string only.
@@ -776,6 +803,32 @@ mod tests {
 
     #[serial_test::serial]
     #[tokio::test]
+    async fn cache_does_not_collide_across_paths_with_same_name() {
+        // solx identity is (path, name), not name alone — two actions with
+        // the same bare name under different paths (e.g. a "prod" and a
+        // "staging" copy of the same integration, both named "webhook")
+        // must not share a cached bearer token.
+        clear();
+        let cfg_prod = json!({ "auth": { "type": "bearer", "token": "prod-token", "ttl_secs": 60 } });
+        let cfg_staging = json!({ "auth": { "type": "bearer", "token": "staging-token", "ttl_secs": 60 } });
+        assert_eq!(
+            resolve_auth(&stub_actions(), "/prod", "webhook", &cfg_prod).await.unwrap().unwrap(),
+            "Bearer prod-token"
+        );
+        assert_eq!(
+            resolve_auth(&stub_actions(), "/staging", "webhook", &cfg_staging).await.unwrap().unwrap(),
+            "Bearer staging-token"
+        );
+        // Re-resolving prod (config unchanged) must still hit its own cache
+        // entry, not staging's.
+        assert_eq!(
+            resolve_auth(&stub_actions(), "/prod", "webhook", &cfg_prod).await.unwrap().unwrap(),
+            "Bearer prod-token"
+        );
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
     async fn clear_auth_cache_forces_refresh() {
         clear();
         let cfg = json!({ "auth": { "type": "bearer", "token": "first" } });
@@ -784,7 +837,7 @@ mod tests {
         // Mutate config (e.g. user rotated the bearer); clear cache; verify
         // the new token is returned.
         let cfg2 = json!({ "auth": { "type": "bearer", "token": "second" } });
-        clear_auth_cache("a");
+        clear_auth_cache("/test", "a");
         assert_eq!(resolve_auth(&stub_actions(), "/test", "a", &cfg2).await.unwrap().unwrap(), "Bearer second");
     }
 
@@ -835,7 +888,10 @@ mod tests {
         });
         let _ = resolve_auth(&stub_actions(), "/test", "a", &cfg).await.unwrap();
         // Cache should remain empty.
-        assert!(cache_get("a").is_none(), "oauth_authorization_code must not write to the auth cache");
+        assert!(
+            cache_get(&cache_key("/test", "a")).is_none(),
+            "oauth_authorization_code must not write to the auth cache"
+        );
     }
 
     // ── keyring / resolution-shape tests ────────────────────────────────
@@ -898,6 +954,44 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(out, "Bearer inline-value");
+    }
+
+    // ── optional_secret_field (oauth_authorization_code client_secret) ─────
+
+    #[test]
+    fn optional_secret_field_returns_none_when_nothing_configured() {
+        // A public/PKCE OAuth client legitimately has no client_secret —
+        // this must not be an error.
+        let cfg = json!({});
+        let auth = json!({});
+        assert_eq!(
+            optional_secret_field(&cfg, &auth, "client_secret", Some("client_secret_secret"), "oauth_authorization_code")
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn optional_secret_field_resolves_inline_when_present() {
+        let cfg = json!({});
+        let auth = json!({ "client_secret": "shh" });
+        assert_eq!(
+            optional_secret_field(&cfg, &auth, "client_secret", Some("client_secret_secret"), "oauth_authorization_code")
+                .unwrap(),
+            Some("shh".to_string())
+        );
+    }
+
+    #[test]
+    fn optional_secret_field_errors_when_pointer_configured_but_key_missing() {
+        // Points at a secret-store name, but action_config.secrets has no
+        // key configured for it — a real misconfiguration that must error
+        // loudly rather than silently degrading to Ok(None).
+        let cfg = json!({});
+        let auth = json!({ "client_secret_secret": "MY_SECRET" });
+        let err = optional_secret_field(&cfg, &auth, "client_secret", Some("client_secret_secret"), "oauth_authorization_code")
+            .unwrap_err();
+        assert!(err.contains("MY_SECRET"), "{err}");
     }
 
     #[test]

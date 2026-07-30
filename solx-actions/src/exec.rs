@@ -10,8 +10,8 @@
 //! Actions are trusted by virtue of being `post`ed into the actions
 //! database — there is no separate config-level allowlist for either kind.
 //!
-//! WASM built-in actions are planned but not implemented in this iteration;
-//! [`unsupported`] returns a clear error.
+//! `Wasm`-typed actions are executed by [`crate::wasm_host`], not here —
+//! see [`crate::LocalActionManager::exec`]'s `Wasm` arm.
 
 use std::io::Write;
 use std::process::Stdio;
@@ -22,6 +22,8 @@ use solx_surface::error::{Result, SolxError};
 use solx_surface::managers::ActionManager;
 
 /// Run a `Command` action. `fn_name` is the literal command to execute.
+/// Params are passed as JSON on stdin only (no env var) — no payload size
+/// limit, and it doesn't leak into process listings.
 pub fn run_command(
     cfg: &ConfigService,
     fn_name: &str,
@@ -42,7 +44,6 @@ pub fn run_command(
         .arg(flag)
         .arg(fn_name)
         .current_dir(&cwd)
-        .env("SOLX_PARAMS", &params_json)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -89,7 +90,7 @@ pub async fn run_webhook(
     if let Some(cfg) = action_config {
         if let Some(auth) = cfg.get("auth") {
             if auth.get("type").and_then(Value::as_str) == Some("oauth_authorization_code") {
-                return dispatch_oauth_token_exchange(&client, url, auth, params).await;
+                return dispatch_oauth_token_exchange(&client, url, cfg, auth, params).await;
             }
         }
     }
@@ -135,9 +136,17 @@ pub async fn run_webhook(
 /// `application/x-www-form-urlencoded` to the token endpoint (`url`).
 /// Returns the parsed JSON response (which includes `access_token`,
 /// `refresh_token`, `expires_in`, etc.).
+///
+/// `client_id` is resolved through the same inline/keyring/scoped-secret
+/// pipeline as the other auth types (it's always required per RFC 6749).
+/// `client_secret` uses the "optional" variant — a public/PKCE client
+/// legitimately has none — but if one *is* configured (inline, keyring, or
+/// a `client_secret_secret` pointer) and fails to resolve, that's a hard
+/// error rather than a silent empty-string fallback.
 async fn dispatch_oauth_token_exchange(
     client: &reqwest::Client,
     url: &str,
+    action_config: &Value,
     auth: &Value,
     params: &Value,
 ) -> Result<Value> {
@@ -145,14 +154,22 @@ async fn dispatch_oauth_token_exchange(
         .get("code")
         .and_then(Value::as_str)
         .ok_or_else(|| SolxError::Exec("oauth_authorization_code requires 'code' in params".into()))?;
-    let client_id = auth
-        .get("client_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| SolxError::Exec("oauth_authorization_code requires 'client_id' in auth".into()))?;
-    let client_secret = auth
-        .get("client_secret")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let client_id = crate::webhook_auth::secret_field(
+        action_config,
+        auth,
+        "client_id",
+        Some("client_id_secret"),
+        "oauth_authorization_code",
+    )
+    .map_err(SolxError::Exec)?;
+    let client_secret = crate::webhook_auth::optional_secret_field(
+        action_config,
+        auth,
+        "client_secret",
+        Some("client_secret_secret"),
+        "oauth_authorization_code",
+    )
+    .map_err(SolxError::Exec)?;
     let redirect_uri = auth
         .get("redirect_uri")
         .and_then(Value::as_str)
@@ -161,10 +178,10 @@ async fn dispatch_oauth_token_exchange(
     let mut form = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
-        ("client_id", client_id),
+        ("client_id", client_id.as_str()),
     ];
-    if !client_secret.is_empty() {
-        form.push(("client_secret", client_secret));
+    if let Some(ref secret) = client_secret {
+        form.push(("client_secret", secret.as_str()));
     }
     if !redirect_uri.is_empty() {
         form.push(("redirect_uri", redirect_uri));
@@ -188,12 +205,4 @@ async fn dispatch_oauth_token_exchange(
         )));
     }
     Ok(serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)))
-}
-
-/// Placeholder for execution backends not yet ported (WASM components, full
-/// OAuth loopback). Returns a descriptive error rather than silently failing.
-pub fn unsupported(kind: &str) -> SolxError {
-    SolxError::Exec(format!(
-        "{kind} action execution is not implemented in this iteration of solx"
-    ))
 }

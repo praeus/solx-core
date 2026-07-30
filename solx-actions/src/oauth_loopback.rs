@@ -319,9 +319,26 @@ pub async fn serve_loopback_with_shutdown<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    let app = router(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(%addr, "oauth loopback listening");
+    serve_loopback_with_shutdown_on(state, listener, shutdown).await
+}
+
+/// Serve the loopback on an already-bound listener until `shutdown` is
+/// triggered. Lets the caller bind synchronously first — so a port-in-use
+/// failure surfaces immediately as an `Err`, rather than being discovered
+/// only inside a spawned server task (see `crate::internal::oauth_start`,
+/// which binds eagerly and only spawns the long-running server after a
+/// successful bind).
+pub async fn serve_loopback_with_shutdown_on<F>(
+    state: Arc<LoopbackState>,
+    listener: tokio::net::TcpListener,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let app = router(state);
     axum::serve(listener, app).with_graceful_shutdown(shutdown).await
 }
 

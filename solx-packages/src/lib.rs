@@ -3,9 +3,12 @@
 //! A package is a directory containing `package.json` (at least `name`, and a
 //! `version`) and an `install.solx` script (and optionally `uninstall.solx`).
 //! Installation runs the script through [`solx_scripts`] against the CLI's
-//! command runner, then records the package in `solx-config.json`. Any
-//! command/webhook capabilities the package needs are gated by the config
-//! allowlists (the "whitelist").
+//! command runner, then records the package in `solx-config.json`. There is
+//! currently no allowlist gate on the `Command`/`Webhook` actions a package's
+//! `install.solx` may register — anything it `post`s to the actions DB is
+//! immediately executable (see `docs/design-and-progress.md`'s "Suggested
+//! next steps" for the deferred hardening plan: package signing, a
+//! permissions module, secrets masking).
 
 use std::path::Path;
 
