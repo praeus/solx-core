@@ -50,10 +50,26 @@ pub struct SolxConfig {
     #[serde(default)]
     pub installed_packages: Vec<InstalledPackage>,
 
-    /// WASM guest env-var allowlist: guest key -> system/process env var
-    /// name to read. Only keys listed here are ever visible to a WASM
-    /// action via `system-ops::get-env` — the guest never sees the raw
-    /// process environment.
+    /// Environment-store allowlist: guest key -> system/process env var
+    /// name to read. Only keys listed here are ever visible via the
+    /// `get_env` built-in action — callers never see the raw process
+    /// environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_mappings: Option<HashMap<String, String>>,
+
+    /// Base URL of a remote `solx-server` to proxy all manager calls to
+    /// (e.g. `"http://127.0.0.1:8766"`). `None` (default) means local mode
+    /// — every existing user's exact current behavior, no server needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_url: Option<String>,
+    /// Shared bearer token for `server_url`. Generated once by `solx-server`
+    /// on first run and persisted here, so a server and any client pointed
+    /// at the same appdata dir pick it up automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_token: Option<String>,
+    /// Port `solx-server` binds on `127.0.0.1`. Server-side only —
+    /// independent of `server_url`, since the machine running `solx-server`
+    /// won't normally have its own config's `server_url` set at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_port: Option<u16>,
 }

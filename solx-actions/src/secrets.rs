@@ -57,7 +57,7 @@ pub struct KeyringRef {
 ///
 /// The `*_env` indirection is handled *outside* this module by the
 /// caller; `resolve` itself is the final hop.
-pub fn resolve(value: &Value) -> Result<String, String> {
+pub async fn resolve(value: &Value) -> Result<String, String> {
     match value {
         Value::String(s) => Ok(s.clone()),
         Value::Object(_) => {
@@ -67,7 +67,7 @@ pub fn resolve(value: &Value) -> Result<String, String> {
                      'keyring_account' string fields; got: {e}"
                 )
             })?;
-            load_keyring_with_test_override(&r)
+            load_keyring_with_test_override(&r).await
         }
         Value::Null => Err("secret value is null; provide an inline string, a keyring reference, or a *-env pointer".to_string()),
         other => Err(format!(
@@ -101,8 +101,10 @@ pub fn type_name_of(v: &Value) -> &'static str {
 ///
 /// `field_name` is used to build a helpful error message ("auth's
 /// 'private_key' is …") so callers don't need to interpolate.
-pub fn resolve_in_field(parent: &str, field_name: &str, value: &Value) -> Result<String, String> {
-    resolve(value).map_err(|e| format!("{parent}'s '{field_name}' {e}"))
+pub async fn resolve_in_field(parent: &str, field_name: &str, value: &Value) -> Result<String, String> {
+    resolve(value)
+        .await
+        .map_err(|e| format!("{parent}'s '{field_name}' {e}"))
 }
 
 /// Load a secret from the OS credential manager via the `keyring`
@@ -154,13 +156,23 @@ pub fn set_secret_loader_for_tests(loader: Option<SecretLoaderFn>) {
 }
 
 /// Try the test loader first; fall back to the real implementation.
-pub fn load_keyring_with_test_override(r: &KeyringRef) -> Result<String, String> {
+///
+/// The real backend is synchronous OS credential-manager IPC — DPAPI on
+/// Windows, Security.framework on macOS, and a **blocking D-Bus round trip**
+/// to gnome-keyring/KWallet on Linux, which can stall for seconds or hang
+/// outright on a locked keyring. It therefore runs on the blocking pool.
+/// The test seam stays synchronous so the existing `fn`-pointer fakes work
+/// unchanged.
+pub async fn load_keyring_with_test_override(r: &KeyringRef) -> Result<String, String> {
     if let Ok(g) = test_loader_slot().lock() {
         if let Some(loader) = *g {
             return loader(r);
         }
     }
-    load_keyring(r)
+    let owned = r.clone();
+    tokio::task::spawn_blocking(move || load_keyring(&owned))
+        .await
+        .map_err(|e| format!("keyring task panicked: {e}"))?
 }
 
 // ── Scoped secret store ──────────────────────────────────────────────────────
@@ -225,17 +237,19 @@ fn decrypt(blob_b64: &str, key_b64: &str) -> Result<String, String> {
 /// Encrypt `value` with `key_b64` and write it to the OS credential
 /// manager under `name`. `key_b64` must be a 32-byte, base64-encoded
 /// value (as produced by `solx random`).
-pub fn set_secret(name: &str, value: &str, key_b64: &str) -> Result<(), String> {
+pub async fn set_secret(name: &str, value: &str, key_b64: &str) -> Result<(), String> {
+    // AES-GCM stays inline: hardware-accelerated and microseconds on
+    // secret-sized payloads. Only the keyring hop is worth offloading.
     let blob = encrypt(value, key_b64)?;
-    raw_set(name, &blob)
+    raw_set(name, &blob).await
 }
 
 /// Read the value stored under `name`, decrypting with `key_b64`.
 /// Returns `Ok(None)` if no entry exists under that name. Returns
 /// `Err` if an entry exists but `key_b64` cannot decrypt it (wrong
 /// key) or the entry is corrupted.
-pub fn get_secret(name: &str, key_b64: &str) -> Result<Option<String>, String> {
-    match raw_get(name)? {
+pub async fn get_secret(name: &str, key_b64: &str) -> Result<Option<String>, String> {
+    match raw_get(name).await? {
         Some(blob) => decrypt(&blob, key_b64).map(Some),
         None => Ok(None),
     }
@@ -243,8 +257,8 @@ pub fn get_secret(name: &str, key_b64: &str) -> Result<Option<String>, String> {
 
 /// Remove the entry stored under `name`, if any. Used by package
 /// uninstall flows so they don't leave orphaned keyring entries.
-pub fn delete_secret(name: &str) -> Result<(), String> {
-    raw_delete(name)
+pub async fn delete_secret(name: &str) -> Result<(), String> {
+    raw_delete(name).await
 }
 
 // ── Raw keyring I/O (test-overridable) ───────────────────────────────────────
@@ -305,31 +319,44 @@ pub fn set_secret_backend_for_tests(backend: Option<SecretBackendOverride>) {
     }
 }
 
-fn raw_get(name: &str) -> Result<Option<String>, String> {
+// Each of these checks the (synchronous) test seam first, dropping its
+// guard before any await, and otherwise pushes the blocking keyring call
+// onto the blocking pool.
+
+async fn raw_get(name: &str) -> Result<Option<String>, String> {
     if let Ok(g) = test_backend_slot().lock() {
         if let Some(b) = g.as_ref() {
             return (b.get)(name);
         }
     }
-    real_raw_get(name)
+    let owned = name.to_string();
+    tokio::task::spawn_blocking(move || real_raw_get(&owned))
+        .await
+        .map_err(|e| format!("keyring task panicked: {e}"))?
 }
 
-fn raw_set(name: &str, blob: &str) -> Result<(), String> {
+async fn raw_set(name: &str, blob: &str) -> Result<(), String> {
     if let Ok(g) = test_backend_slot().lock() {
         if let Some(b) = g.as_ref() {
             return (b.set)(name, blob);
         }
     }
-    real_raw_set(name, blob)
+    let (owned, blob) = (name.to_string(), blob.to_string());
+    tokio::task::spawn_blocking(move || real_raw_set(&owned, &blob))
+        .await
+        .map_err(|e| format!("keyring task panicked: {e}"))?
 }
 
-fn raw_delete(name: &str) -> Result<(), String> {
+async fn raw_delete(name: &str) -> Result<(), String> {
     if let Ok(g) = test_backend_slot().lock() {
         if let Some(b) = g.as_ref() {
             return (b.delete)(name);
         }
     }
-    real_raw_delete(name)
+    let owned = name.to_string();
+    tokio::task::spawn_blocking(move || real_raw_delete(&owned))
+        .await
+        .map_err(|e| format!("keyring task panicked: {e}"))?
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -340,21 +367,21 @@ mod tests {
     use serde_json::json;
     use serial_test::serial;
 
-    #[test]
-    fn inline_string_resolves_directly() {
-        assert_eq!(resolve(&json!("abc")).unwrap(), "abc");
+    #[tokio::test]
+    async fn inline_string_resolves_directly() {
+        assert_eq!(resolve(&json!("abc")).await.unwrap(), "abc");
     }
 
-    #[test]
-    fn null_value_errors_with_helpful_message() {
-        let err = resolve(&json!(null)).unwrap_err();
+    #[tokio::test]
+    async fn null_value_errors_with_helpful_message() {
+        let err = resolve(&json!(null)).await.unwrap_err();
         assert!(err.contains("secret value is null"), "{err}");
         assert!(err.contains("*-env"), "{err}");
     }
 
-    #[test]
-    fn number_value_errors_with_type_name() {
-        let err = resolve(&json!(42)).unwrap_err();
+    #[tokio::test]
+    async fn number_value_errors_with_type_name() {
+        let err = resolve(&json!(42)).await.unwrap_err();
         assert!(err.contains("unsupported JSON type number"), "{err}");
     }
 
@@ -367,10 +394,10 @@ mod tests {
         assert_eq!(r.keyring_account, "google");
     }
 
-    #[test]
-    fn malformed_keyring_shape_errors_without_calling_loader() {
+    #[tokio::test]
+    async fn malformed_keyring_shape_errors_without_calling_loader() {
         // Single-field object — should not match the KeyringRef shape.
-        let err = resolve(&json!({"keyring_service": "sol"})).unwrap_err();
+        let err = resolve(&json!({"keyring_service": "sol"})).await.unwrap_err();
         assert!(err.contains("missing field"), "{err}");
     }
 
@@ -384,28 +411,28 @@ mod tests {
         assert!(err.contains("non-empty"), "{err}");
     }
 
-    #[test]
+    #[tokio::test]
     #[serial(secrets_loader)]
-    fn loader_test_seam_overrides_real_implementation() {
+    async fn loader_test_seam_overrides_real_implementation() {
         set_secret_loader_for_tests(Some(|_| Ok("from-test-loader".into())));
         let v = json!({"keyring_service": "sol", "keyring_account": "any"});
         let r = KeyringRef {
             keyring_service: "sol".into(),
             keyring_account: "any".into(),
         };
-        assert_eq!(load_keyring_with_test_override(&r).unwrap(), "from-test-loader");
+        assert_eq!(load_keyring_with_test_override(&r).await.unwrap(), "from-test-loader");
         // Also covers the resolve path.
-        assert_eq!(resolve(&v).unwrap(), "from-test-loader");
+        assert_eq!(resolve(&v).await.unwrap(), "from-test-loader");
         // Restore.
         set_secret_loader_for_tests(None);
     }
 
-    #[test]
+    #[tokio::test]
     #[serial(secrets_loader)]
-    fn loader_test_seam_error_surfaces_in_resolve() {
+    async fn loader_test_seam_error_surfaces_in_resolve() {
         set_secret_loader_for_tests(Some(|r| Err(format!("synthetic: {}/{}", r.keyring_service, r.keyring_account))));
         let v = json!({"keyring_service": "sol", "keyring_account": "missing"});
-        let err = resolve(&v).unwrap_err();
+        let err = resolve(&v).await.unwrap_err();
         assert!(err.contains("synthetic: sol/missing"), "{err}");
         set_secret_loader_for_tests(None);
     }
@@ -444,52 +471,52 @@ mod tests {
         base64::engine::general_purpose::STANDARD.encode([2u8; KEY_LEN])
     }
 
-    #[test]
+    #[tokio::test]
     #[serial(secrets_backend)]
-    fn set_then_get_secret_round_trips_with_the_right_key() {
+    async fn set_then_get_secret_round_trips_with_the_right_key() {
         install_fake_backend();
-        set_secret("MY_SECRET", "top-secret-value", &key_a()).unwrap();
+        set_secret("MY_SECRET", "top-secret-value", &key_a()).await.unwrap();
         assert_eq!(
-            get_secret("MY_SECRET", &key_a()).unwrap(),
+            get_secret("MY_SECRET", &key_a()).await.unwrap(),
             Some("top-secret-value".to_string())
         );
         set_secret_backend_for_tests(None);
     }
 
-    #[test]
+    #[tokio::test]
     #[serial(secrets_backend)]
-    fn get_secret_with_wrong_key_fails_to_decrypt() {
+    async fn get_secret_with_wrong_key_fails_to_decrypt() {
         install_fake_backend();
-        set_secret("MY_SECRET", "top-secret-value", &key_a()).unwrap();
-        let err = get_secret("MY_SECRET", &key_b()).unwrap_err();
+        set_secret("MY_SECRET", "top-secret-value", &key_a()).await.unwrap();
+        let err = get_secret("MY_SECRET", &key_b()).await.unwrap_err();
         assert!(err.contains("decryption failed"), "{err}");
         set_secret_backend_for_tests(None);
     }
 
-    #[test]
+    #[tokio::test]
     #[serial(secrets_backend)]
-    fn get_secret_missing_entry_returns_none() {
+    async fn get_secret_missing_entry_returns_none() {
         install_fake_backend();
-        assert_eq!(get_secret("NOT_STORED", &key_a()).unwrap(), None);
+        assert_eq!(get_secret("NOT_STORED", &key_a()).await.unwrap(), None);
         set_secret_backend_for_tests(None);
     }
 
-    #[test]
+    #[tokio::test]
     #[serial(secrets_backend)]
-    fn delete_secret_removes_the_entry() {
+    async fn delete_secret_removes_the_entry() {
         install_fake_backend();
-        set_secret("MY_SECRET", "value", &key_a()).unwrap();
-        delete_secret("MY_SECRET").unwrap();
-        assert_eq!(get_secret("MY_SECRET", &key_a()).unwrap(), None);
+        set_secret("MY_SECRET", "value", &key_a()).await.unwrap();
+        delete_secret("MY_SECRET").await.unwrap();
+        assert_eq!(get_secret("MY_SECRET", &key_a()).await.unwrap(), None);
         set_secret_backend_for_tests(None);
     }
 
-    #[test]
+    #[tokio::test]
     #[serial(secrets_backend)]
-    fn short_key_is_rejected() {
+    async fn short_key_is_rejected() {
         install_fake_backend();
         let short_key = base64::engine::general_purpose::STANDARD.encode([1u8; 16]);
-        let err = set_secret("MY_SECRET", "value", &short_key).unwrap_err();
+        let err = set_secret("MY_SECRET", "value", &short_key).await.unwrap_err();
         assert!(err.contains("must decode to 32 bytes"), "{err}");
         set_secret_backend_for_tests(None);
     }

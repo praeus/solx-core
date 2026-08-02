@@ -13,22 +13,35 @@
 //! `Wasm`-typed actions are executed by [`crate::wasm_host`], not here —
 //! see [`crate::LocalActionManager::exec`]'s `Wasm` arm.
 
-use std::io::Write;
 use std::process::Stdio;
+use std::time::Duration;
 
 use serde_json::Value;
 use solx_config::ConfigService;
 use solx_surface::error::{Result, SolxError};
 use solx_surface::managers::ActionManager;
+use tokio::io::AsyncWriteExt;
+
+/// Wall-clock ceiling on a command, overridable per action via
+/// `action_config.timeout_secs`.
+const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
 /// Run a `Command` action. `fn_name` is the literal command to execute.
 /// Params are passed as JSON on stdin only (no env var) — no payload size
 /// limit, and it doesn't leak into process listings.
-pub fn run_command(
+///
+/// Fully async: the child is spawned with `tokio::process`, so an action
+/// that takes minutes parks no thread. This used to be a synchronous
+/// `std::process` call made directly from `exec_as`, which meant every
+/// running command held an async *worker* thread — only `num_cpus` of
+/// those exist, so a handful of concurrent commands could wedge the whole
+/// process, HTTP routes included.
+pub async fn run_command(
     cfg: &ConfigService,
     fn_name: &str,
     action_config: &Option<Value>,
     params: &Value,
+    timeout_secs: Option<u64>,
 ) -> Result<Value> {
     let cwd = action_config
         .as_ref()
@@ -40,22 +53,56 @@ pub fn run_command(
     let params_json = serde_json::to_string(params)?;
     let (shell, flag) = if cfg!(windows) { ("cmd", "/C") } else { ("sh", "-c") };
 
-    let mut child = std::process::Command::new(shell)
+    let mut child = tokio::process::Command::new(shell)
         .arg(flag)
         .arg(fn_name)
         .current_dir(&cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // So a timed-out or cancelled exec reaps the child instead of
+        // leaking it.
+        //
+        // Caveat: this kills the *shell* we spawned, not its descendants.
+        // Neither Windows nor POSIX terminates a process tree on request
+        // without extra machinery (a Job Object / a process group), so a
+        // long-running grandchild — `sh -c 'sleep 600'` spawning `sleep`,
+        // or `cmd /C ping ...` spawning `ping` — outlives the timeout and
+        // keeps the inherited stdout pipe open. Killing the tree properly
+        // would mean putting each command in its own job/process group.
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| SolxError::Exec(format!("spawn '{fn_name}': {e}")))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(params_json.as_bytes());
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|e| SolxError::Exec(e.to_string()))?;
+    // Feed stdin *concurrently* with draining stdout/stderr. Writing it all
+    // up front deadlocks whenever the payload exceeds the pipe buffer
+    // (~64KB) and the child doesn't drain stdin before producing output:
+    // the child blocks writing stdout, we block writing stdin, neither
+    // moves. Dropping the handle after the write closes the pipe so the
+    // child sees EOF.
+    let mut stdin = child.stdin.take();
+    let feed = async move {
+        if let Some(mut pipe) = stdin.take() {
+            let _ = pipe.write_all(params_json.as_bytes()).await;
+            let _ = pipe.shutdown().await;
+        }
+    };
+
+    let timeout = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
+    let wait = async {
+        let (_, out) = tokio::join!(feed, child.wait_with_output());
+        out
+    };
+
+    let output = match tokio::time::timeout(timeout, wait).await {
+        Ok(res) => res.map_err(|e| SolxError::Exec(e.to_string()))?,
+        Err(_) => {
+            return Err(SolxError::Exec(format!(
+                "command '{fn_name}' timed out after {}s",
+                timeout.as_secs()
+            )))
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     if !output.status.success() {
@@ -161,6 +208,7 @@ async fn dispatch_oauth_token_exchange(
         Some("client_id_secret"),
         "oauth_authorization_code",
     )
+    .await
     .map_err(SolxError::Exec)?;
     let client_secret = crate::webhook_auth::optional_secret_field(
         action_config,
@@ -169,6 +217,7 @@ async fn dispatch_oauth_token_exchange(
         Some("client_secret_secret"),
         "oauth_authorization_code",
     )
+    .await
     .map_err(SolxError::Exec)?;
     let redirect_uri = auth
         .get("redirect_uri")

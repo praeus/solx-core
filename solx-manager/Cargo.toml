@@ -3,7 +3,7 @@ name = "solx-manager"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Wires the local solx manager implementations together (the App/Solx assembly), shared by solx-cli and solx-mcp."
+description = "Wires the solx manager implementations together (local or remote, the App/Solx assembly), shared by solx-cli, solx-mcp, and solx-server."
 
 [dependencies]
 solx-surface = { workspace = true }
@@ -12,4 +12,5 @@ solx-types = { workspace = true }
 solx-files = { workspace = true }
 solx-docs = { workspace = true }
 solx-actions = { workspace = true }
+solx-client = { workspace = true }
 anyhow = { workspace = true }

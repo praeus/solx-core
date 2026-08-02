@@ -4,14 +4,47 @@
 //! `DocRef`, `Link`, `ArtifactRef`, and a permissive `RichTextDoc`, so custom
 //! type schemas can `$ref` them (e.g. `{ "$ref": "#/$defs/DocRef" }`).
 
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, OnceLock};
+
 use serde_json::{json, Value};
 use solx_surface::error::{Result, SolxError};
+
+/// Compiled validators, keyed by a hash of the enriched schema.
+///
+/// Compilation used to happen on every call — once per action execution and
+/// once per document write, on an async worker. Schemas change rarely and
+/// the compiled form is immutable and `Send + Sync`, so it caches trivially.
+static VALIDATOR_CACHE: OnceLock<Mutex<HashMap<u64, Arc<jsonschema::Validator>>>> = OnceLock::new();
+
+fn validator_cache() -> &'static Mutex<HashMap<u64, Arc<jsonschema::Validator>>> {
+    VALIDATOR_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Compile `enriched`, reusing a cached validator when one exists.
+fn validator_for(enriched: &Value) -> Result<Arc<jsonschema::Validator>> {
+    // `serde_json` is built with `preserve_order`, so a schema's key order —
+    // and therefore its serialization — is stable across calls.
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    enriched.to_string().hash(&mut h);
+    let key = h.finish();
+
+    if let Some(hit) = validator_cache().lock().unwrap().get(&key).cloned() {
+        return Ok(hit);
+    }
+    let compiled = Arc::new(
+        jsonschema::validator_for(enriched)
+            .map_err(|e| SolxError::Validation(format!("invalid schema: {e}")))?,
+    );
+    validator_cache().lock().unwrap().insert(key, compiled.clone());
+    Ok(compiled)
+}
 
 /// Validate `value` against `type_schema`.
 pub fn validate_against_schema(value: &Value, type_schema: &Value) -> Result<()> {
     let enriched = enrich_schema(type_schema);
-    let compiled = jsonschema::validator_for(&enriched)
-        .map_err(|e| SolxError::Validation(format!("invalid schema: {e}")))?;
+    let compiled = validator_for(&enriched)?;
     let errors: Vec<String> = compiled
         .iter_errors(value)
         .map(|e| format!("{} at {}", e, e.instance_path))
@@ -25,9 +58,7 @@ pub fn validate_against_schema(value: &Value, type_schema: &Value) -> Result<()>
 
 /// Check that `type_schema` is a syntactically valid JSON schema.
 pub fn validate_schema_syntax(type_schema: &Value) -> Result<()> {
-    jsonschema::validator_for(&enrich_schema(type_schema))
-        .map(|_| ())
-        .map_err(|e| SolxError::Validation(format!("invalid schema: {e}")))
+    validator_for(&enrich_schema(type_schema)).map(|_| ())
 }
 
 /// Inject canonical `$defs` into a schema (idempotent; preserves existing defs).

@@ -74,20 +74,24 @@ impl LocalFileStore {
     }
 }
 
+// These are `async fn`s reached from action execution, so they must not do
+// blocking file I/O inline — `std::fs` here would park a tokio worker on
+// every read/write. `get` in particular is on the WASM hot path: it reads
+// the whole `.wasm` artifact before every WASM action runs.
 #[async_trait]
 impl FileStore for LocalFileStore {
     async fn put(&self, rel_path: &str, bytes: Vec<u8>) -> Result<String> {
         let (abs, normalized) = self.resolve(rel_path)?;
         if let Some(parent) = abs.parent() {
-            fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
-        fs::write(&abs, &bytes)?;
+        tokio::fs::write(&abs, &bytes).await?;
         Ok(normalized)
     }
 
     async fn get(&self, rel_path: &str) -> Result<Vec<u8>> {
         let (abs, normalized) = self.resolve(rel_path)?;
-        match fs::read(&abs) {
+        match tokio::fs::read(&abs).await {
             Ok(b) => Ok(b),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Err(SolxError::NotFound(format!("file '{normalized}'")))
@@ -98,12 +102,18 @@ impl FileStore for LocalFileStore {
 
     async fn delete(&self, rel_path: &str) -> Result<()> {
         let (abs, _) = self.resolve(rel_path)?;
-        match fs::remove_file(&abs) {
+        match tokio::fs::remove_file(&abs).await {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
-        cleanup_empty_parents(&self.root, abs.parent());
+        // Recursive directory pruning — cheaper to offload wholesale than to
+        // make the loop async.
+        let root = self.root.clone();
+        let parent = abs.parent().map(Path::to_path_buf);
+        tokio::task::spawn_blocking(move || cleanup_empty_parents(&root, parent.as_deref()))
+            .await
+            .map_err(|e| SolxError::Other(format!("file cleanup task panicked: {e}")))?;
         Ok(())
     }
 
@@ -118,10 +128,18 @@ impl FileStore for LocalFileStore {
             }
             p
         };
-        let mut out = Vec::new();
-        walk(&self.root, &base, &mut out)?;
-        out.sort();
-        Ok(out)
+        // `walk` recurses; a recursive async fn would need boxing at every
+        // level for no benefit, so the whole traversal goes to the blocking
+        // pool instead.
+        let root = self.root.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            walk(&root, &base, &mut out)?;
+            out.sort();
+            Ok(out)
+        })
+        .await
+        .map_err(|e| SolxError::Other(format!("file list task panicked: {e}")))?
     }
 }
 

@@ -9,7 +9,7 @@ description = "On-disk byte store for files attached to solx documents and actio
 solx-surface = { workspace = true }
 solx-config = { workspace = true }
 async-trait = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { workspace = true }

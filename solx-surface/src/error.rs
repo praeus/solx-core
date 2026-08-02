@@ -5,11 +5,17 @@
 //! tantivy, wasmtime, etc. are mapped into these variants (usually via
 //! `.to_string()`) at the edges of the impl crates.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, SolxError>;
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+/// Adjacently tagged (`{"kind":"not_found","message":"..."}`) so a
+/// `solx-client` HTTP response body deserializes straight back into the
+/// exact variant a `solx-server` handler returned — no separate
+/// status-code-to-variant mapping needed on the wire.
+#[derive(Debug, Error, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "message", rename_all = "snake_case")]
 pub enum SolxError {
     /// Entity or file does not exist.
     #[error("not found: {0}")]

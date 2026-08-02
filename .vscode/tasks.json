@@ -1,0 +1,28 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "solx-server: start",
+      "type": "process",
+      "command": "${workspaceFolder}/target/debug/solx-server.exe",
+      "args": ["--port", "8766"],
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^(never matches)$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^(never matches)$",
+          "endsPattern": "listening on"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "close": false
+      },
+      "detail": "Starts solx-server against the default appdata dir (%APPDATA%/praeus/solx) — no SOLX_APPDATA_DIR override, matching .vscode/mcp.json's SOLX_SERVER_URL. Build first with 'cargo build -p solx-server' if the binary doesn't exist yet."
+    }
+  ]
+}

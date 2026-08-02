@@ -11,6 +11,7 @@ pub mod error;
 pub mod managers;
 pub mod path;
 pub mod query;
+pub mod wire;
 
 pub use error::{Result, SolxError};
 

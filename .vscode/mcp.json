@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "solx": {
+      "command": "D:/Projects/solx-core/target/debug/solx-mcp.exe",
+      "env": {
+        "SOLX_SERVER_URL": "http://127.0.0.1:8766"
+      }
+    }
+  }
+}

@@ -3729,6 +3729,7 @@ dependencies = [
  "axum 0.7.9",
  "base64 0.22.1",
  "chrono",
+ "futures",
  "jsonwebtoken",
  "keyring",
  "libsql",
@@ -3770,10 +3771,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "solx-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.7.9",
+ "base64 0.22.1",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "solx-surface",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "solx-config"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "fs2",
+ "rand 0.8.7",
  "serde",
  "serde_json",
  "solx-surface",
@@ -3815,6 +3834,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "solx-actions",
+ "solx-client",
  "solx-config",
  "solx-docs",
  "solx-files",
@@ -3857,6 +3877,26 @@ dependencies = [
  "serde_json",
  "solx-surface",
  "tokio",
+]
+
+[[package]]
+name = "solx-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "base64 0.22.1",
+ "clap",
+ "reqwest",
+ "serde_json",
+ "solx-client",
+ "solx-config",
+ "solx-manager",
+ "solx-surface",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

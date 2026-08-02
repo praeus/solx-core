@@ -193,6 +193,60 @@ against the parameter type (if declared), then dispatched:
   separate guest build/packaging step), so `Action.trusted` no longer
   affects WASM execution.
 
+### 6.1 Execution is non-blocking end to end
+
+Every backend above runs without parking a thread for the duration of the
+work it waits on. This was not originally true and the failure modes were
+severe, so the specifics are worth recording:
+
+- **WASM runs on wasmtime fibers.** The bindings are generated with
+  `imports`/`exports: { default: async }`, so the guest export is invoked via
+  `TypedFunc::call_async` → `Store::on_fiber`: the guest gets its own stack,
+  and whenever a host import's future is pending the fiber suspends and the
+  OS thread returns to the executor. Previously each guest ran inside
+  `spawn_blocking` with host imports bridging back via `Handle::block_on`, so
+  **every `action-exec` nesting level pinned one blocking-pool thread** while
+  awaiting the level beneath it — a hard ceiling at tokio's
+  `max_blocking_threads` (512, shared across concurrent requests), and a hang
+  rather than an error once exhausted.
+
+  This needed **nothing from guests**. `call_async` runs an ordinary sync-ABI
+  component; only the host side is async. Native component-model async — the
+  `call_concurrent` path, opted into by adding the `store` flag to the bindgen
+  config — *would* require guests rebuilt against the async ABI, and is
+  deliberately not used. componentize-qjs's `Runtime::OptSizeSync` output
+  continues to run unmodified.
+- **Guest preemption.** Fibers only help a guest that *awaits*; a
+  compute-bound one never yields. The engine enables `epoch_interruption`
+  with a dedicated ticker thread, and each store uses
+  `epoch_deadline_async_yield_and_update` so a busy guest hands the worker
+  back. Yielding never terminates, so a wall-clock `tokio::time::timeout`
+  bounds the whole invocation (default 300s, per-action override via
+  `action_config.timeout_secs`).
+- **Components are compiled once.** `Component::from_binary` is a full
+  Cranelift compile that used to run on *every* execution. It is now cached
+  process-wide by artifact hash, and compiled on the blocking pool on a miss.
+- **Command actions** use `tokio::process` with `kill_on_drop`, feeding stdin
+  concurrently with draining stdout (writing it all up front deadlocked on
+  payloads past the pipe buffer) and bounded by the same `timeout_secs`.
+  Caveat: killing the shell does not kill its descendants on either platform,
+  so a long-running grandchild can outlive the timeout.
+- **Tantivy** sits behind a dedicated writer thread fed by a channel, which
+  batches queued mutations behind a **single** commit; reads clone the
+  Arc-backed searcher and run on the blocking pool. It was previously one
+  `std::sync::Mutex<DocIndex>` that committed — segment serialize, `fsync`,
+  reader reload — on every individual document write, with all searches
+  serialized behind the same lock. `submit` still awaits its batch's commit,
+  so read-your-writes is preserved; batching only merges concurrent writers.
+- **Keyring** calls (blocking OS credential-manager IPC — a synchronous D-Bus
+  round trip on Linux) run on the blocking pool, as does RS256 assertion
+  signing. Compiled `jsonschema` validators are cached rather than rebuilt per
+  validation.
+
+Known remaining case: libsql local drives embedded SQLite synchronously
+despite its async surface, so `PRAGMA busy_timeout=10000` can park a worker
+inside SQLite's busy handler for up to 10s under write contention.
+
 ---
 
 ## 7. Scripting & packages
@@ -350,3 +404,14 @@ reading)
   of separate `ctx()`/`table()` methods; `wasmtime_wasi::add_to_linker_sync`
   moved to `wasmtime_wasi::p2::add_to_linker_sync`; the bindgen-generated
   `add_to_linker` now needs an explicit `HasSelf<HostState>` type argument.
+- **Going async on wasmtime 47 has its own API shape.** `bindgen!`'s old
+  `async: true` is gone, replaced by per-function config —
+  `imports: { default: async }, exports: { default: async }`. Async imports
+  are generated as `-> impl Future<Output = ..> + Send` (RPITIT), so the host
+  impls are plain `async fn` with no `async_trait`. `Config::async_support` is
+  **deprecated as a no-op**: async is always available and the choice is made
+  per call site (`instantiate_async`/`call_async` vs. their sync twins), so
+  the engine needs no flag for it. Adding the `store` flag alongside `async`
+  is what switches codegen to `call_concurrent` (native component-model
+  async, guests must use the async ABI) — do not add it unless that is
+  actually intended.

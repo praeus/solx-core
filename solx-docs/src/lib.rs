@@ -10,7 +10,7 @@ mod db;
 mod search;
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -24,7 +24,8 @@ use solx_surface::query::{ListOptions, Page, SearchQuery, SearchResults};
 use uuid::Uuid;
 
 use db::{map_db, Db};
-use search::{flatten_strings, walk_contents, DocIndex};
+use search::{flatten_strings, walk_contents, DocIndexWriter, DocSearcher};
+use tokio::sync::{mpsc, oneshot};
 
 const DDL: &str = "\
 CREATE TABLE IF NOT EXISTS documents (\
@@ -47,11 +48,104 @@ CREATE TABLE IF NOT EXISTS documents (\
 
 const DEFAULT_LIMIT: usize = 50;
 
+/// One staged index mutation plus a channel to report the commit back on.
+struct IndexRequest {
+    op: IndexOp,
+    /// Resolved once the batch containing this op has been committed, so a
+    /// `post` that has returned is always visible to a subsequent `search`.
+    done: oneshot::Sender<std::result::Result<(), String>>,
+}
+
+enum IndexOp {
+    /// Boxed: the add variant is much larger than the delete one, and this
+    /// keeps every queued request small.
+    Add(Box<IndexDoc>),
+    Delete(String),
+}
+
+struct IndexDoc {
+    id: String,
+    path: String,
+    name: String,
+    name_raw: String,
+    title: Option<String>,
+    summary: Option<String>,
+    type_ref: String,
+    doc_ref_names: Vec<String>,
+    content_text: String,
+}
+
 /// libsql + Tantivy backed [`DocManager`].
+///
+/// Tantivy is entirely synchronous, so neither half of it may run inline in
+/// these async methods. Writes are queued to a dedicated thread that batches
+/// them behind a single commit; reads clone the (cheap, Arc-backed) searcher
+/// and run on the blocking pool.
+///
+/// This replaced a single `std::sync::Mutex<DocIndex>` that committed —
+/// segment serialize, `fsync`, reader reload — on **every individual
+/// document write**, on an async worker, with all searches serialized behind
+/// the same lock.
 pub struct LocalDocManager {
     db: Db,
-    index: Mutex<DocIndex>,
+    searcher: DocSearcher,
+    index_tx: mpsc::UnboundedSender<IndexRequest>,
     types: Arc<dyn TypeManager>,
+}
+
+/// Own the writer on a dedicated OS thread and drain the queue in batches.
+///
+/// A plain thread rather than a tokio task: every operation here is blocking
+/// tantivy work, so a task would just park a worker for the whole commit.
+fn spawn_index_writer(mut writer: DocIndexWriter, mut rx: mpsc::UnboundedReceiver<IndexRequest>) {
+    std::thread::Builder::new()
+        .name("solx-docs-index".into())
+        .spawn(move || {
+            while let Some(first) = rx.blocking_recv() {
+                // Take everything already queued so a burst of writes costs
+                // one commit rather than N.
+                let mut batch = vec![first];
+                while let Ok(next) = rx.try_recv() {
+                    batch.push(next);
+                }
+
+                let mut staged = Ok(());
+                for req in &batch {
+                    let r = match &req.op {
+                        IndexOp::Add(d) => writer.stage_doc(
+                            &d.id,
+                            &d.path,
+                            &d.name,
+                            &d.name_raw,
+                            d.title.as_deref(),
+                            d.summary.as_deref(),
+                            &d.type_ref,
+                            &d.doc_ref_names,
+                            &d.content_text,
+                        ),
+                        IndexOp::Delete(name_raw) => {
+                            writer.stage_delete(name_raw.as_str());
+                            Ok(())
+                        }
+                    };
+                    if let Err(e) = r {
+                        staged = Err(e.to_string());
+                        break;
+                    }
+                }
+
+                let outcome = match staged {
+                    Ok(()) => writer.commit().map_err(|e| e.to_string()),
+                    Err(e) => Err(e),
+                };
+                // A failure is reported to everyone in the batch: they share
+                // a commit, so they share its fate.
+                for req in batch {
+                    let _ = req.done.send(outcome.clone());
+                }
+            }
+        })
+        .expect("failed to spawn document index writer thread");
 }
 
 impl LocalDocManager {
@@ -65,10 +159,13 @@ impl LocalDocManager {
         let db = Db::open(db_path).await?;
         let conn = db.connect().await?;
         conn.execute_batch(DDL).await.map_err(map_db)?;
-        let (index, created_fresh) = DocIndex::open(index_dir)?;
+        let (writer, searcher, created_fresh) = DocIndexWriter::open(index_dir)?;
+        let (index_tx, index_rx) = mpsc::unbounded_channel();
+        spawn_index_writer(writer, index_rx);
         let manager = LocalDocManager {
             db,
-            index: Mutex::new(index),
+            searcher,
+            index_tx,
             types,
         };
         // A freshly-created index (first run, or an incompatible on-disk
@@ -136,18 +233,31 @@ impl LocalDocManager {
         };
 
         let name_raw = full_ref(&doc.path, &doc.name)?;
-        let mut idx = self.index.lock().unwrap();
-        idx.index_doc(
-            &doc.id.to_string(),
-            &doc.path,
-            &doc.name,
-            &name_raw,
-            doc.title.as_deref(),
-            doc.summary.as_deref(),
-            &doc.type_ref,
-            &doc_ref_names,
-            &content_text,
-        )
+        self.submit(IndexOp::Add(Box::new(IndexDoc {
+            id: doc.id.to_string(),
+            path: doc.path.clone(),
+            name: doc.name.clone(),
+            name_raw,
+            title: doc.title.clone(),
+            summary: doc.summary.clone(),
+            type_ref: doc.type_ref.clone(),
+            doc_ref_names,
+            content_text,
+        })))
+        .await
+    }
+
+    /// Queue an index mutation and wait for the batch containing it to
+    /// commit. Awaiting the commit is what preserves read-your-writes;
+    /// batching only ever merges genuinely concurrent writers.
+    async fn submit(&self, op: IndexOp) -> Result<()> {
+        let (done, wait) = oneshot::channel();
+        self.index_tx
+            .send(IndexRequest { op, done })
+            .map_err(|_| SolxError::Other("document index writer thread has stopped".into()))?;
+        wait.await
+            .map_err(|_| SolxError::Other("document index writer dropped the request".into()))?
+            .map_err(SolxError::Other)
     }
 }
 
@@ -327,7 +437,7 @@ impl DocManager for LocalDocManager {
         if affected == 0 {
             return Err(SolxError::NotFound(format!("document {fr}")));
         }
-        self.index.lock().unwrap().delete_doc(&fr)?;
+        self.submit(IndexOp::Delete(fr)).await?;
         Ok(())
     }
 
@@ -434,8 +544,14 @@ impl DocManager for LocalDocManager {
     }
 
     async fn search(&self, query: SearchQuery) -> Result<SearchResults> {
-        let idx = self.index.lock().unwrap();
-        idx.search(&query)
+        // Tantivy search is synchronous CPU work plus mmap page faults that
+        // can reach real disk, so it goes to the blocking pool. The searcher
+        // is a cheap Arc-backed clone, so no lock is held and concurrent
+        // searches no longer serialize behind each other or behind a commit.
+        let searcher = self.searcher.clone();
+        tokio::task::spawn_blocking(move || searcher.search(&query))
+            .await
+            .map_err(|e| SolxError::Other(format!("search task panicked: {e}")))?
     }
 }
 
@@ -634,5 +750,102 @@ mod tests {
             .unwrap();
         assert_eq!(res.total, 1);
         assert_eq!(res.hits[0].name, "one");
+    }
+
+    // ── Index writer thread ──────────────────────────────────────────────
+
+    async fn post_doc(m: &LocalDocManager, path: &str, name: &str, body: &str) {
+        m.post(
+            path,
+            name,
+            DocumentInput {
+                type_ref: Some("/types/docs/Document".into()),
+                contents: json!({ "body": body }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Writes now go through a channel to a dedicated thread that batches
+    /// them behind one commit — but a `post` that has returned must still be
+    /// immediately findable. `submit` awaits its batch's commit for exactly
+    /// this reason.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_returned_post_is_immediately_searchable() {
+        let (_d, m) = setup().await;
+        for i in 0..5 {
+            post_doc(&m, "/rw", &format!("doc{i}"), "quixotic").await;
+            let res = m
+                .search(SearchQuery { q: Some("quixotic".into()), ..Default::default() })
+                .await
+                .unwrap();
+            assert_eq!(
+                res.total,
+                i + 1,
+                "write {i} was not visible to the search that followed it"
+            );
+        }
+    }
+
+    /// A delete must be visible straight away too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_returned_delete_is_immediately_reflected() {
+        let (_d, m) = setup().await;
+        post_doc(&m, "/rw", "gone", "ephemeral").await;
+        let before = m
+            .search(SearchQuery { q: Some("ephemeral".into()), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(before.total, 1);
+
+        m.delete("/rw", "gone").await.unwrap();
+        let after = m
+            .search(SearchQuery { q: Some("ephemeral".into()), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(after.total, 0);
+    }
+
+    /// Concurrent writers and searchers used to serialize behind one
+    /// `std::sync::Mutex`, with a full commit inside it per document.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_writes_and_searches_all_land() {
+        let (_d, m) = setup().await;
+        let m = Arc::new(m);
+
+        let mut tasks = Vec::new();
+        for i in 0..16 {
+            let m = m.clone();
+            tasks.push(tokio::spawn(async move {
+                post_doc(&m, "/bulk", &format!("d{i}"), "concurrent").await;
+            }));
+        }
+        for i in 0..8 {
+            let m = m.clone();
+            tasks.push(tokio::spawn(async move {
+                let _ = m
+                    .search(SearchQuery {
+                        q: Some(format!("concurrent{i}")),
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+
+        let res = m
+            .search(SearchQuery {
+                q: Some("concurrent".into()),
+                limit: Some(50),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.total, 16, "every concurrent write should be indexed");
     }
 }

@@ -174,7 +174,8 @@ pub async fn resolve_auth(
             // secret store, matching the OAuth types. The token-ttl
             // `ttl_secs` field is inline-only — the per-action TTL
             // doesn't have a keyring/secret shape.
-            let token = secret_field(action_config, auth, "token", Some("token_secret"), "bearer")?;
+            let token =
+                secret_field(action_config, auth, "token", Some("token_secret"), "bearer").await?;
             let ttl = auth
                 .get("ttl_secs")
                 .and_then(Value::as_u64)
@@ -242,23 +243,26 @@ struct RefreshRequest {
 }
 
 impl RefreshRequest {
-    fn from_value(action_config: &Value, auth: &Value) -> Result<Self, String> {
+    async fn from_value(action_config: &Value, auth: &Value) -> Result<Self, String> {
         Ok(Self {
-            client_id: secret_field(action_config, auth, "client_id", Some("client_id_secret"), "oauth_refresh")?,
+            client_id: secret_field(action_config, auth, "client_id", Some("client_id_secret"), "oauth_refresh")
+                .await?,
             client_secret: secret_field(
                 action_config,
                 auth,
                 "client_secret",
                 Some("client_secret_secret"),
                 "oauth_refresh",
-            )?,
+            )
+            .await?,
             refresh_token: secret_field(
                 action_config,
                 auth,
                 "refresh_token",
                 Some("refresh_token_secret"),
                 "oauth_refresh",
-            )?,
+            )
+            .await?,
             token_uri: require_inline_string(auth, "token_uri", "oauth_refresh")?,
         })
     }
@@ -274,7 +278,7 @@ impl RefreshRequest {
 ///
 /// `secret_field_name` selects which `<field>_secret` field to look at;
 /// pass `None` to opt out of the secret-store indirection entirely.
-pub(crate) fn secret_field(
+pub(crate) async fn secret_field(
     action_config: &Value,
     auth: &Value,
     field: &str,
@@ -290,7 +294,8 @@ pub(crate) fn secret_field(
                     &format!("auth.type='{auth_type_label}'"),
                     field,
                     v,
-                );
+                )
+                .await;
             }
             Value::Null | Value::String(_) => { /* fall through to secret-store pointer */ }
             _ => {
@@ -316,7 +321,7 @@ pub(crate) fn secret_field(
                          '{name}' but action_config.secrets has no key configured for it"
                     )
                 })?;
-            let value = crate::secrets::get_secret(name, key).map_err(|e| {
+            let value = crate::secrets::get_secret(name, key).await.map_err(|e| {
                 format!("auth.type='{auth_type_label}': failed to read secret '{name}': {e}")
             })?;
             return value.filter(|v| !v.is_empty()).ok_or_else(|| {
@@ -341,7 +346,7 @@ pub(crate) fn secret_field(
 /// `client_secret`). If something *is* configured (inline, keyring
 /// reference, or a `_secret` pointer) but fails to resolve, that's still a
 /// hard error — a configured-but-broken secret should never fail silently.
-pub(crate) fn optional_secret_field(
+pub(crate) async fn optional_secret_field(
     action_config: &Value,
     auth: &Value,
     field: &str,
@@ -356,7 +361,9 @@ pub(crate) fn optional_secret_field(
     if !inline_present && !pointer_present {
         return Ok(None);
     }
-    secret_field(action_config, auth, field, secret_field_name, auth_type_label).map(Some)
+    secret_field(action_config, auth, field, secret_field_name, auth_type_label)
+        .await
+        .map(Some)
 }
 
 /// Variant of [`secret_field`] for non-secret fields. Inline string only.
@@ -447,7 +454,7 @@ async fn exchange_refresh_token(
     action_config: &Value,
     auth: &Value,
 ) -> Result<RefreshOutcome, String> {
-    let req = RefreshRequest::from_value(action_config, auth)?;
+    let req = RefreshRequest::from_value(action_config, auth).await?;
 
     let body = json!({
         "grant_type": "refresh_token",
@@ -524,46 +531,38 @@ async fn persist_rotated_refresh_token(
             // Patch the action's action_config.auth.refresh_token in place.
             // We merge with the existing field set so other auth.* fields
             // (client_id, scope, etc.) survive.
-            match actions.get(path, name).await {
-                Ok(action) => {
-                    let mut new_cfg = action
-                        .action_config
-                        .clone()
-                        .unwrap_or_else(|| serde_json::json!({}));
-                    if !new_cfg.is_object() {
-                        tracing::warn!(
-                            "action '{name}' action_config is not an object; \
-                             cannot persist rotated refresh_token"
-                        );
-                        return;
-                    }
-                    if new_cfg.get_mut("auth").is_none() {
-                        new_cfg
-                            .as_object_mut()
-                            .unwrap()
-                            .insert("auth".into(), serde_json::json!({}));
-                    }
-                    if let Some(auth_obj) = new_cfg.get_mut("auth").and_then(|v| v.as_object_mut()) {
-                        auth_obj.insert(
-                            "refresh_token".into(),
-                            serde_json::Value::String(new_refresh_token.to_string()),
-                        );
-                    }
-                    let input = ActionInput {
-                        action_config: Some(new_cfg),
-                        ..Default::default()
-                    };
-                    if let Err(e) = actions.post(path, name, input).await {
-                        tracing::warn!(
-                            "failed to persist rotated refresh_token for action '{name}': {e}"
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "failed to load action '{name}' to persist rotated refresh_token: {e}"
-                    );
-                }
+            //
+            // Build on the `action_config` we were handed — which `exec_as`
+            // read unmasked — rather than re-reading through
+            // `ActionManager::get`, whose result is redacted. `post` would
+            // restore the sentinels either way (see `crate::mask`), but a
+            // security-sensitive write shouldn't depend on that.
+            let mut new_cfg = action_config.clone();
+            if !new_cfg.is_object() {
+                tracing::warn!(
+                    "action '{name}' action_config is not an object; \
+                     cannot persist rotated refresh_token"
+                );
+                return;
+            }
+            if new_cfg.get_mut("auth").is_none() {
+                new_cfg
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("auth".into(), serde_json::json!({}));
+            }
+            if let Some(auth_obj) = new_cfg.get_mut("auth").and_then(|v| v.as_object_mut()) {
+                auth_obj.insert(
+                    "refresh_token".into(),
+                    serde_json::Value::String(new_refresh_token.to_string()),
+                );
+            }
+            let input = ActionInput {
+                action_config: Some(new_cfg),
+                ..Default::default()
+            };
+            if let Err(e) = actions.post(path, name, input).await {
+                tracing::warn!("failed to persist rotated refresh_token for action '{name}': {e}");
             }
         }
         RefreshStorage::Keyring { service, account } => {
@@ -585,7 +584,7 @@ async fn persist_rotated_refresh_token(
             }
         }
         RefreshStorage::Secret { name: secret_name, key } => {
-            if let Err(e) = crate::secrets::set_secret(&secret_name, new_refresh_token, &key) {
+            if let Err(e) = crate::secrets::set_secret(&secret_name, new_refresh_token, &key).await {
                 tracing::warn!(
                     "failed to persist rotated refresh_token to secret '{secret_name}' \
                      for action '{name}': {e}"
@@ -612,7 +611,7 @@ struct ServiceAccountRequest {
 }
 
 impl ServiceAccountRequest {
-    fn from_value(action_config: &Value, auth: &Value) -> Result<Self, String> {
+    async fn from_value(action_config: &Value, auth: &Value) -> Result<Self, String> {
         Ok(Self {
             client_email: require_inline_string(auth, "client_email", "oauth_service_account")?,
             private_key: secret_field(
@@ -621,14 +620,15 @@ impl ServiceAccountRequest {
                 "private_key",
                 Some("private_key_secret"),
                 "oauth_service_account",
-            )?,
+            )
+            .await?,
             token_uri: require_inline_string(auth, "token_uri", "oauth_service_account")?,
         })
     }
 }
 
 async fn exchange_service_account_token(action_config: &Value, auth: &Value) -> Result<String, String> {
-    let req = ServiceAccountRequest::from_value(action_config, auth)?;
+    let req = ServiceAccountRequest::from_value(action_config, auth).await?;
 
     let now = chrono::Utc::now().timestamp();
     let exp = now + 3600; // 1h
@@ -643,11 +643,19 @@ async fn exchange_service_account_token(action_config: &Value, auth: &Value) -> 
         "iat": now,
         "exp": exp,
     });
-    let key = EncodingKey::from_rsa_pem(req.private_key.as_bytes())
-        .context("service_account private_key is not valid RSA PEM")
-        .map_err(|e| e.to_string())?;
-    let assertion = jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &key)
-        .map_err(|e| format!("failed to sign service-account JWT: {e}"))?;
+    // RSA PEM parse + RS256 sign is a few ms of pure CPU, and only the
+    // resulting token is cached — so a cache miss would otherwise stall an
+    // async worker on every service-account call.
+    let private_key = req.private_key.clone();
+    let assertion = tokio::task::spawn_blocking(move || {
+        let key = EncodingKey::from_rsa_pem(private_key.as_bytes())
+            .context("service_account private_key is not valid RSA PEM")
+            .map_err(|e| e.to_string())?;
+        jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &key)
+            .map_err(|e| format!("failed to sign service-account JWT: {e}"))
+    })
+    .await
+    .map_err(|e| format!("JWT signing task panicked: {e}"))??;
 
     let body = format!(
         "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion={}",
@@ -958,38 +966,41 @@ mod tests {
 
     // ── optional_secret_field (oauth_authorization_code client_secret) ─────
 
-    #[test]
-    fn optional_secret_field_returns_none_when_nothing_configured() {
+    #[tokio::test]
+    async fn optional_secret_field_returns_none_when_nothing_configured() {
         // A public/PKCE OAuth client legitimately has no client_secret —
         // this must not be an error.
         let cfg = json!({});
         let auth = json!({});
         assert_eq!(
             optional_secret_field(&cfg, &auth, "client_secret", Some("client_secret_secret"), "oauth_authorization_code")
+                .await
                 .unwrap(),
             None
         );
     }
 
-    #[test]
-    fn optional_secret_field_resolves_inline_when_present() {
+    #[tokio::test]
+    async fn optional_secret_field_resolves_inline_when_present() {
         let cfg = json!({});
         let auth = json!({ "client_secret": "shh" });
         assert_eq!(
             optional_secret_field(&cfg, &auth, "client_secret", Some("client_secret_secret"), "oauth_authorization_code")
+                .await
                 .unwrap(),
             Some("shh".to_string())
         );
     }
 
-    #[test]
-    fn optional_secret_field_errors_when_pointer_configured_but_key_missing() {
+    #[tokio::test]
+    async fn optional_secret_field_errors_when_pointer_configured_but_key_missing() {
         // Points at a secret-store name, but action_config.secrets has no
         // key configured for it — a real misconfiguration that must error
         // loudly rather than silently degrading to Ok(None).
         let cfg = json!({});
         let auth = json!({ "client_secret_secret": "MY_SECRET" });
         let err = optional_secret_field(&cfg, &auth, "client_secret", Some("client_secret_secret"), "oauth_authorization_code")
+            .await
             .unwrap_err();
         assert!(err.contains("MY_SECRET"), "{err}");
     }

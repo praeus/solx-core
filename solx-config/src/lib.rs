@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::SystemTime;
 
+use base64::Engine as _;
 use fs2::FileExt;
 use serde_json::{Map, Value};
 use solx_surface::error::{Result, SolxError};
@@ -23,6 +24,11 @@ use solx_surface::error::{Result, SolxError};
 pub use types::{InstalledPackage, SolxConfig};
 
 const CONFIG_FILE: &str = "solx-config.json";
+
+/// Default port `solx-server` binds on `127.0.0.1` when `server_port` isn't
+/// configured. Distinct from the OAuth loopback's own default port (8765,
+/// see `solx-actions::oauth_loopback::DEFAULT_LOOPBACK_PORT`).
+pub const DEFAULT_SERVER_PORT: u16 = 8766;
 
 /// Resolve the solx appdata directory:
 /// `SOLX_APPDATA_DIR` env override → `%APPDATA%/praeus/solx` (Windows) →
@@ -282,6 +288,38 @@ impl ConfigService {
             Ok(())
         })
     }
+
+    // ── solx-server bearer token ─────────────────────────────────────────────
+
+    /// Return the persisted `server_token`, generating and persisting a new
+    /// random one (32 bytes, base64) if none exists yet. A single `mutate()`
+    /// call makes generate-then-persist atomic under the same cross-process
+    /// lock every other config write uses, so two `solx-server`s started
+    /// concurrently against the same appdata dir can't race into two
+    /// different tokens.
+    pub fn ensure_server_token(&self) -> Result<String> {
+        if let Some(token) = self.snapshot().server_token {
+            if !token.trim().is_empty() {
+                return Ok(token);
+            }
+        }
+        let mut generated = String::new();
+        self.mutate(|obj| {
+            if let Some(existing) = obj.get("server_token").and_then(Value::as_str) {
+                if !existing.trim().is_empty() {
+                    generated = existing.to_string();
+                    return Ok(());
+                }
+            }
+            use rand::RngCore;
+            let mut bytes = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut bytes);
+            generated = base64::engine::general_purpose::STANDARD.encode(bytes);
+            obj.insert("server_token".into(), Value::String(generated.clone()));
+            Ok(())
+        })?;
+        Ok(generated)
+    }
 }
 
 fn read_file(path: &Path) -> Result<(Value, Option<SystemTime>)> {
@@ -362,5 +400,23 @@ mod tests {
         assert_eq!(cfg.list_packages().len(), 1);
         cfg.unregister_package("pkg").unwrap();
         assert!(cfg.list_packages().is_empty());
+    }
+
+    #[test]
+    fn ensure_server_token_generates_once_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ConfigService::open_in(dir.path()).unwrap();
+
+        assert!(cfg.snapshot().server_token.is_none());
+        let token = cfg.ensure_server_token().unwrap();
+        assert!(!token.trim().is_empty());
+        assert_eq!(cfg.snapshot().server_token.as_deref(), Some(token.as_str()));
+
+        // Calling again (same instance, or a fresh one over the same file —
+        // simulating a second solx-server process) must return the SAME
+        // token, not regenerate.
+        assert_eq!(cfg.ensure_server_token().unwrap(), token);
+        let cfg2 = ConfigService::open_in(dir.path()).unwrap();
+        assert_eq!(cfg2.ensure_server_token().unwrap(), token);
     }
 }

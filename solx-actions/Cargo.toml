@@ -26,12 +26,16 @@ tracing = { workspace = true }
 # each backend's deps on its matching `target_os`.
 keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native-sync-persistent"] }
 aes-gcm = "0.10"
-axum = "0.7"
+axum = { workspace = true }
 jsonwebtoken = "9"
 anyhow = { workspace = true }
 solx-files = { workspace = true }
 wasmtime = { version = "47", features = ["component-model"] }
 wasmtime-wasi = "47"
+# For `FutureExt::catch_unwind` around guest execution — `spawn_blocking`
+# used to absorb panics via JoinError and no longer does. Already in the
+# tree via wasmtime's default `component-model-async` feature.
+futures = { workspace = true }
 
 [dev-dependencies]
 solx-types = { workspace = true }

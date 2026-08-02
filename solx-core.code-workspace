@@ -2,6 +2,12 @@
 	"folders": [
 		{
 			"path": "."
+		},
+		{
+			"path": "../solx-packages"
+		},
+		{
+			"path": "../solx-js"
 		}
 	]
 }

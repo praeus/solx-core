@@ -11,7 +11,15 @@ interface types {
 }
 
 /// Host interface for executing another sol action from within a custom WASM component.
-/// All calls are permission-gated against the caller's permission sandbox.
+///
+/// Calls are attributed to the calling action: the host tags each one with the
+/// guest's own reference, which the built-ins use to scope what it can reach.
+/// Concretely, `get-secret`/`set-secret` resolve only against keys in the
+/// *calling* action's own `action_config.secrets`, and `entity_post_action` /
+/// `entity_delete_action` refuse to create, modify, or remove `command` and
+/// `webhook` actions — a guest cannot grant itself shell or outbound HTTP.
+/// Everything else in the built-in catalogue is reachable without restriction;
+/// there is no general permission system yet.
 interface action-exec {
   use types.{action-result};
   /// Execute a named sol action with a JSON-encoded payload.
@@ -19,7 +27,9 @@ interface action-exec {
 }
 
 /// Host interface for reading artifact bytes from within a custom WASM component.
-/// The caller must have artifact-read permission for the named artifact.
+///
+/// NOTE: unrestricted — any path in the file store is readable. There is no
+/// per-artifact permission check today.
 interface artifact-read {
   /// Read the raw bytes of an artifact by name.
   read: func(name: string) -> result<list<u8>, string>;
@@ -38,9 +48,10 @@ interface runner {
 
 /// World for user-supplied custom WASM action components.
 ///
-/// Custom components only get permission-gated access to action dispatch and
-/// artifact reads.  Direct DB, filesystem, model, and system-ops access is
-/// not available — all sensitive operations must go through named sol actions.
+/// Custom components only get action dispatch and artifact reads. Direct DB,
+/// filesystem, model, and system-ops access is not available — all sensitive
+/// operations must go through named sol actions, where the two restrictions
+/// described on `action-exec` apply.
 ///
 /// Build target: wasm32-wasip2
 world custom-action {

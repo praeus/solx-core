@@ -1,0 +1,19 @@
+[package]
+name = "solx-nesting-guest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Its own workspace: this is a wasm32-wasip2 artifact built on demand by
+# `tests/wasm_nesting.rs`, not a member of the solx-core workspace.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.36"
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+[profile.release]
+opt-level = "s"

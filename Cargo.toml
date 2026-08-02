@@ -11,6 +11,8 @@ members = [
     "solx-manager",
     "solx-cli",
     "solx-mcp",
+    "solx-client",
+    "solx-server",
 ]
 resolver = "2"
 
@@ -42,6 +44,8 @@ reqwest    = { version = "0.12", features = ["json", "rustls-tls"] }
 url        = "2"
 rand       = "0.8"
 tracing    = "0.1"
+axum       = "0.7"
+futures    = "0.3"
 
 # Local crates
 solx-surface  = { path = "solx-surface" }
@@ -53,3 +57,4 @@ solx-actions  = { path = "solx-actions" }
 solx-scripts  = { path = "solx-scripts" }
 solx-packages = { path = "solx-packages" }
 solx-manager  = { path = "solx-manager" }
+solx-client   = { path = "solx-client" }

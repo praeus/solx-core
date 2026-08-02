@@ -8,9 +8,11 @@
 //! third-party component executed under wasmtime — built-ins no longer use
 //! WASM at all).
 
+pub mod caller;
 mod db;
 mod exec;
 pub mod internal;
+mod mask;
 pub mod oauth_loopback;
 mod seed;
 pub mod secrets;
@@ -32,6 +34,7 @@ use solx_surface::path::{full_ref, normalize_path, validate_name};
 use solx_surface::query::{ListOptions, Page};
 use uuid::Uuid;
 
+use caller::Caller;
 use db::{map_db, Db};
 
 pub use seed::BUILTIN_PATH;
@@ -69,11 +72,16 @@ pub struct LocalActionManager {
     types: Arc<dyn TypeManager>,
     docs: Arc<dyn DocManager>,
     files: Arc<dyn FileStore>,
-    /// Set once, right after construction, to this manager's own `Arc<dyn
-    /// ActionManager>` — needed so WASM guests can recursively call back
-    /// into `entity_exec`/`action-exec` (see `wasm_host`). `&self` methods
+    /// Set once, right after construction, to this manager's own
+    /// `Arc<LocalActionManager>` — needed so WASM guests can recursively
+    /// call back into `action-exec` (see `wasm_host`). `&self` methods
     /// can't hand out `Arc<Self>` on their own, hence the `OnceLock`.
-    self_ref: OnceLock<Weak<dyn ActionManager>>,
+    ///
+    /// Concrete rather than `Weak<dyn ActionManager>` so the recursive hop
+    /// can reach [`Self::exec_as`], which carries the calling action's
+    /// identity. The trait's `exec` has no room for it, and deliberately
+    /// so — see [`crate::caller`].
+    self_ref: OnceLock<Weak<LocalActionManager>>,
 }
 
 impl LocalActionManager {
@@ -102,26 +110,57 @@ impl LocalActionManager {
         })
     }
 
-    /// Provide this manager's own `Arc<dyn ActionManager>` handle for
-    /// recursive WASM `entity_exec`/`action-exec` calls. Must be called
-    /// exactly once, right after the manager is wrapped in an `Arc` (e.g.
+    /// Provide this manager's own handle for recursive WASM `action-exec`
+    /// calls. Must be called exactly once, right after the manager is
+    /// wrapped in an `Arc` (e.g.
     /// `let m = Arc::new(LocalActionManager::open(...).await?);
-    /// m.set_self_ref(Arc::downgrade(&m) as _);`). A `Weak` is used (not a
+    /// m.set_self_ref(Arc::downgrade(&m));`). A `Weak` is used (not a
     /// strong `Arc`) so the manager doesn't hold a reference cycle to
     /// itself.
-    pub fn set_self_ref(&self, self_ref: Weak<dyn ActionManager>) {
+    pub fn set_self_ref(&self, self_ref: Weak<LocalActionManager>) {
         let _ = self.self_ref.set(self_ref);
+    }
+
+    /// Upgrade [`Self::self_ref`], or explain the wiring bug.
+    fn self_arc(&self) -> Result<Arc<LocalActionManager>> {
+        self.self_ref.get().and_then(Weak::upgrade).ok_or_else(|| {
+            SolxError::Exec(
+                "action manager self-reference not set (internal wiring bug — \
+                 call LocalActionManager::set_self_ref after construction)"
+                    .into(),
+            )
+        })
+    }
+
+    /// Read a row **without** redacting `action_config`.
+    ///
+    /// Execution needs the real thing — `run_command` reads `cwd`,
+    /// `run_webhook` reads `auth`/`headers`, and `webhook_auth` resolves
+    /// credentials out of it. The [`ActionManager::get`] trait method wraps
+    /// this and masks; nothing that leaves the process should use this one.
+    async fn get_unmasked(&self, path: &str, name: &str) -> Result<Action> {
+        let path = normalize_path(path)?;
+        validate_name(name)?;
+        let fr = full_ref(&path, name)?;
+        let conn = self.db.connect().await?;
+        get_row(&conn, &path, name.trim())
+            .await?
+            .ok_or_else(|| SolxError::NotFound(format!("action {fr}")))
     }
 
     /// Resolve a WASM action's `bin_name` to bytes: try the shared
     /// artifact location first, then the action's own scratch space.
-    async fn load_wasm_bytes(&self, action: &Action, bin_name: &str) -> Result<Vec<u8>> {
+    ///
+    /// Returned behind an `Arc` because the bytes are handed to
+    /// `wasm_host::exec`, which moves them onto the blocking pool to
+    /// compile on a cache miss.
+    async fn load_wasm_bytes(&self, action: &Action, bin_name: &str) -> Result<Arc<Vec<u8>>> {
         let shared = solx_files::shared_action_file_path(bin_name);
         if let Ok(bytes) = self.files.get(&shared).await {
-            return Ok(bytes);
+            return Ok(Arc::new(bytes));
         }
         let owned = solx_files::action_file_path(&action.id.to_string(), bin_name);
-        self.files.get(&owned).await.map_err(|_| {
+        self.files.get(&owned).await.map(Arc::new).map_err(|_| {
             SolxError::Exec(format!(
                 "wasm artifact '{bin_name}' not found (tried '{shared}' and '{owned}')"
             ))
@@ -158,6 +197,13 @@ fn parse_dt(s: &str) -> Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.into())
         .map_err(|e| SolxError::Db(e.to_string()))
+}
+
+/// Per-action wall-clock ceiling from `action_config.timeout_secs`, using
+/// the same untyped-config convention as `cwd`. `None` means the backend's
+/// own default applies.
+fn timeout_secs(action_config: &Option<Value>) -> Option<u64> {
+    action_config.as_ref()?.get("timeout_secs")?.as_u64()
 }
 
 fn row_to_action(row: &libsql::Row) -> Result<Action> {
@@ -258,9 +304,17 @@ impl ActionManager for LocalActionManager {
         let action_type = input
             .action_type
             .or_else(|| existing.as_ref().and_then(|a| a.action_type));
-        let action_config = input
-            .action_config
-            .or_else(|| existing.as_ref().and_then(|a| a.action_config.clone()));
+        // `get`/`list` redact secret material, so an incoming config may be
+        // one the caller was never actually shown. Restore anything echoed
+        // back as the mask sentinel from the stored row rather than writing
+        // "***" over a real key — see `crate::mask`.
+        let action_config = match input.action_config {
+            Some(incoming) => Some(
+                mask::unmask_merge(incoming, existing.as_ref().and_then(|a| a.action_config.as_ref()))
+                    .map_err(SolxError::Invalid)?,
+            ),
+            None => existing.as_ref().and_then(|a| a.action_config.clone()),
+        };
         let capabilities = merge_vec!(capabilities);
         let phrases = merge_vec!(phrases);
         let files = merge_vec!(files);
@@ -317,13 +371,9 @@ impl ActionManager for LocalActionManager {
     }
 
     async fn get(&self, path: &str, name: &str) -> Result<Action> {
-        let path = normalize_path(path)?;
-        validate_name(name)?;
-        let fr = full_ref(&path, name)?;
-        let conn = self.db.connect().await?;
-        get_row(&conn, &path, name.trim())
-            .await?
-            .ok_or_else(|| SolxError::NotFound(format!("action {fr}")))
+        let mut action = self.get_unmasked(path, name).await?;
+        mask::mask_action_config_opt(&mut action.action_config);
+        Ok(action)
     }
 
     async fn delete(&self, path: &str, name: &str) -> Result<()> {
@@ -352,7 +402,7 @@ impl ActionManager for LocalActionManager {
         let (where_sql, like) = match &opts.path_prefix {
             Some(p) => {
                 let p = normalize_path(p)?;
-                let like = if p == "/" { "/%".to_string() } else { format!("{p}/%") };
+                let like = if p == "/" { "/%".to_string() } else { format!("{p}/%").to_string() };
                 (" WHERE (path=?1 OR path LIKE ?2)".to_string(), Some((p, like)))
             }
             None => (String::new(), None),
@@ -384,13 +434,37 @@ impl ActionManager for LocalActionManager {
         };
         let mut items = Vec::new();
         while let Some(row) = rows.next().await.map_err(map_db)? {
-            items.push(row_to_action(&row)?);
+            let mut action = row_to_action(&row)?;
+            mask::mask_action_config_opt(&mut action.action_config);
+            items.push(action);
         }
         Ok(Page::new(items, total, limit, offset))
     }
 
+    /// Entry point for every *external* caller — the CLI, the MCP server,
+    /// the HTTP route, `solx-client`. None of them is an action, so the
+    /// caller is `None`; see [`LocalActionManager::exec_as`].
     async fn exec(&self, path: &str, name: &str, params: Value) -> Result<ActionExecResult> {
-        let action = self.get(path, name).await?;
+        self.exec_as(path, name, params, None).await
+    }
+}
+
+impl LocalActionManager {
+    /// Execute an action, optionally attributed to the action that invoked
+    /// it.
+    ///
+    /// `caller` is `Some` only on the recursive hop: a WASM guest calling
+    /// `action-exec` (see [`crate::wasm_host`]), which is the sole
+    /// re-entrant path into execution. It scopes `get_secret`/`set_secret`
+    /// to the *calling* action's own keys.
+    pub async fn exec_as(
+        &self,
+        path: &str,
+        name: &str,
+        params: Value,
+        caller: Option<&Caller>,
+    ) -> Result<ActionExecResult> {
+        let action = self.get_unmasked(path, name).await?;
         let action_ref = full_ref(&action.path, &action.name)?;
 
         // Validate params against the declared parameter type, if any.
@@ -403,7 +477,14 @@ impl ActionManager for LocalActionManager {
                 let fn_name = action.fn_name.as_deref().ok_or_else(|| {
                     SolxError::Exec("command action has no fn_name (the command to run)".into())
                 })?;
-                exec::run_command(&self.config, fn_name, &action.action_config, &params)?
+                exec::run_command(
+                    &self.config,
+                    fn_name,
+                    &action.action_config,
+                    &params,
+                    timeout_secs(&action.action_config),
+                )
+                .await?
             }
             Some(ActionType::Webhook) => {
                 let url = action.fn_name.as_deref().ok_or_else(|| {
@@ -415,19 +496,13 @@ impl ActionManager for LocalActionManager {
                 let fn_name = action.fn_name.as_deref().ok_or_else(|| {
                     SolxError::Exec("internal action has no fn_name (operation)".into())
                 })?;
-                let actions_arc = self.self_ref.get().and_then(|w| w.upgrade()).ok_or_else(|| {
-                    SolxError::Exec(
-                        "action manager self-reference not set (internal wiring bug — \
-                         call LocalActionManager::set_self_ref after construction)"
-                            .into(),
-                    )
-                })?;
                 let ctx = internal::InternalCtx {
                     docs: self.docs.clone(),
                     types: self.types.clone(),
-                    actions: actions_arc,
+                    actions: self.self_arc()?,
                     files: self.files.clone(),
                     action_config: action.action_config.clone(),
+                    caller: caller.cloned(),
                 };
                 internal::run_internal(fn_name, &params, &ctx)
                     .await
@@ -438,24 +513,23 @@ impl ActionManager for LocalActionManager {
                     SolxError::Exec("wasm action has no bin_name (artifact)".into())
                 })?;
                 let bytes = self.load_wasm_bytes(&action, bin_name).await?;
-                let actions_arc = self.self_ref.get().and_then(|w| w.upgrade()).ok_or_else(|| {
-                    SolxError::Exec(
-                        "action manager self-reference not set (internal wiring bug — \
-                         call LocalActionManager::set_self_ref after construction)"
-                            .into(),
-                    )
-                })?;
+                // A new caller frame: anything this guest invokes is invoked
+                // by *this* action, not by whoever invoked it. The incoming
+                // `caller` is therefore dropped rather than forwarded, so a
+                // guest can never reach an outer action's secret keys.
+                let frame = Caller::from_action(&action_ref, action.action_config.as_ref());
                 // WASM execution reports its own success/message (a guest can
                 // report a handled failure without erroring the host call), so
                 // it returns a full ActionExecResult directly rather than
                 // going through the common Value-wrapping below.
                 return wasm_host::exec(
-                    actions_arc,
+                    self.self_arc()?,
                     self.files.clone(),
-                    &bytes,
+                    bytes,
                     action.fn_name.as_deref(),
                     &params,
-                    Some(&action_ref),
+                    frame,
+                    timeout_secs(&action.action_config),
                 )
                 .await;
             }
@@ -512,6 +586,101 @@ mod tests {
         (dir, cfg, m)
     }
 
+    /// A manager wired for recursive execution, as `solx-manager` does it.
+    async fn setup_wired() -> (tempfile::TempDir, Arc<LocalActionManager>) {
+        let (dir, _cfg, m) = setup().await;
+        let m = Arc::new(m);
+        m.set_self_ref(Arc::downgrade(&m));
+        (dir, m)
+    }
+
+    fn cfg_with_secret(key: &str) -> Value {
+        serde_json::json!({ "cwd": "/work", "secrets": { "API_TOKEN": key } })
+    }
+
+    #[tokio::test]
+    async fn get_and_list_redact_secrets_but_exec_reads_them_raw() {
+        let (_d, _c, m) = setup().await;
+        let input = ActionInput {
+            action_type: Some(ActionType::Command),
+            fn_name: Some("echo".into()),
+            action_config: Some(cfg_with_secret("c3VwZXItc2VjcmV0LWtleS1oZXJlLXBhZGRpbmc=")),
+            ..Default::default()
+        };
+        m.post("/tools", "s", input).await.unwrap();
+
+        // Outbound reads are redacted...
+        let got = m.get("/tools", "s").await.unwrap();
+        assert_eq!(got.action_config.as_ref().unwrap()["secrets"]["API_TOKEN"], serde_json::json!("***"));
+        // ...but non-secret fields survive, so the config stays inspectable.
+        assert_eq!(got.action_config.as_ref().unwrap()["cwd"], serde_json::json!("/work"));
+
+        let page = m.list(ListOptions { path_prefix: Some("/tools".into()), ..Default::default() })
+            .await
+            .unwrap();
+        let listed = page.items.iter().find(|a| a.name == "s").unwrap();
+        assert_eq!(listed.action_config.as_ref().unwrap()["secrets"]["API_TOKEN"], serde_json::json!("***"));
+
+        // Execution reads through `get_unmasked`, so it still sees the key.
+        let raw = m.get_unmasked("/tools", "s").await.unwrap();
+        assert_eq!(
+            raw.action_config.as_ref().unwrap()["secrets"]["API_TOKEN"],
+            serde_json::json!("c3VwZXItc2VjcmV0LWtleS1oZXJlLXBhZGRpbmc=")
+        );
+    }
+
+    /// The round trip that would otherwise destroy a key: fetch (redacted),
+    /// edit an unrelated field, post the whole thing back.
+    #[tokio::test]
+    async fn posting_back_a_redacted_config_preserves_the_key() {
+        let (_d, _c, m) = setup().await;
+        let real_key = "c3VwZXItc2VjcmV0LWtleS1oZXJlLXBhZGRpbmc=";
+        m.post(
+            "/tools",
+            "s",
+            ActionInput {
+                action_type: Some(ActionType::Command),
+                fn_name: Some("echo".into()),
+                action_config: Some(cfg_with_secret(real_key)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut fetched = m.get("/tools", "s").await.unwrap().action_config.unwrap();
+        fetched["cwd"] = serde_json::json!("/elsewhere");
+        m.post(
+            "/tools",
+            "s",
+            ActionInput { action_config: Some(fetched), ..Default::default() },
+        )
+        .await
+        .unwrap();
+
+        let raw = m.get_unmasked("/tools", "s").await.unwrap().action_config.unwrap();
+        assert_eq!(raw["secrets"]["API_TOKEN"], serde_json::json!(real_key));
+        assert_eq!(raw["cwd"], serde_json::json!("/elsewhere"));
+    }
+
+    #[tokio::test]
+    async fn posting_an_invented_mask_sentinel_is_rejected() {
+        let (_d, _c, m) = setup().await;
+        let err = m
+            .post(
+                "/tools",
+                "s",
+                ActionInput {
+                    action_type: Some(ActionType::Command),
+                    action_config: Some(serde_json::json!({ "secrets": { "NEW": "***" } })),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no stored value to restore"), "{err}");
+    }
+
     #[tokio::test]
     async fn post_get_delete() {
         let (_d, _c, m) = setup().await;
@@ -549,6 +718,113 @@ mod tests {
             .unwrap();
         assert!(res.success);
         assert_eq!(res.result, serde_json::json!(42));
+    }
+
+    // ── entity_post_action: no self-granting shell ───────────────────────
+    //
+    // These go through `exec` on `/builtin/entity_post_action`, which is the
+    // exact path an MCP tool call, a WASM guest's `action-exec`, and a
+    // `.solx` script all take. A direct `m.post(...)` is the CLI's path and
+    // stays allowed — that's the whole distinction being enforced.
+
+    async fn exec_builtin(m: &Arc<LocalActionManager>, fn_name: &str, params: Value) -> Result<Value> {
+        m.exec(BUILTIN_PATH, fn_name, params).await.map(|r| r.result)
+    }
+
+    #[tokio::test]
+    async fn entity_post_action_refuses_to_create_command_or_webhook() {
+        let (_d, m) = setup_wired().await;
+
+        for ty in ["command", "webhook"] {
+            let err = exec_builtin(
+                &m,
+                "entity_post_action",
+                serde_json::json!({
+                    "path": "/evil", "name": "shell",
+                    "action_type": ty, "fn_name": "rm -rf /"
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert!(err.to_string().contains("use the solx CLI"), "{ty}: {err}");
+            assert!(m.get_unmasked("/evil", "shell").await.is_err(), "{ty} was created anyway");
+        }
+    }
+
+    /// `post` is a merge-upsert, so a payload with no `action_type` at all
+    /// would otherwise silently rewrite an existing Command action's shell
+    /// command. The guard has to consult the stored row, not just the input.
+    #[tokio::test]
+    async fn entity_post_action_refuses_to_repoint_an_existing_command() {
+        let (_d, m) = setup_wired().await;
+        m.post(
+            "/tools",
+            "safe",
+            ActionInput {
+                action_type: Some(ActionType::Command),
+                fn_name: Some("echo 42".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let err = exec_builtin(
+            &m,
+            "entity_post_action",
+            serde_json::json!({ "path": "/tools", "name": "safe", "fn_name": "rm -rf /" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("use the solx CLI"), "{err}");
+        assert_eq!(
+            m.get_unmasked("/tools", "safe").await.unwrap().fn_name.as_deref(),
+            Some("echo 42")
+        );
+    }
+
+    #[tokio::test]
+    async fn entity_delete_action_refuses_to_remove_a_command() {
+        let (_d, m) = setup_wired().await;
+        m.post(
+            "/tools",
+            "safe",
+            ActionInput {
+                action_type: Some(ActionType::Command),
+                fn_name: Some("echo 42".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let err = exec_builtin(
+            &m,
+            "entity_delete_action",
+            serde_json::json!({ "path": "/tools", "name": "safe" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("use the solx CLI"), "{err}");
+        assert!(m.get_unmasked("/tools", "safe").await.is_ok(), "action was deleted anyway");
+    }
+
+    /// The lockdown is limited to the two executable types — everything else
+    /// an agent legitimately does through this built-in still works.
+    #[tokio::test]
+    async fn entity_post_action_still_allows_non_executable_types() {
+        let (_d, m) = setup_wired().await;
+        exec_builtin(
+            &m,
+            "entity_post_action",
+            serde_json::json!({
+                "path": "/tools", "name": "w",
+                "action_type": "wasm", "bin_name": "x.wasm"
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(m.get_unmasked("/tools", "w").await.is_ok());
     }
 
     #[tokio::test]

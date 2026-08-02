@@ -1,0 +1,28 @@
+[package]
+name = "solx-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HTTP server hosting the local solx managers, so multiple solx-cli/solx-mcp processes can share one appdata dir concurrently."
+
+[[bin]]
+name = "solx-server"
+path = "src/main.rs"
+
+[dependencies]
+solx-manager = { workspace = true }
+solx-surface = { workspace = true }
+solx-config = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+solx-client = { workspace = true }
+tempfile = "3"

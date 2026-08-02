@@ -97,21 +97,38 @@ fn fields_from(schema: &Schema) -> Result<Fields> {
     })
 }
 
-/// A document search index backed by Tantivy.
-pub struct DocIndex {
-    index: Index,
+/// Write half of the index. Tantivy is entirely synchronous and an
+/// `IndexWriter` needs exclusive access, so this is owned by one dedicated
+/// thread (see [`crate::LocalDocManager`]) and never touched from async
+/// code. Mutations are queued to it over a channel.
+pub struct DocIndexWriter {
     writer: IndexWriter,
+    /// A clone of the same reader the searcher holds — `IndexReader` is an
+    /// Arc-backed handle, so reloading here is what makes a commit visible
+    /// to searches.
     reader: IndexReader,
     fields: Fields,
 }
 
-impl DocIndex {
-    /// Open an existing index at `index_dir`, or create a fresh one. Returns
-    /// whether the index was just (re)created from scratch — either because
-    /// it didn't exist yet, or because an incompatible on-disk schema was
-    /// wiped and recreated — so the caller can repopulate it from the
-    /// document database (see [`crate::LocalDocManager::reindex_all`]).
-    pub fn open(index_dir: &Path) -> Result<(Self, bool)> {
+/// Read half. Cheap to clone (every field is an Arc-backed handle) and
+/// `Send + Sync`, so a search can be handed to `spawn_blocking` without
+/// holding any lock.
+#[derive(Clone)]
+pub struct DocSearcher {
+    index: Index,
+    reader: IndexReader,
+    fields: Fields,
+}
+
+impl DocIndexWriter {
+    /// Open an existing index at `index_dir`, or create a fresh one.
+    ///
+    /// Returns the write half, the read half, and whether the index was just
+    /// (re)created from scratch — either because it didn't exist yet, or
+    /// because an incompatible on-disk schema was wiped and recreated — so
+    /// the caller can repopulate it from the document database (see
+    /// [`crate::LocalDocManager::reindex_all`]).
+    pub fn open(index_dir: &Path) -> Result<(Self, DocSearcher, bool)> {
         std::fs::create_dir_all(index_dir)?;
         let (desired, _) = build_schema();
         let (index, created_fresh) = if index_dir.join("meta.json").exists() {
@@ -134,20 +151,25 @@ impl DocIndex {
             .reload_policy(ReloadPolicy::Manual)
             .try_into()
             .map_err(se)?;
+        let searcher = DocSearcher {
+            index,
+            reader: reader.clone(),
+            fields: fields.clone(),
+        };
         Ok((
-            DocIndex {
-                index,
+            DocIndexWriter {
                 writer,
                 reader,
                 fields,
             },
+            searcher,
             created_fresh,
         ))
     }
 
-    /// Index (or re-index) one document.
+    /// Stage one document. **Does not commit** — see [`Self::commit`].
     #[allow(clippy::too_many_arguments)]
-    pub fn index_doc(
+    pub fn stage_doc(
         &mut self,
         id: &str,
         path: &str,
@@ -182,21 +204,30 @@ impl DocIndex {
         }
         doc.add_text(self.fields.content_text, content_text);
         self.writer.add_document(doc).map_err(se)?;
-        self.commit()
+        Ok(())
     }
 
-    pub fn delete_doc(&mut self, name_raw: &str) -> Result<()> {
+    /// Stage a delete. **Does not commit** — see [`Self::commit`].
+    pub fn stage_delete(&mut self, name_raw: &str) {
         self.writer
             .delete_term(Term::from_field_text(self.fields.name_raw, name_raw));
-        self.commit()
     }
 
-    fn commit(&mut self) -> Result<()> {
+    /// Flush everything staged and make it visible to searches.
+    ///
+    /// This is the expensive part — segment serialization, `fsync`, and a
+    /// reader reload, typically tens to hundreds of milliseconds. It used to
+    /// run once per document written; the writer thread now calls it once
+    /// per drained batch instead, which is what the 50MB writer heap above
+    /// was always sized for.
+    pub fn commit(&mut self) -> Result<()> {
         self.writer.commit().map_err(se)?;
         self.reader.reload().map_err(se)?;
         Ok(())
     }
+}
 
+impl DocSearcher {
     pub fn search(&self, query: &SearchQuery) -> Result<SearchResults> {
         let limit = query.limit.unwrap_or(20).max(1);
         let offset = query.offset.unwrap_or(0);

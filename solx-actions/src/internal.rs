@@ -38,10 +38,12 @@ use serde_json::{json, Value};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use solx_surface::entities::{ActionInput, Document, DocumentInput, TypeInput};
+use solx_surface::entities::{ActionInput, ActionType, Document, DocumentInput, TypeInput};
+use solx_surface::error::SolxError;
 use solx_surface::managers::{ActionManager, DocManager, FileStore, TypeManager};
 use solx_surface::query::{ListOptions, SearchQuery};
 
+use crate::caller::Caller;
 use crate::oauth_loopback::{self, LoopbackResult, LoopbackState};
 
 /// The manager handles internal actions need — unlike OAuth (pure
@@ -54,11 +56,18 @@ pub struct InternalCtx {
     pub types: Arc<dyn TypeManager>,
     pub actions: Arc<dyn ActionManager>,
     pub files: Arc<dyn FileStore>,
-    /// The *calling* action's own `action_config` (the row whose `fn_name`
-    /// dispatched to this handler) — `get_secret`/`set_secret` scope to
-    /// whichever action is currently executing, exactly like the WASM host
-    /// functions they replace did (see `resolve_secret_key`).
+    /// The *executing* action's own `action_config` — i.e. the row whose
+    /// `fn_name` dispatched to this handler, which for a built-in is the
+    /// `/builtin/...` row itself.
     pub action_config: Option<Value>,
+    /// The action that *invoked* this one, when there is one. Set only on
+    /// the recursive hop from a WASM guest; `None` for the CLI, MCP, and
+    /// HTTP, none of which are actions. `get_secret`/`set_secret` scope to
+    /// this — see [`crate::caller`] for why it can't be spoofed.
+    ///
+    /// **Invariant:** read-only input to key resolution. No handler may
+    /// return it, or any key inside it, in its result value.
+    pub caller: Option<Caller>,
 }
 
 // ── Registry ─────────────────────────────────────────────────────────────────
@@ -153,8 +162,8 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
         "set_env" => Ok(set_env(params)),
         "fetch_html" => fetch_html(params).await,
 
-        "get_secret" => Ok(get_secret(params, ctx.action_config.as_ref())),
-        "set_secret" => set_secret(params, ctx.action_config.as_ref()),
+        "get_secret" => get_secret(params, ctx.caller.as_ref()).await,
+        "set_secret" => set_secret(params, ctx.caller.as_ref()).await,
 
         other => Err(format!("unknown internal fn_name '{other}'")),
     }
@@ -233,10 +242,52 @@ async fn type_list(params: &Value, types: &Arc<dyn TypeManager>) -> Result<Value
     to_value(&page)
 }
 
+/// Shell (`Command`) and outbound-HTTP (`Webhook`) actions are the two
+/// action types that execute arbitrary code, so creating or modifying one is
+/// a CLI-only operation.
+///
+/// This built-in is the *only* route to `ActionManager::post` available to an
+/// MCP client, a WASM guest, or a `.solx` script — MCP has no separate CRUD
+/// layer, and a guest's `action-exec` lands here too. Refusing both types
+/// here therefore closes all three at once, in local and remote mode alike
+/// (in remote mode `exec` runs server-side, so this same check runs there).
+///
+/// The `existing` half matters as much as the incoming half: `post` is a
+/// merge-upsert, so a payload carrying only `fn_name` and no `action_type`
+/// would otherwise silently rewrite what an established Command action
+/// shells out to.
+async fn guard_executable_action(
+    actions: &Arc<dyn ActionManager>,
+    path: &str,
+    name: &str,
+    incoming: Option<ActionType>,
+    verb: &str,
+) -> Result<(), String> {
+    let existing = match actions.get(path, name).await {
+        Ok(a) => a.action_type,
+        Err(SolxError::NotFound(_)) => None,
+        Err(e) => return Err(e.to_string()),
+    };
+    for ty in [incoming, existing].into_iter().flatten() {
+        let label = match ty {
+            ActionType::Command => "command",
+            ActionType::Webhook => "webhook",
+            _ => continue,
+        };
+        return Err(format!(
+            "cannot {verb} '{label}' actions from an action, MCP tool call, or script \
+             (attempted on {path}/{name}); use the solx CLI"
+        ));
+    }
+    Ok(())
+}
+
 async fn action_post(params: &Value, actions: &Arc<dyn ActionManager>) -> Result<Value, String> {
     let name = require_str(params, "name")?;
     let input: ActionInput = parse_input(params)?;
-    let a = actions.post(path_or_root(params), name, input).await.map_err(|e| e.to_string())?;
+    let path = path_or_root(params);
+    guard_executable_action(actions, path, name, input.action_type, "create or modify").await?;
+    let a = actions.post(path, name, input).await.map_err(|e| e.to_string())?;
     to_value(&a)
 }
 
@@ -248,7 +299,12 @@ async fn action_get(params: &Value, actions: &Arc<dyn ActionManager>) -> Result<
 
 async fn action_delete(params: &Value, actions: &Arc<dyn ActionManager>) -> Result<Value, String> {
     let name = require_str(params, "name")?;
-    actions.delete(path_or_root(params), name).await.map_err(|e| e.to_string())?;
+    let path = path_or_root(params);
+    // Same reasoning as `action_post`: if these callers can't create or
+    // modify an executable action, they shouldn't be able to remove one
+    // either.
+    guard_executable_action(actions, path, name, None, "delete").await?;
+    actions.delete(path, name).await.map_err(|e| e.to_string())?;
     Ok(json!({ "deleted": true }))
 }
 
@@ -454,30 +510,43 @@ async fn fetch_html(params: &Value) -> Result<Value, String> {
 
 // ── secrets ──────────────────────────────────────────────────────────────────
 //
-// Scoped to whichever action row is currently executing (`ctx.action_config`,
-// set once by `LocalActionManager::exec` before dispatch) — the same
-// scoping the WASM `secrets` host functions used, just relocated. An action
-// wanting `get_secret`/`set_secret` must itself have a `name -> key`
-// mapping in its own `action_config.secrets`.
+// Scoped to the action that *invoked* these built-ins (`ctx.caller`), not to
+// the `/builtin/get_secret` row that dispatched here — that row's own
+// `action_config` is always `null` (see `seed.rs`), so scoping to it, as an
+// earlier version did, meant no key ever resolved and both built-ins were
+// silently inert.
+//
+// An action wanting `get_secret`/`set_secret` must carry a `name -> key`
+// mapping in its own `action_config.secrets`. The key never leaves the host:
+// these return the decrypted *value*, never the key that unlocked it.
 
-fn resolve_secret_key(action_config: Option<&Value>, name: &str) -> Option<String> {
-    action_config?.get("secrets")?.get(name)?.as_str().map(str::to_string)
+/// Look up the AES key the calling action has configured for `name`.
+fn caller_secret_key<'a>(caller: Option<&'a Caller>, name: &str) -> Result<&'a str, String> {
+    let caller = caller.ok_or_else(|| {
+        format!(
+            "secret '{name}' is scoped to the calling action, but this call has no \
+             action caller — get_secret/set_secret can only be used from within an action"
+        )
+    })?;
+    caller.secret_key(name).ok_or_else(|| {
+        format!(
+            "no key configured for secret '{name}' in {caller}'s action_config.secrets"
+        )
+    })
 }
 
-fn get_secret(params: &Value, action_config: Option<&Value>) -> Value {
-    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-    let value = resolve_secret_key(action_config, name)
-        .and_then(|key| crate::secrets::get_secret(name, &key).ok().flatten());
-    json!({ "value": value })
+async fn get_secret(params: &Value, caller: Option<&Caller>) -> Result<Value, String> {
+    let name = require_str(params, "name")?;
+    let key = caller_secret_key(caller, name)?;
+    let value = crate::secrets::get_secret(name, key).await?;
+    Ok(json!({ "value": value }))
 }
 
-fn set_secret(params: &Value, action_config: Option<&Value>) -> Result<Value, String> {
+async fn set_secret(params: &Value, caller: Option<&Caller>) -> Result<Value, String> {
     let name = require_str(params, "name")?;
     let value = require_str(params, "value")?;
-    let key = resolve_secret_key(action_config, name).ok_or_else(|| {
-        format!("no key configured for secret '{name}' in the calling action's action_config.secrets")
-    })?;
-    crate::secrets::set_secret(name, value, &key)?;
+    let key = caller_secret_key(caller, name)?;
+    crate::secrets::set_secret(name, value, key).await?;
     Ok(json!({ "set": true }))
 }
 
@@ -659,6 +728,35 @@ async fn oauth_stop(params: &Value) -> Result<Value, String> {
 mod tests {
     use super::*;
 
+    /// A valid 32-byte AES key, base64-encoded — `crate::secrets` rejects
+    /// anything else.
+    fn key_b64() -> String {
+        base64::engine::general_purpose::STANDARD.encode([7u8; 32])
+    }
+
+    /// In-memory stand-in for the OS credential manager. `fn` pointers
+    /// can't capture state, so the map lives in a static.
+    static FAKE_SECRETS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+    fn fake_secrets() -> &'static Mutex<HashMap<String, String>> {
+        FAKE_SECRETS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn fake_secret_backend() -> crate::secrets::SecretBackendOverride {
+        fake_secrets().lock().unwrap().clear();
+        crate::secrets::SecretBackendOverride {
+            get: |name| Ok(fake_secrets().lock().unwrap().get(name).cloned()),
+            set: |name, blob| {
+                fake_secrets().lock().unwrap().insert(name.to_string(), blob.to_string());
+                Ok(())
+            },
+            delete: |name| {
+                fake_secrets().lock().unwrap().remove(name);
+                Ok(())
+            },
+        }
+    }
+
     /// Drive a manual callback for `state_value` without spinning up a
     /// real axum server — directly installs a `oneshot::Receiver` in the
     /// inbox that resolves to `result` when awaited.
@@ -700,9 +798,12 @@ mod tests {
             .await
             .unwrap(),
         );
-        let actions: Arc<dyn ActionManager> = actions_concrete.clone();
-        actions_concrete.set_self_ref(Arc::downgrade(&actions));
-        (dir, InternalCtx { docs, types, actions, files, action_config })
+        actions_concrete.set_self_ref(Arc::downgrade(&actions_concrete));
+        let actions: Arc<dyn ActionManager> = actions_concrete;
+        (
+            dir,
+            InternalCtx { docs, types, actions, files, action_config, caller: None },
+        )
     }
 
     #[tokio::test]
@@ -943,16 +1044,46 @@ mod tests {
         assert_eq!(got.get("value").and_then(Value::as_str), Some("hi"));
     }
 
+    /// The CLI, MCP, and the HTTP route all reach these built-ins with no
+    /// action caller, so neither can resolve a key — this is the denial that
+    /// keeps a model from reading an action's secrets by calling
+    /// `/builtin/get_secret` directly.
     #[tokio::test]
-    async fn get_secret_and_set_secret_require_configured_key() {
+    async fn secrets_are_refused_without_an_action_caller() {
         let (_d, ctx) = test_ctx(None).await;
-        // No action_config at all — no key configured for the secret.
-        let v = run_internal("get_secret", &json!({"name": "FOO"}), &ctx).await.unwrap();
-        assert_eq!(v.get("value").cloned(), Some(Value::Null));
+        assert!(ctx.caller.is_none());
+
+        let err = run_internal("get_secret", &json!({"name": "FOO"}), &ctx).await.unwrap_err();
+        assert!(err.contains("no action caller"), "{err}");
         let err = run_internal("set_secret", &json!({"name": "FOO", "value": "x"}), &ctx)
             .await
             .unwrap_err();
+        assert!(err.contains("no action caller"), "{err}");
+    }
+
+    #[serial_test::serial(secrets_backend)]
+    #[tokio::test]
+    async fn secrets_resolve_against_the_calling_actions_own_keys() {
+        let (_d, mut ctx) = test_ctx(None).await;
+        // Note the key comes from the *caller*, not from `ctx.action_config`
+        // (which is the `/builtin/...` row's config and is always null).
+        ctx.caller = Some(Caller::from_action(
+            "/pkg/foo",
+            Some(&json!({ "secrets": { "FOO": key_b64() } })),
+        ));
+
+        crate::secrets::set_secret_backend_for_tests(Some(fake_secret_backend()));
+        run_internal("set_secret", &json!({"name": "FOO", "value": "s3cret"}), &ctx)
+            .await
+            .unwrap();
+        let got = run_internal("get_secret", &json!({"name": "FOO"}), &ctx).await.unwrap();
+        assert_eq!(got.get("value").and_then(Value::as_str), Some("s3cret"));
+
+        // A secret the caller has no key for stays out of reach.
+        let err = run_internal("get_secret", &json!({"name": "BAR"}), &ctx).await.unwrap_err();
         assert!(err.contains("no key configured"), "{err}");
+        assert!(err.contains("action://pkg/foo"), "{err}");
+        crate::secrets::set_secret_backend_for_tests(None);
     }
 
     #[test]
