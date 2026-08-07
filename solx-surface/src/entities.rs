@@ -151,6 +151,9 @@ pub enum ActionType {
     /// Internal dispatcher handler — `fn_name` selects the operation
     /// (`oauth_start`, `oauth_await`, `oauth_stop`, etc.).
     Internal,
+    /// A `solx-scripts` script (`bin_name` = the `.solx` artifact). The
+    /// caller's params are available inside the script as `$params`.
+    Script,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +179,8 @@ pub struct Action {
     pub action_type: Option<ActionType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_name: Option<String>,
+    /// Wasm: the artifact file name. Script: the `.solx` script artifact
+    /// file name. Unused by Command/Webhook/Internal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bin_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

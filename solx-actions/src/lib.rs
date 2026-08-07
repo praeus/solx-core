@@ -4,9 +4,10 @@
 //! their parameter/result types by full path string. Execution dispatches by
 //! `action_type`: `Command` (shell), `Webhook` (HTTP), `Internal` (native
 //! handlers — the built-in catalogue: entity CRUD, search, file store,
-//! OAuth loopback, etc., see `crate::internal`), and `Wasm` (a *custom*,
+//! OAuth loopback, etc., see `crate::internal`), `Wasm` (a *custom*,
 //! third-party component executed under wasmtime — built-ins no longer use
-//! WASM at all).
+//! WASM at all), and `Script` (a `solx-scripts` script artifact, see
+//! `crate::script`).
 
 pub mod caller;
 mod db;
@@ -14,6 +15,7 @@ mod exec;
 pub mod internal;
 mod mask;
 pub mod oauth_loopback;
+pub mod script;
 mod seed;
 pub mod secrets;
 pub mod wasm_host;
@@ -64,7 +66,7 @@ CREATE TABLE IF NOT EXISTS actions (\
 
 const DEFAULT_LIMIT: usize = 50;
 
-/// libsql-backed [`ActionManager`] with command/webhook/internal/WASM
+/// libsql-backed [`ActionManager`] with command/webhook/internal/WASM/script
 /// execution.
 pub struct LocalActionManager {
     db: Db,
@@ -166,6 +168,26 @@ impl LocalActionManager {
             ))
         })
     }
+
+    /// Resolve a `Script` action's `bin_name` to its `.solx` source text —
+    /// same shared/owned lookup order as [`Self::load_wasm_bytes`].
+    async fn load_script_source(&self, action: &Action, bin_name: &str) -> Result<String> {
+        let shared = solx_files::shared_action_file_path(bin_name);
+        let bytes = match self.files.get(&shared).await {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                let owned = solx_files::action_file_path(&action.id.to_string(), bin_name);
+                self.files.get(&owned).await.map_err(|_| {
+                    SolxError::Exec(format!(
+                        "script artifact '{bin_name}' not found (tried '{shared}' and '{owned}')"
+                    ))
+                })?
+            }
+        };
+        String::from_utf8(bytes).map_err(|e| {
+            SolxError::Exec(format!("script artifact '{bin_name}' is not valid UTF-8: {e}"))
+        })
+    }
 }
 
 fn opt(s: String) -> Option<String> {
@@ -178,6 +200,7 @@ fn action_type_to_str(t: Option<ActionType>) -> String {
         Some(ActionType::Webhook) => "webhook",
         Some(ActionType::Command) => "command",
         Some(ActionType::Internal) => "internal",
+        Some(ActionType::Script) => "script",
         None => "",
     }
     .to_string()
@@ -189,6 +212,7 @@ fn action_type_from_str(s: &str) -> Option<ActionType> {
         "webhook" => Some(ActionType::Webhook),
         "command" => Some(ActionType::Command),
         "internal" => Some(ActionType::Internal),
+        "script" => Some(ActionType::Script),
         _ => None,
     }
 }
@@ -533,6 +557,29 @@ impl LocalActionManager {
                 )
                 .await;
             }
+            Some(ActionType::Script) => {
+                let bin_name = action.bin_name.as_deref().ok_or_else(|| {
+                    SolxError::Exec("script action has no bin_name (artifact)".into())
+                })?;
+                let source = self.load_script_source(&action, bin_name).await?;
+                // Same reasoning as the Wasm arm above: a fresh caller frame
+                // for this action's own identity, not the incoming one — a
+                // script's nested `exec` calls must never reach an outer
+                // action's secret keys.
+                let frame = Caller::from_action(&action_ref, action.action_config.as_ref());
+                let runner = script::ActionCommandRunner {
+                    actions: self.self_arc()?,
+                    caller: frame,
+                };
+                let initial = std::collections::HashMap::from([("params".to_string(), params.clone())]);
+                let run = solx_scripts::execute_script_with_vars(&runner, &source, initial);
+                let budget = std::time::Duration::from_secs(
+                    timeout_secs(&action.action_config).unwrap_or(exec::DEFAULT_TIMEOUT_SECS),
+                );
+                tokio::time::timeout(budget, run).await.map_err(|_| {
+                    SolxError::Exec(format!("script action {action_ref} timed out"))
+                })??
+            }
             None => {
                 return Err(SolxError::Exec(format!(
                     "action {action_ref} has no action_type to execute"
@@ -856,6 +903,175 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("bin_name"), "{err}");
+    }
+
+    // ── Script action tests ─────────────────────────────────────────────────
+
+    /// Like `setup_wired`, but also hands back the `FileStore` so a test can
+    /// upload a `.solx` artifact before posting the action that references it.
+    async fn setup_script() -> (tempfile::TempDir, Arc<LocalActionManager>, Arc<dyn FileStore>) {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Arc::new(ConfigService::open_in(dir.path()).unwrap());
+        let types: Arc<dyn TypeManager> = Arc::new(
+            LocalTypeManager::open(&dir.path().join("types.db"))
+                .await
+                .unwrap(),
+        );
+        let docs: Arc<dyn DocManager> = Arc::new(
+            LocalDocManager::open(
+                &dir.path().join("docs.db"),
+                &dir.path().join("idx"),
+                types.clone(),
+            )
+            .await
+            .unwrap(),
+        );
+        let files: Arc<dyn FileStore> = Arc::new(LocalFileStore::new(dir.path().join("files")));
+        let m = LocalActionManager::open(
+            &dir.path().join("actions.db"),
+            cfg,
+            types,
+            docs,
+            files.clone(),
+        )
+        .await
+        .unwrap();
+        let m = Arc::new(m);
+        m.set_self_ref(Arc::downgrade(&m));
+        (dir, m, files)
+    }
+
+    async fn post_script_artifact(files: &Arc<dyn FileStore>, name: &str, source: &str) {
+        files
+            .put(
+                &solx_files::shared_action_file_path(name),
+                source.as_bytes().to_vec(),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn exec_script_reads_params_and_calls_nested_action() {
+        let (_d, m, files) = setup_script().await;
+        // The bare `exec /builtin/uuid` (no `json` wrapping needed) becomes
+        // the script's result directly: the callee's whole ActionExecResult,
+        // JSON-encoded — same as `handle_exec` in the CLI.
+        // `json`'s argument is parsed as JSON, and `tokenize_stage` strips
+        // one layer of quoting to form the token — so a JSON string literal
+        // needs the outer '...' shell-style quoting plus inner \"...\" JSON
+        // quotes, same as the CLI's `json` command (`solx script -e 'json
+        // \'"big"\''`).
+        post_script_artifact(
+            &files,
+            "hello.solx",
+            "if $params.go == true; exec /builtin/uuid; else; json '\"skipped\"'; endif",
+        )
+        .await;
+        m.post(
+            "/tools",
+            "hello",
+            ActionInput {
+                action_type: Some(ActionType::Script),
+                bin_name: Some("hello.solx".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let ran = m.exec("/tools", "hello", serde_json::json!({"go": true})).await.unwrap();
+        assert_eq!(ran.result["success"], serde_json::json!(true));
+        assert!(
+            ran.result["result"]["uuid"].as_str().is_some_and(|s| !s.is_empty()),
+            "{:?}",
+            ran.result
+        );
+
+        let skipped = m.exec("/tools", "hello", serde_json::json!({"go": false})).await.unwrap();
+        assert_eq!(skipped.result, serde_json::json!("skipped"));
+    }
+
+    #[tokio::test]
+    async fn exec_script_missing_bin_name_errors() {
+        let (_d, _c, m) = setup().await;
+        let input = ActionInput {
+            action_type: Some(ActionType::Script),
+            ..Default::default()
+        };
+        m.post("/tools", "s", input).await.unwrap();
+        let err = m.exec("/tools", "s", serde_json::json!({})).await.unwrap_err();
+        assert!(err.to_string().contains("bin_name"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn exec_script_missing_artifact_errors() {
+        let (_d, _c, m) = setup().await;
+        let input = ActionInput {
+            action_type: Some(ActionType::Script),
+            bin_name: Some("missing.solx".into()),
+            ..Default::default()
+        };
+        m.post("/tools", "s", input).await.unwrap();
+        let err = m.exec("/tools", "s", serde_json::json!({})).await.unwrap_err();
+        assert!(err.to_string().contains("missing.solx"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn exec_script_unsupported_stage_verb_errors() {
+        let (_d, m, files) = setup_script().await;
+        post_script_artifact(&files, "bad.solx", "post doc /a --json '{}'").await;
+        m.post(
+            "/tools",
+            "bad",
+            ActionInput {
+                action_type: Some(ActionType::Script),
+                bin_name: Some("bad.solx".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let err = m.exec("/tools", "bad", serde_json::json!({})).await.unwrap_err();
+        assert!(err.to_string().contains("unsupported script stage"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn exec_script_action_not_blocked_by_executable_action_guard() {
+        let (_d, m, _files) = setup_script().await;
+        // Unlike `command`/`webhook`, `script` may be created through the
+        // guarded `entity_post_action` built-in the same way `wasm` can.
+        exec_builtin(
+            &m,
+            "entity_post_action",
+            serde_json::json!({
+                "path": "/tools", "name": "s",
+                "action_type": "script", "bin_name": "x.solx"
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(m.get_unmasked("/tools", "s").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn exec_script_times_out() {
+        let (_d, m, files) = setup_script().await;
+        post_script_artifact(&files, "slow.solx", "wait 5").await;
+        m.post(
+            "/tools",
+            "slow",
+            ActionInput {
+                action_type: Some(ActionType::Script),
+                bin_name: Some("slow.solx".into()),
+                action_config: Some(serde_json::json!({ "timeout_secs": 1 })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let err = m.exec("/tools", "slow", serde_json::json!({})).await.unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
     }
 
     #[tokio::test]

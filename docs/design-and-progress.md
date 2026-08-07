@@ -1,6 +1,6 @@
 # solx — Design, Structure & Progress
 
-_Last updated: 2026-07-29_
+_Last updated: 2026-08-05_
 
 This document describes the new `solx` system: why it exists, the architecture
 and key design decisions, and the current implementation status. It is the
@@ -24,8 +24,7 @@ meant to be driven equally well by a human or a model.
 
 Explicitly **out of scope**: LLM/Ollama, instruction planning & execution,
 deterministic extraction & media, browser actions, permissions & trust,
-knowledge bases (replaced by paths), action-scripts, and (for now) in-process
-IPC/HTTP servers.
+knowledge bases (replaced by paths), and action-scripts.
 
 This is a **fresh, standalone repository** with **no dependency on any `sol-*`
 crate**. Logic was ported/rewritten rather than shared; the old repo is
@@ -76,6 +75,8 @@ solx-core/
   solx-manager/    wires the local manager impls together (the App/Solx assembly)
   solx-cli/        the `solx` binary
   solx-mcp/        MCP server exposing actions/docs/types/files as tools (stdio)
+  solx-client/    HTTP proxy implementations of the manager traits (talks to solx-server)
+  solx-server/    HTTP server hosting the local solx managers, so multiple clients can share one appdata dir
 solx-wasm/         sibling workspace: SDK for third-party custom WASM actions
 ```
 
@@ -91,7 +92,9 @@ solx-actions  →  solx-surface, solx-config          (+ TypeManager injected)
 solx-scripts  →  solx-surface
 solx-packages →  solx-surface, solx-config, solx-scripts
 solx-manager  →  solx-surface, solx-config, solx-types, solx-files, solx-docs, solx-actions
-solx-cli      →  solx-manager, solx-actions (constants), solx-scripts, solx-packages
+solx-client   →  solx-surface, reqwest               (HTTP proxy impls of the manager traits)
+solx-server   →  solx-manager, solx-surface, solx-config, axum  (hosts the local managers over HTTP)
+solx-cli      →  solx-manager, solx-actions (constants), solx-scripts, solx-packages, solx-client
 solx-mcp      →  solx-manager, solx-surface, solx-config, rmcp
 ```
 
@@ -268,18 +271,27 @@ uninstall runs `uninstall.solx` if present.
 
 ---
 
-## 8. Client/server readiness
+## 8. Client/server (HTTP) transport
 
 Every manager is an object-safe `#[async_trait]` defined in `solx-surface`
 (`TypeManager`, `FileStore`, `DocManager`, `ActionManager`, plus an aggregate
-`Solx` facade), using only DTOs and `serde_json::Value`. Phase 1 ships only the
-local libsql/Tantivy impls, and the CLI codes against `Arc<dyn _>` — never the
-concrete structs.
+`Solx` facade), using only DTOs and `serde_json::Value`. Two parallel impls
+back every manager:
 
-This mirrors the old repo's `sol-surface`/`sol-client`/`sol-server` split, so a
-future `solx-client` (HTTP proxy implementing the same traits) and `solx-server`
-(hosting a local impl) can be added **without changing callers**. `async` was
-chosen specifically to keep these traits transport-agnostic.
+- **Local** (`Local*` in `solx-types`/`solx-docs`/`solx-actions`/`solx-files`)
+  — the in-process libsql/Tantivy impls wired by `solx-manager::App::wire_local`.
+- **Remote** (`Remote*` in `solx-client`) — `reqwest`-backed HTTP proxies
+  that hit a running `solx-server`. `solx-server` itself always uses the
+  local impl (built via `App::build_local` so it cannot proxy to itself),
+  binds `127.0.0.1:<port>` (default from config's `server_port`), and
+  gates every data route behind a bearer token read from config's
+  `server_token` (auto-generated on first start). A `SOLX_SERVER_URL` env
+  var or a config `server_url` flips `solx-manager` into remote mode for
+  any `solx-cli`/`solx-mcp` process pointed at the server.
+
+`async` was chosen specifically to keep these traits transport-agnostic —
+local and remote impls are interchangeable behind `Arc<dyn _>`, so callers
+(`solx-cli`, `solx-mcp`) never see the difference.
 
 ---
 
@@ -316,8 +328,10 @@ Entities: `doc`, `action`, `type`, `file`.
 | `solx-actions` | own DB, `Command`/`Webhook`/`Internal`/`Wasm` execution; the entire `/builtin` catalogue (30 actions) is native `Internal` dispatch | CRUD, command exec, internal dispatch (entity CRUD/search/files/env/secrets/OAuth), wasm host trait impls |
 | `solx-scripts` | pipeline language over `CommandRunner` | assign+substitute, quote-aware tokenize |
 | `solx-packages` | install/uninstall via script runner + config registry | (exercised via CLI) |
-| `solx-manager` | implements `Solx`; shared manager wiring for `solx-cli` and `solx-mcp` | (exercised via both consumers' tests) |
-| `solx-cli` | wires `solx-manager`; `post/get/delete/exec/list/search/script` | end-to-end smoke test + `examples/*.sh` |
+| `solx-manager` | implements `Solx`; shared manager wiring for `solx-cli`, `solx-mcp`, and `solx-server`; builds local or `solx-client` remote impls per config | (exercised via all three consumers' tests) |
+| `solx-client` | HTTP proxy impls of the manager traits (`reqwest`); flips `solx-manager` into remote mode when `server_url`/`SOLX_SERVER_URL` is set | roundtrip against a real `solx-server` |
+| `solx-server` | axum HTTP server hosting the local managers; bearer-token auth; `127.0.0.1`-only bind; always uses `App::build_local` (never proxies to itself) | end-to-end CLI/server/client roundtrip |
+| `solx-cli` | wires `solx-manager`; `post/get/delete/exec/list/search/script`; works in both local and remote mode (no flag needed — picked up from config/env) | end-to-end smoke test + `examples/*.sh` (local and against `solx-server`) |
 | `solx-mcp` | MCP server (stdio, `rmcp`); every action is a dynamic tool, no separate CRUD tool layer | in-process client/server integration test |
 
 An end-to-end CLI run verified: custom type → document validated against it →
@@ -331,9 +345,6 @@ OAuth actions end-to-end against a real compiled binary.
 
 - **Type-group facet in document search** — groups are stored on types; doc
   search currently facets on `path` and `type_ref` only.
-- **Client/server crates** — `solx-client` / `solx-server` (HTTP) are not
-  built yet; the trait seam is in place for them. `solx-mcp` (stdio) exists
-  as an alternative surface for models specifically.
 - **`param_type_ref` schemas for custom actions** — only the built-in
   catalogue's actions have real JSON-Schema `param_type_ref`s seeded; a
   user-created action gets the permissive fallback in `solx-mcp`'s tool list
@@ -347,8 +358,9 @@ OAuth actions end-to-end against a real compiled binary.
 2. ~~WASM component host~~ — done, then narrowed to custom-only actions once
    the built-in catalogue moved to native `Internal` dispatch.
 3. ~~An MCP surface exposing the same tools to models~~ — done (`solx-mcp`).
-4. `solx-server` (HTTP) + `solx-client` (proxy) once a transport is chosen —
-   still open; `solx-manager`'s `Solx` trait is the seam for it.
+4. ~~HTTP client/server transport~~ — done (`solx-server` + `solx-client`,
+   axum/reqwest); `solx-manager` picks local vs remote impls from
+   `server_url`/`SOLX_SERVER_URL` per process.
 5. MCP Resources/Prompts (e.g. `solx://doc/{path}/{name}` URI templates) for
    GUI/context-attachment MCP clients — `solx-mcp` is tools-only today.
 6. Real config-level allowlists for `Command`/`Webhook` actions — `exec.rs`

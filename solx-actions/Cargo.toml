@@ -30,6 +30,7 @@ axum = { workspace = true }
 jsonwebtoken = "9"
 anyhow = { workspace = true }
 solx-files = { workspace = true }
+solx-scripts = { workspace = true }
 wasmtime = { version = "47", features = ["component-model"] }
 wasmtime-wasi = "47"
 # For `FutureExt::catch_unwind` around guest execution — `spawn_blocking`

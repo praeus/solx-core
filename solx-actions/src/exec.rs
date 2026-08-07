@@ -23,8 +23,9 @@ use solx_surface::managers::ActionManager;
 use tokio::io::AsyncWriteExt;
 
 /// Wall-clock ceiling on a command, overridable per action via
-/// `action_config.timeout_secs`.
-const DEFAULT_TIMEOUT_SECS: u64 = 300;
+/// `action_config.timeout_secs`. Also reused by `crate::script` as the
+/// default ceiling on a whole `Script` action's execution.
+pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
 /// Run a `Command` action. `fn_name` is the literal command to execute.
 /// Params are passed as JSON on stdin only (no env var) — no payload size

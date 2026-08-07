@@ -9,6 +9,4 @@ description = "Parser/executor for the solx shell pipeline scripting language (d
 solx-surface = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
-
-[dev-dependencies]
 tokio = { workspace = true }

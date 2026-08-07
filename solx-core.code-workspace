@@ -8,6 +8,12 @@
 		},
 		{
 			"path": "../solx-js"
+		},
+		{
+			"path": "../examples"
+		},
+		{
+			"path": "../test"
 		}
 	]
 }

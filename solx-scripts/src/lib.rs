@@ -11,6 +11,55 @@
 //! stage's tokens to a [`CommandRunner`], which the CLI implements by parsing
 //! the tokens with clap and dispatching. (This mirrors the old CLI's
 //! `execute_pipeline`, lifted into a library.)
+//!
+//! ## Gotchas for script authors
+//!
+//! - **No comment syntax.** The whole source is split on `;`; a line starting
+//!   with `;` is not a comment, it is (at best) an empty statement followed by
+//!   another statement made of whatever text follows. Don't try to annotate
+//!   `.solx` files this way.
+//! - **Every statement needs its own `;`, including control-flow keywords.**
+//!   Newlines are cosmetic — only `;` separates statements. `if $x == null`
+//!   followed by a newline and `$y = ...` on the next line is one merged
+//!   statement (`parse_expr` then chokes on the stray `=` from the
+//!   assignment). Always write `if $x == null;`, `else;`, `endif;`.
+//! - **`Script`-typed *actions* only support `exec`/`json` stages** (see
+//!   `solx-actions::script::ActionCommandRunner`) — not the
+//!   fuller CLI grammar (`post`/`get`/`delete`/`list`/`search`), and no
+//!   `return` statement exists at all (a block evaluates to its last
+//!   statement's value, so end the script with the value you want returned).
+//! - **String concatenation / interpolation** has no dedicated operator.
+//!   Build a templated string in one `json` stage instead, with the whole
+//!   template single-quoted so the tokenizer doesn't consume the inner
+//!   double quotes as its own delimiter:
+//!   `$url = json '"https://host/path?id=$id&name=$name"';`
+//!   Every `$var` inside that one token gets substituted before the `json`
+//!   stage parses it. This also means bare `$a | $b` "fallback" pipelines
+//!   don't work (each side would be dispatched as its own stage, and a bare
+//!   value like `"null"` or a JSON key isn't `exec`/`json`) — use
+//!   `if $a == null; ...; else; ...; endif` instead.
+//! - **Quote string substitutions, don't quote everything else.** A `$var`
+//!   holding a `String` substitutes as the *raw, unquoted* text (so it can
+//!   sit inside an `exec` argument or be user-composed into a larger string);
+//!   wrap it in explicit `"..."` when it needs to land as a valid JSON string
+//!   value, e.g. `json '{"name":"$var"}'`. A `$var` holding a number/bool/
+//!   object/array already serializes to valid JSON, so leave it bare:
+//!   `json '{"port":$port}'`. Mixing these up produces "expected value" (a
+//!   string landed unquoted) or a string containing literal `{...}` text (an
+//!   object got wrapped in quotes it didn't need).
+//! - **A missing/null field's substitution is the 4-character text `null`**,
+//!   not an absent token — so `Value::Null` and the JSON string `"null"`
+//!   become indistinguishable once a value has gone through the
+//!   quote-wrapped-string convention above. If you need to tell a real `null`
+//!   apart from the string `"null"`, compare the *unwrapped* value directly
+//!   in an `if` (`if $existing.value == null; ...`), which evaluates against
+//!   the real typed value via dotted-path navigation rather than through
+//!   text substitution.
+
+mod ast;
+mod block;
+mod expr;
+mod interp;
 
 use std::collections::HashMap;
 
@@ -26,27 +75,29 @@ pub trait CommandRunner: Send + Sync {
     async fn run(&self, tokens: Vec<String>, piped: Option<Value>) -> Result<Value>;
 }
 
-/// Execute a full script, returning the last statement's result.
+/// Execute a full script, returning the last statement's result. Supports
+/// `if`/`elseif`/`else`/`endif`, `for`/`endfor`, and `wait` control flow on
+/// top of the base `;`/`|`/`$var` pipeline language — see `block`/`interp`.
 pub async fn execute_script(runner: &dyn CommandRunner, source: &str) -> Result<Value> {
-    let mut ctx: HashMap<String, Value> = HashMap::new();
-    let mut last = Value::Null;
-
-    for stmt in split_respecting_quotes(source, ';') {
-        let stmt = stmt.trim().to_string();
-        if stmt.is_empty() {
-            continue;
-        }
-        let (var_name, pipeline_src) = parse_assignment(&stmt);
-        let result = execute_pipeline(runner, &pipeline_src, &ctx).await?;
-        if let Some(var) = var_name {
-            ctx.insert(var, result.clone());
-        }
-        last = result;
-    }
-    Ok(last)
+    execute_script_with_vars(runner, source, HashMap::new()).await
 }
 
-fn parse_assignment(stmt: &str) -> (Option<String>, String) {
+/// Like [`execute_script`], but seeds the interpreter's variable context with
+/// `initial` before running — e.g. `{"params": <caller's params>}` so a
+/// script can reference `$params`/`$params.field`. The script may freely
+/// reassign any seeded name; it behaves exactly like a `$name = ...`
+/// statement had already run.
+pub async fn execute_script_with_vars(
+    runner: &dyn CommandRunner,
+    source: &str,
+    initial: HashMap<String, Value>,
+) -> Result<Value> {
+    let program = block::parse_program(source)?;
+    let mut ctx = initial;
+    interp::exec_block(runner, &program, &mut ctx).await
+}
+
+pub(crate) fn parse_assignment(stmt: &str) -> (Option<String>, String) {
     if stmt.starts_with('$') {
         if let Some(eq) = stmt.find('=') {
             let name = stmt[1..eq].trim();
@@ -58,7 +109,7 @@ fn parse_assignment(stmt: &str) -> (Option<String>, String) {
     (None, stmt.to_string())
 }
 
-async fn execute_pipeline(
+pub(crate) async fn execute_pipeline(
     runner: &dyn CommandRunner,
     pipeline_src: &str,
     ctx: &HashMap<String, Value>,
@@ -159,7 +210,7 @@ fn substitute_vars(tokens: Vec<String>, ctx: &HashMap<String, Value>) -> Vec<Str
         .collect()
 }
 
-fn substitute_vars_in_token(token: &str, ctx: &HashMap<String, Value>) -> String {
+pub(crate) fn substitute_vars_in_token(token: &str, ctx: &HashMap<String, Value>) -> String {
     if !token.contains('$') {
         return token.to_string();
     }
@@ -204,7 +255,7 @@ fn substitute_vars_in_token(token: &str, ctx: &HashMap<String, Value>) -> String
     result
 }
 
-fn navigate_json_path(val: &Value, path: &str) -> Value {
+pub(crate) fn navigate_json_path(val: &Value, path: &str) -> Value {
     let mut current = val;
     for key in path.split('.') {
         current = match current {
@@ -263,5 +314,48 @@ mod tests {
     fn quote_aware_tokenize() {
         let toks = tokenize_stage(r#"post doc /a --json '{"x": 1}'"#);
         assert_eq!(toks, vec!["post", "doc", "/a", "--json", r#"{"x": 1}"#]);
+    }
+
+    #[tokio::test]
+    async fn seeded_vars_are_visible_and_overridable() {
+        let r = Recorder {
+            seen: Mutex::new(Vec::new()),
+        };
+        let mut initial = HashMap::new();
+        initial.insert("params".to_string(), serde_json::json!({"mode": "fast"}));
+        let out = execute_script_with_vars(&r, "get mode $params.mode", initial)
+            .await
+            .unwrap();
+        assert_eq!(out["name"], "fast");
+    }
+
+    #[tokio::test]
+    async fn seeded_var_can_be_reassigned() {
+        let r = Recorder {
+            seen: Mutex::new(Vec::new()),
+        };
+        let mut initial = HashMap::new();
+        initial.insert("params".to_string(), serde_json::json!({"mode": "fast"}));
+        let out = execute_script_with_vars(
+            &r,
+            "$params = get override x; get mode $params.name",
+            initial,
+        )
+        .await
+        .unwrap();
+        // Reassignment replaces the seeded value entirely: `$params.name`
+        // resolves against the Recorder's echoed `{"name": "x"}`, not the
+        // original seeded object (which had no `name` field at all).
+        assert_eq!(out["name"], "x");
+    }
+
+    #[tokio::test]
+    async fn execute_script_still_starts_from_empty_ctx() {
+        let r = Recorder {
+            seen: Mutex::new(Vec::new()),
+        };
+        // No seeded vars: `$params` is unresolved and passed through literally.
+        let out = execute_script(&r, "get mode $params.mode").await.unwrap();
+        assert_eq!(out["name"], "$params.mode");
     }
 }

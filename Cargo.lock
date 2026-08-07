@@ -3741,6 +3741,7 @@ dependencies = [
  "solx-config",
  "solx-docs",
  "solx-files",
+ "solx-scripts",
  "solx-surface",
  "solx-types",
  "tempfile",

@@ -57,6 +57,9 @@ pub fn builtin_actions() -> Vec<SeedAction> {
         // Document legacy field ops (one field at a time)
         a("get_field", "Read one field from a document's contents.", Some("GetFieldParams")),
         a("set_field", "Write one field on a document's contents.", Some("SetFieldParams")),
+        // Document path-style field ops (nested reads/writes via dotted path)
+        a("get_field_at_path", "Read a field at a slash-separated path inside a document's contents.", Some("GetFieldAtPathParams")),
+        a("set_field_at_path", "Write a field at a slash-separated path inside a document's contents (optionally creating missing parents).", Some("SetFieldAtPathParams")),
         // Action CRUD
         a("entity_post_action", "Create or update (upsert) an action.", Some("ActionCrudParams")),
         a("entity_get_action", "Fetch an action by path+name.", Some("EntityRefParams")),
@@ -79,11 +82,19 @@ pub fn builtin_actions() -> Vec<SeedAction> {
         a("file_list", "List stored rel-paths under a prefix.", Some("FileListParams")),
         a("file_copy", "Copy a file within the files root.", Some("FileCopyParams")),
         a("dir_copy", "Recursively copy a directory within the files root.", Some("FileCopyParams")),
+        a("dir_delete", "Recursively delete a directory (and every file under it) within the files root.", Some("DirDeleteParams")),
         // Environment scratch store
         a("get_env", "Read a variable from the in-process environment store.", Some("GetEnvParams")),
         a("set_env", "Write a variable to the in-process environment store.", Some("SetEnvParams")),
         // Web
-        a("fetch_html", "Fetch a URL and return its HTML.", Some("FetchHtmlParams")),
+        a("http_request", "Issue an HTTP request with optional method, headers, body, and timeout.", Some("HttpRequestParams")),
+        // Small utility built-ins
+        a("now", "Return the current UTC time as an RFC 3339 string.", Some("EmptyParams")),
+        a("uuid", "Return a fresh v4 UUID as a string.", Some("EmptyParams")),
+        a("random_int", "Return a random integer in the inclusive [lo, hi] range.", Some("RandomIntParams")),
+        a("random_string", "Return a random alphanumeric string of the given length.", Some("RandomStringParams")),
+        // System integration (launch external handlers)
+        a("open_url", "Open a URL in the system browser via the platform-native handler (xdg-open / open / cmd /C start).", Some("OpenUrlParams")),
         // Secrets, scoped to whichever action is currently executing
         a("get_secret", "Read a secret scoped to the calling action.", Some("GetSecretParams")),
         a("set_secret", "Write a secret scoped to the calling action.", Some("SetSecretParams")),

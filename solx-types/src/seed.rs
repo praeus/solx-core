@@ -186,9 +186,9 @@ fn builtin_action_param_types() -> Vec<SeedType> {
                     "category": { "type": "string" },
                     "param_type_ref": { "type": "string" },
                     "result_type_ref": { "type": "string" },
-                    "action_type": { "type": "string", "enum": ["wasm", "webhook", "command", "internal"], "description": "Required on create." },
+                    "action_type": { "type": "string", "enum": ["wasm", "webhook", "command", "internal", "script"], "description": "Required on create." },
                     "fn_name": { "type": "string", "description": "Command string / URL / internal op name / WASM export, depending on action_type." },
-                    "bin_name": { "type": "string", "description": "WASM artifact file name (wasm actions only)." },
+                    "bin_name": { "type": "string", "description": "Artifact file name (wasm: component; script: .solx source)." },
                     "action_config": {},
                     "trusted": { "type": "boolean" },
                 }
@@ -355,12 +355,105 @@ fn builtin_action_param_types() -> Vec<SeedType> {
         },
         SeedType {
             path: BUILTIN_TYPES_PATH,
-            name: "FetchHtmlParams",
-            description: "Fetch a URL and return its HTML.",
+            name: "HttpRequestParams",
+            description: "Issue an HTTP request with optional method, headers, body, and timeout. Non-2xx responses are not errors — the response is returned as-is and the caller decides what to do with `status`.",
             schema: json!({
                 "type": "object",
                 "required": ["url"],
-                "properties": { "url": { "type": "string" } }
+                "properties": {
+                    "url": { "type": "string" },
+                    "method": { "type": "string", "description": "HTTP method (GET, POST, PUT, DELETE, PATCH, HEAD, ...). Defaults to GET." },
+                    "headers": { "type": "object", "description": "Map of header name -> string value.", "additionalProperties": { "type": "string" } },
+                    "body": { "type": "string", "description": "Request body, encoded per `body_encoding` (ignored by methods that have no body)." },
+                    "body_encoding": { "type": "string", "enum": ["utf8", "base64"], "description": "Encoding of `body`. Defaults to utf8." },
+                    "timeout_secs": { "type": "integer", "description": "Per-request timeout. Defaults to 30." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "EmptyParams",
+            description: "No parameters.",
+            schema: json!({ "type": "object" }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "RandomIntParams",
+            description: "Random integer in the inclusive [lo, hi] range. Defaults to [0, i64::MAX].",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "lo": { "type": "integer" },
+                    "hi": { "type": "integer" },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "RandomStringParams",
+            description: "Random alphanumeric string. `length` defaults to 16.",
+            schema: json!({
+                "type": "object",
+                "properties": { "length": { "type": "integer", "minimum": 0 } }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "OpenUrlParams",
+            description: "Open a URL in the system browser via the platform-native handler.",
+            schema: json!({
+                "type": "object",
+                "required": ["url"],
+                "properties": {
+                    "url": { "type": "string", "description": "Absolute URL to open (http/https/file/etc.)." }
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "DirDeleteParams",
+            description: "Recursively delete a directory (and every file under it) within the files root.",
+            schema: json!({
+                "type": "object",
+                "required": ["rel_path"],
+                "properties": { "rel_path": { "type": "string" } }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "GetFieldAtPathParams",
+            description: "Read a field at a slash-separated path inside a document's contents. Returns null for missing paths.",
+            schema: json!({
+                "type": "object",
+                "required": ["name", "path"],
+                "properties": {
+                    "doc_path": { "type": "string", "description": "Defaults to the root '/'." },
+                    "name": { "type": "string" },
+                    "path": { "type": "string", "description": "Slash-separated path inside `contents`, e.g. 'metadata/tags/0'." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "SetFieldAtPathParams",
+            description: "Write a field at a slash-separated path inside a document's contents. Pass `create: true` to synthesize missing parents.",
+            schema: json!({
+                "type": "object",
+                "required": ["name", "path"],
+                "properties": {
+                    "doc_path": { "type": "string", "description": "Defaults to the root '/'." },
+                    "name": { "type": "string" },
+                    "path": { "type": "string", "description": "Slash-separated path inside `contents`." },
+                    "value": {},
+                    "create": { "type": "boolean", "description": "When true, missing parents along the path are created (objects for non-numeric segments, arrays for numeric ones, padded with nulls). Defaults to false." },
+                }
             }),
             groups: vec!["builtin-params"],
         },
