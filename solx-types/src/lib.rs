@@ -113,7 +113,7 @@ async fn get_row(conn: &Connection, path: &str, name: &str) -> Result<Option<Typ
 
 #[async_trait]
 impl TypeManager for LocalTypeManager {
-    async fn post(&self, path: &str, name: &str, input: TypeInput) -> Result<TypeEntity> {
+    async fn save(&self, path: &str, name: &str, input: TypeInput) -> Result<TypeEntity> {
         let path = normalize_path(path)?;
         validate_name(name)?;
         let name = name.trim().to_string();
@@ -291,7 +291,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_get_validate_roundtrip() {
+    async fn save_get_validate_roundtrip() {
         let (_d, m) = mgr().await;
         let input = TypeInput {
             description: Some("a person".into()),
@@ -302,7 +302,7 @@ mod tests {
             })),
             groups: vec!["document-type".into()],
         };
-        let t = m.post("/types/custom", "Person", input).await.unwrap();
+        let t = m.save("/types/custom", "Person", input).await.unwrap();
         assert_eq!(t.path, "/types/custom");
         assert_eq!(t.groups, vec!["document-type".to_string()]);
 

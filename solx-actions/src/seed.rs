@@ -50,7 +50,7 @@ const fn a(name: &'static str, description: &'static str, param_type: Option<&'s
 pub fn builtin_actions() -> Vec<SeedAction> {
     vec![
         // Document CRUD
-        a("entity_post_document", "Create or update (upsert) a document.", Some("DocumentCrudParams")),
+        a("entity_save_document", "Create or update (upsert) a document.", Some("DocumentCrudParams")),
         a("entity_get_document", "Fetch a document by path+name.", Some("EntityRefParams")),
         a("entity_delete_document", "Delete a document.", Some("EntityRefParams")),
         a("entity_list_documents", "List documents, optionally filtered by path prefix.", Some("ListParams")),
@@ -61,12 +61,12 @@ pub fn builtin_actions() -> Vec<SeedAction> {
         a("get_field_at_path", "Read a field at a slash-separated path inside a document's contents.", Some("GetFieldAtPathParams")),
         a("set_field_at_path", "Write a field at a slash-separated path inside a document's contents (optionally creating missing parents).", Some("SetFieldAtPathParams")),
         // Action CRUD
-        a("entity_post_action", "Create or update (upsert) an action.", Some("ActionCrudParams")),
+        a("entity_save_action", "Create or update (upsert) an action.", Some("ActionCrudParams")),
         a("entity_get_action", "Fetch an action by path+name.", Some("EntityRefParams")),
         a("entity_delete_action", "Delete an action.", Some("EntityRefParams")),
         a("entity_list_actions", "List actions, optionally filtered by path prefix.", Some("ListParams")),
         // Type CRUD
-        a("entity_post_type", "Create or update (upsert) a type.", Some("TypeCrudParams")),
+        a("entity_save_type", "Create or update (upsert) a type.", Some("TypeCrudParams")),
         a("entity_get_type", "Fetch a type by path+name.", Some("EntityRefParams")),
         a("entity_delete_type", "Delete a type.", Some("EntityRefParams")),
         a("entity_list_types", "List types, optionally filtered by path prefix.", Some("ListParams")),

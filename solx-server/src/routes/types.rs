@@ -4,14 +4,14 @@ use axum::{Json, Router};
 use solx_surface::entities::TypeEntity;
 use solx_surface::managers::Solx;
 use solx_surface::query::{ListOptions, Page};
-use solx_surface::wire::{PostRequest, RefRequest, ResolveRequest, ValidateRequest};
+use solx_surface::wire::{RefRequest, ResolveRequest, SaveRequest, ValidateRequest};
 
 use crate::error::ApiError;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/types/post", post(post_type))
+        .route("/types/save", post(save_type))
         .route("/types/get", post(get_type))
         .route("/types/delete", post(delete_type))
         .route("/types/list", post(list_types))
@@ -19,11 +19,11 @@ pub fn router() -> Router<AppState> {
         .route("/types/validate", post(validate_type))
 }
 
-async fn post_type(
+async fn save_type(
     State(state): State<AppState>,
-    Json(req): Json<PostRequest<solx_surface::entities::TypeInput>>,
+    Json(req): Json<SaveRequest<solx_surface::entities::TypeInput>>,
 ) -> Result<Json<TypeEntity>, ApiError> {
-    let entity = state.app.types().post(&req.path, &req.name, req.input).await?;
+    let entity = state.app.types().save(&req.path, &req.name, req.input).await?;
     Ok(Json(entity))
 }
 

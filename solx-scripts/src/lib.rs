@@ -14,10 +14,10 @@
 //!
 //! ## Gotchas for script authors
 //!
-//! - **No comment syntax.** The whole source is split on `;`; a line starting
-//!   with `;` is not a comment, it is (at best) an empty statement followed by
-//!   another statement made of whatever text follows. Don't try to annotate
-//!   `.solx` files this way.
+//! - **Comments are `#` to end of line**, stripped before the `;`-split (see
+//!   [`strip_comments`]). A `#` inside a single- or double-quoted substring
+//!   (e.g. a URL fragment in a JSON body) is left alone — only an unquoted
+//!   `#` starts a comment. There's no block-comment form.
 //! - **Every statement needs its own `;`, including control-flow keywords.**
 //!   Newlines are cosmetic — only `;` separates statements. `if $x == null`
 //!   followed by a newline and `$y = ...` on the next line is one merged
@@ -25,7 +25,7 @@
 //!   assignment). Always write `if $x == null;`, `else;`, `endif;`.
 //! - **`Script`-typed *actions* only support `exec`/`json` stages** (see
 //!   `solx-actions::script::ActionCommandRunner`) — not the
-//!   fuller CLI grammar (`post`/`get`/`delete`/`list`/`search`), and no
+//!   fuller CLI grammar (`save`/`get`/`delete`/`list`/`search`), and no
 //!   `return` statement exists at all (a block evaluates to its last
 //!   statement's value, so end the script with the value you want returned).
 //! - **String concatenation / interpolation** has no dedicated operator.
@@ -92,9 +92,52 @@ pub async fn execute_script_with_vars(
     source: &str,
     initial: HashMap<String, Value>,
 ) -> Result<Value> {
-    let program = block::parse_program(source)?;
+    let source = strip_comments(source);
+    let program = block::parse_program(&source)?;
     let mut ctx = initial;
     interp::exec_block(runner, &program, &mut ctx).await
+}
+
+/// Strip `#`-to-end-of-line comments, respecting single/double quoted
+/// substrings — an unquoted `#` starts a comment, a quoted one (e.g. a URL
+/// fragment inside a JSON body) is left alone. Called once, before the
+/// `;`-split, so a comment line can sit anywhere a statement could.
+pub fn strip_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = source.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' if in_single && chars.peek() == Some(&'\'') => {
+                out.push(ch);
+                out.push(chars.next().unwrap());
+            }
+            '\\' if in_double && chars.peek() == Some(&'"') => {
+                out.push(ch);
+                out.push(chars.next().unwrap());
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                out.push(ch);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                out.push(ch);
+            }
+            '#' if !in_single && !in_double => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        out.push(c);
+                        break;
+                    }
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 pub(crate) fn parse_assignment(stmt: &str) -> (Option<String>, String) {
@@ -312,8 +355,34 @@ mod tests {
 
     #[test]
     fn quote_aware_tokenize() {
-        let toks = tokenize_stage(r#"post doc /a --json '{"x": 1}'"#);
-        assert_eq!(toks, vec!["post", "doc", "/a", "--json", r#"{"x": 1}"#]);
+        let toks = tokenize_stage(r#"save doc /a --json '{"x": 1}'"#);
+        assert_eq!(toks, vec!["save", "doc", "/a", "--json", r#"{"x": 1}"#]);
+    }
+
+    #[test]
+    fn strip_comments_removes_line_comments() {
+        let src = "# a leading comment\nget doc /a; # trailing comment\nget doc /b";
+        assert_eq!(strip_comments(src), "\nget doc /a; \nget doc /b");
+    }
+
+    #[test]
+    fn strip_comments_leaves_quoted_hash_alone() {
+        // A `#` inside a quoted JSON body (e.g. a URL fragment) is not a comment.
+        let src = r#"json '"https://host/path#section"' # now a real comment"#;
+        assert_eq!(strip_comments(src), r#"json '"https://host/path#section"' "#);
+    }
+
+    #[tokio::test]
+    async fn comments_are_ignored_when_executing_a_script() {
+        let r = Recorder {
+            seen: Mutex::new(Vec::new()),
+        };
+        let src = "# set up\n$doc = get doc /a/b; # fetch it\nget action $doc.name # done";
+        let out = execute_script(&r, src).await.unwrap();
+        let seen = r.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1], vec!["get", "action", "/a/b"]);
+        assert_eq!(out["name"], "/a/b");
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ use solx_surface::entities::{Action, ActionExecResult, ActionInput};
 use solx_surface::error::Result;
 use solx_surface::managers::ActionManager;
 use solx_surface::query::{ListOptions, Page};
-use solx_surface::wire::{ExecRequest, PostRequest, RefRequest};
+use solx_surface::wire::{ExecRequest, RefRequest, SaveRequest};
 
 use crate::http::post_json;
 
@@ -30,9 +30,9 @@ impl RemoteActionManager {
 
 #[async_trait]
 impl ActionManager for RemoteActionManager {
-    async fn post(&self, path: &str, name: &str, input: ActionInput) -> Result<Action> {
-        let req = PostRequest { path: path.to_string(), name: name.to_string(), input };
-        post_json(&self.http, &self.base_url, &self.token, "/actions/post", &req).await
+    async fn save(&self, path: &str, name: &str, input: ActionInput) -> Result<Action> {
+        let req = SaveRequest { path: path.to_string(), name: name.to_string(), input };
+        post_json(&self.http, &self.base_url, &self.token, "/actions/save", &req).await
     }
 
     async fn get(&self, path: &str, name: &str) -> Result<Action> {

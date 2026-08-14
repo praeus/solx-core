@@ -41,8 +41,8 @@ added without changing callers.
 ```sh
 cargo build
 # custom type, then a document validated against it
-solx post type /types/custom/Person --json '{"schema":{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}}'
-solx post doc /research/ai/note --type /types/custom/Person --json '{"contents":{"name":"Ada"},"title":"AI note"}'
+solx save type /types/custom/Person --json '{"schema":{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}}'
+solx save doc /research/ai/note --type /types/custom/Person --json '{"contents":{"name":"Ada"},"title":"AI note"}'
 solx get doc /research/ai/note
 solx list doc --path /research
 solx search Ada --path /research

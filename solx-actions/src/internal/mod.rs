@@ -95,17 +95,17 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
         "oauth_stop" => oauth::oauth_stop(params).await,
 
         // ── entity CRUD ──────────────────────────────────────────────────
-        "entity_post_document" => entity::doc_post(params, &ctx.docs).await,
+        "entity_save_document" => entity::doc_save(params, &ctx.docs).await,
         "entity_get_document" => entity::doc_get(params, &ctx.docs).await,
         "entity_delete_document" => entity::doc_delete(params, &ctx.docs).await,
         "entity_list_documents" => entity::doc_list(params, &ctx.docs).await,
 
-        "entity_post_type" => entity::type_post(params, &ctx.types).await,
+        "entity_save_type" => entity::type_save(params, &ctx.types).await,
         "entity_get_type" => entity::type_get(params, &ctx.types).await,
         "entity_delete_type" => entity::type_delete(params, &ctx.types).await,
         "entity_list_types" => entity::type_list(params, &ctx.types).await,
 
-        "entity_post_action" => entity::action_post(params, &ctx.actions).await,
+        "entity_save_action" => entity::action_save(params, &ctx.actions).await,
         "entity_get_action" => entity::action_get(params, &ctx.actions).await,
         "entity_delete_action" => entity::action_delete(params, &ctx.actions).await,
         "entity_list_actions" => entity::action_list(params, &ctx.actions).await,
@@ -186,7 +186,7 @@ pub(super) fn to_value<T: serde::Serialize>(v: &T) -> Result<Value, String> {
     serde_json::to_value(v).map_err(|e| format!("failed to serialize result: {e}"))
 }
 
-/// Used by `entity::action_post` / `entity::action_delete` to apply the
+/// Used by `entity::action_save` / `entity::action_delete` to apply the
 /// "no executable actions from an action, MCP tool call, or script" guard
 /// without duplicating the existing-row lookup.
 pub(super) fn guard_executable_action(
@@ -433,7 +433,7 @@ mod tests {
     async fn entity_document_crud_honors_path() {
         let (_d, ctx) = test_ctx(None).await;
         let created = run_internal(
-            "entity_post_document",
+            "entity_save_document",
             &json!({"path": "/research/ai", "name": "note", "type_ref": "/types/core/Object", "contents": {"a": 1}}),
             &ctx,
         )
@@ -473,7 +473,7 @@ mod tests {
     async fn search_documents_and_search_actions_work() {
         let (_d, ctx) = test_ctx(None).await;
         run_internal(
-            "entity_post_document",
+            "entity_save_document",
             &json!({"path": "/notes", "name": "a", "type_ref": "/types/core/Object", "contents": {}, "title": "Hello world"}),
             &ctx,
         )
@@ -540,7 +540,7 @@ mod tests {
     async fn get_field_and_set_field_round_trip() {
         let (_d, ctx) = test_ctx(None).await;
         run_internal(
-            "entity_post_document",
+            "entity_save_document",
             &json!({"name": "note", "type_ref": "/types/core/Object", "contents": {"a": 1}}),
             &ctx,
         )
@@ -805,7 +805,7 @@ mod tests {
     async fn get_field_at_path_reads_nested_value() {
         let (_d, ctx) = test_ctx(None).await;
         run_internal(
-            "entity_post_document",
+            "entity_save_document",
             &json!({
                 "name": "doc",
                 "type_ref": "/types/core/Object",
@@ -869,7 +869,7 @@ mod tests {
     async fn set_field_at_path_overwrites_existing_path() {
         let (_d, ctx) = test_ctx(None).await;
         run_internal(
-            "entity_post_document",
+            "entity_save_document",
             &json!({
                 "name": "doc",
                 "type_ref": "/types/core/Object",
@@ -910,7 +910,7 @@ mod tests {
     async fn set_field_at_path_errors_without_create() {
         let (_d, ctx) = test_ctx(None).await;
         run_internal(
-            "entity_post_document",
+            "entity_save_document",
             &json!({
                 "name": "doc",
                 "type_ref": "/types/core/Object",
@@ -936,7 +936,7 @@ mod tests {
     async fn set_field_at_path_creates_missing_parents() {
         let (_d, ctx) = test_ctx(None).await;
         run_internal(
-            "entity_post_document",
+            "entity_save_document",
             &json!({
                 "name": "doc",
                 "type_ref": "/types/core/Object",

@@ -3,7 +3,7 @@ use solx_surface::entities::{Document, DocumentInput};
 use solx_surface::error::Result;
 use solx_surface::managers::DocManager;
 use solx_surface::query::{ListOptions, Page, SearchQuery, SearchResults};
-use solx_surface::wire::{PostRequest, RefRequest};
+use solx_surface::wire::{RefRequest, SaveRequest};
 
 use crate::http::post_json;
 
@@ -26,9 +26,9 @@ impl RemoteDocManager {
 
 #[async_trait]
 impl DocManager for RemoteDocManager {
-    async fn post(&self, path: &str, name: &str, input: DocumentInput) -> Result<Document> {
-        let req = PostRequest { path: path.to_string(), name: name.to_string(), input };
-        post_json(&self.http, &self.base_url, &self.token, "/docs/post", &req).await
+    async fn save(&self, path: &str, name: &str, input: DocumentInput) -> Result<Document> {
+        let req = SaveRequest { path: path.to_string(), name: name.to_string(), input };
+        post_json(&self.http, &self.base_url, &self.token, "/docs/save", &req).await
     }
 
     async fn get(&self, path: &str, name: &str) -> Result<Document> {

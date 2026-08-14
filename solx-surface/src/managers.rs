@@ -18,7 +18,7 @@ use crate::query::*;
 /// Type registry: JSON-schema types organized by path + type groups.
 #[async_trait]
 pub trait TypeManager: Send + Sync {
-    async fn post(&self, path: &str, name: &str, input: TypeInput) -> Result<TypeEntity>;
+    async fn save(&self, path: &str, name: &str, input: TypeInput) -> Result<TypeEntity>;
     async fn get(&self, path: &str, name: &str) -> Result<TypeEntity>;
     async fn delete(&self, path: &str, name: &str) -> Result<()>;
     async fn list(&self, opts: ListOptions) -> Result<Page<TypeEntity>>;
@@ -44,7 +44,7 @@ pub trait FileStore: Send + Sync {
 /// Document store: CRUD + full-text/faceted search.
 #[async_trait]
 pub trait DocManager: Send + Sync {
-    async fn post(&self, path: &str, name: &str, input: DocumentInput) -> Result<Document>;
+    async fn save(&self, path: &str, name: &str, input: DocumentInput) -> Result<Document>;
     async fn get(&self, path: &str, name: &str) -> Result<Document>;
     async fn delete(&self, path: &str, name: &str) -> Result<()>;
     async fn list(&self, opts: ListOptions) -> Result<Page<Document>>;
@@ -54,7 +54,7 @@ pub trait DocManager: Send + Sync {
 /// Action store: CRUD + execution (wasm/web/command, with oauth for web).
 #[async_trait]
 pub trait ActionManager: Send + Sync {
-    async fn post(&self, path: &str, name: &str, input: ActionInput) -> Result<Action>;
+    async fn save(&self, path: &str, name: &str, input: ActionInput) -> Result<Action>;
     async fn get(&self, path: &str, name: &str) -> Result<Action>;
     async fn delete(&self, path: &str, name: &str) -> Result<()>;
     async fn list(&self, opts: ListOptions) -> Result<Page<Action>>;

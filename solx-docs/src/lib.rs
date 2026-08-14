@@ -52,7 +52,7 @@ const DEFAULT_LIMIT: usize = 50;
 struct IndexRequest {
     op: IndexOp,
     /// Resolved once the batch containing this op has been committed, so a
-    /// `post` that has returned is always visible to a subsequent `search`.
+    /// `save` that has returned is always visible to a subsequent `search`.
     done: oneshot::Sender<std::result::Result<(), String>>,
 }
 
@@ -325,7 +325,7 @@ async fn get_row(conn: &Connection, path: &str, name: &str) -> Result<Option<Doc
 
 #[async_trait]
 impl DocManager for LocalDocManager {
-    async fn post(&self, path: &str, name: &str, input: DocumentInput) -> Result<Document> {
+    async fn save(&self, path: &str, name: &str, input: DocumentInput) -> Result<Document> {
         let path = normalize_path(path)?;
         validate_name(name)?;
         let name = name.trim().to_string();
@@ -575,7 +575,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_get_list_search_delete() {
+    async fn save_get_list_search_delete() {
         let (_d, m) = setup().await;
         let input = DocumentInput {
             title: Some("AI note".into()),
@@ -583,7 +583,7 @@ mod tests {
             contents: json!({ "body": "neural networks and transformers" }),
             ..Default::default()
         };
-        let doc = m.post("/research/ai", "note", input).await.unwrap();
+        let doc = m.save("/research/ai", "note", input).await.unwrap();
         assert_eq!(doc.path, "/research/ai");
         assert_eq!(doc.name, "note");
 
@@ -632,13 +632,13 @@ mod tests {
             schema: Some(json!({"type":"object","required":["name"],"properties":{"name":{"type":"string"}}})),
             ..Default::default()
         };
-        m.types().post("/types/custom", "Person", ty).await.unwrap();
+        m.types().save("/types/custom", "Person", ty).await.unwrap();
         let bad = DocumentInput {
             type_ref: Some("/types/custom/Person".into()),
             contents: json!({ "wrong": 1 }),
             ..Default::default()
         };
-        assert!(m.post("/people", "x", bad).await.is_err());
+        assert!(m.save("/people", "x", bad).await.is_err());
     }
 
     #[tokio::test]
@@ -653,9 +653,9 @@ mod tests {
             })),
             ..Default::default()
         };
-        m.types().post("/types/custom", "Employee", ty).await.unwrap();
+        m.types().save("/types/custom", "Employee", ty).await.unwrap();
 
-        m.post(
+        m.save(
             "/people",
             "ada",
             DocumentInput {
@@ -667,7 +667,7 @@ mod tests {
         .await
         .unwrap();
 
-        m.post(
+        m.save(
             "/people",
             "charles",
             DocumentInput {
@@ -710,7 +710,7 @@ mod tests {
             let m = LocalDocManager::open(&db_path, &idx_path, types.clone())
                 .await
                 .unwrap();
-            m.post(
+            m.save(
                 "/a",
                 "one",
                 DocumentInput {
@@ -754,8 +754,8 @@ mod tests {
 
     // ── Index writer thread ──────────────────────────────────────────────
 
-    async fn post_doc(m: &LocalDocManager, path: &str, name: &str, body: &str) {
-        m.post(
+    async fn save_doc(m: &LocalDocManager, path: &str, name: &str, body: &str) {
+        m.save(
             path,
             name,
             DocumentInput {
@@ -769,14 +769,14 @@ mod tests {
     }
 
     /// Writes now go through a channel to a dedicated thread that batches
-    /// them behind one commit — but a `post` that has returned must still be
+    /// them behind one commit — but a `save` that has returned must still be
     /// immediately findable. `submit` awaits its batch's commit for exactly
     /// this reason.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_returned_post_is_immediately_searchable() {
+    async fn a_returned_save_is_immediately_searchable() {
         let (_d, m) = setup().await;
         for i in 0..5 {
-            post_doc(&m, "/rw", &format!("doc{i}"), "quixotic").await;
+            save_doc(&m, "/rw", &format!("doc{i}"), "quixotic").await;
             let res = m
                 .search(SearchQuery { q: Some("quixotic".into()), ..Default::default() })
                 .await
@@ -793,7 +793,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_returned_delete_is_immediately_reflected() {
         let (_d, m) = setup().await;
-        post_doc(&m, "/rw", "gone", "ephemeral").await;
+        save_doc(&m, "/rw", "gone", "ephemeral").await;
         let before = m
             .search(SearchQuery { q: Some("ephemeral".into()), ..Default::default() })
             .await
@@ -819,7 +819,7 @@ mod tests {
         for i in 0..16 {
             let m = m.clone();
             tasks.push(tokio::spawn(async move {
-                post_doc(&m, "/bulk", &format!("d{i}"), "concurrent").await;
+                save_doc(&m, "/bulk", &format!("d{i}"), "concurrent").await;
             }));
         }
         for i in 0..8 {

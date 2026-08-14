@@ -1,6 +1,6 @@
 //! `solx` — the command-line interface over the solx core crates.
 //!
-//! Verbs: `post` (upsert), `get`, `delete`, `exec` (actions), `list`, `search`,
+//! Verbs: `save` (upsert), `get`, `delete`, `exec` (actions), `list`, `search`,
 //! plus `script` and package management. Entities: `doc`, `action`, `type`,
 //! `file`. The CLI constructs the local manager impls and codes against the
 //! `solx-surface` traits, so a future client/server can slot in unchanged.
@@ -41,7 +41,7 @@ enum Entity {
 #[derive(Subcommand)]
 enum Commands {
     /// Create or update an entity (upsert).
-    Post {
+    Save {
         entity: Entity,
         /// Full reference `/path/name` (for files: relative path under the files root).
         reference: String,
@@ -133,13 +133,13 @@ fn to_anyhow(e: SolxError) -> anyhow::Error {
 
 async fn run_command(app: &Arc<App>, command: Commands, piped: Option<Value>) -> Result<Value> {
     match command {
-        Commands::Post {
+        Commands::Save {
             entity,
             reference,
             json,
             type_ref,
             file,
-        } => handle_post(app, entity, reference, json, type_ref, file, piped).await,
+        } => handle_save(app, entity, reference, json, type_ref, file, piped).await,
         Commands::Get { entity, reference } => handle_get(app, entity, reference).await,
         Commands::Delete { entity, reference } => handle_delete(app, entity, reference).await,
         Commands::Exec { reference, json } => handle_exec(app, reference, json, piped).await,
@@ -186,7 +186,7 @@ async fn run_command(app: &Arc<App>, command: Commands, piped: Option<Value>) ->
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_post(
+async fn handle_save(
     app: &Arc<App>,
     entity: Entity,
     reference: String,
@@ -196,7 +196,7 @@ async fn handle_post(
     piped: Option<Value>,
 ) -> Result<Value> {
     if let Entity::File = entity {
-        let local = file.ok_or_else(|| anyhow!("post file requires --file <local path>"))?;
+        let local = file.ok_or_else(|| anyhow!("save file requires --file <local path>"))?;
         let bytes = std::fs::read(&local).with_context(|| format!("read {local}"))?;
         let stored = app.files().put(&reference, bytes).await.map_err(to_anyhow)?;
         return Ok(serde_json::json!({ "rel_path": stored }));
@@ -214,19 +214,19 @@ async fn handle_post(
             let input: DocumentInput =
                 serde_json::from_value(body).context("parse document input")?;
             Ok(serde_json::to_value(
-                app.docs().post(&path, &name, input).await.map_err(to_anyhow)?,
+                app.docs().save(&path, &name, input).await.map_err(to_anyhow)?,
             )?)
         }
         Entity::Action => {
             let input: ActionInput = serde_json::from_value(body).context("parse action input")?;
             Ok(serde_json::to_value(
-                app.actions().post(&path, &name, input).await.map_err(to_anyhow)?,
+                app.actions().save(&path, &name, input).await.map_err(to_anyhow)?,
             )?)
         }
         Entity::Type => {
             let input: TypeInput = serde_json::from_value(body).context("parse type input")?;
             Ok(serde_json::to_value(
-                app.types().post(&path, &name, input).await.map_err(to_anyhow)?,
+                app.types().save(&path, &name, input).await.map_err(to_anyhow)?,
             )?)
         }
         Entity::File => unreachable!(),

@@ -56,14 +56,14 @@ async fn setup() -> (tempfile::TempDir, Arc<LocalActionManager>) {
     (dir, actions)
 }
 
-async fn post_cmd(
+async fn save_cmd(
     actions: &LocalActionManager,
     name: &str,
     cmd: &str,
     config: Option<serde_json::Value>,
 ) {
     actions
-        .post(
+        .save(
             "/t",
             name,
             ActionInput {
@@ -83,7 +83,7 @@ async fn post_cmd(
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn concurrent_commands_do_not_serialize_on_the_worker() {
     let (_d, actions) = setup().await;
-    post_cmd(&actions, "slow", sleep_2s(), None).await;
+    save_cmd(&actions, "slow", sleep_2s(), None).await;
 
     let start = Instant::now();
     let mut tasks = Vec::new();
@@ -107,7 +107,7 @@ async fn concurrent_commands_do_not_serialize_on_the_worker() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn the_runtime_stays_responsive_during_a_command() {
     let (_d, actions) = setup().await;
-    post_cmd(&actions, "slow", sleep_2s(), None).await;
+    save_cmd(&actions, "slow", sleep_2s(), None).await;
 
     let a = actions.clone();
     let running = tokio::spawn(async move { a.exec("/t", "slow", json!({})).await });
@@ -128,7 +128,7 @@ async fn the_runtime_stays_responsive_during_a_command() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_large_stdin_payload_does_not_deadlock() {
     let (_d, actions) = setup().await;
-    post_cmd(&actions, "ignores-stdin", ignores_stdin(), None).await;
+    save_cmd(&actions, "ignores-stdin", ignores_stdin(), None).await;
 
     let big = json!({ "blob": "x".repeat(512 * 1024) });
     let res = tokio::time::timeout(Duration::from_secs(30), actions.exec("/t", "ignores-stdin", big))
@@ -155,7 +155,7 @@ async fn a_hanging_command_hits_its_timeout() {
     } else {
         "while :; do :; done"
     };
-    post_cmd(&actions, "hangs", forever, Some(json!({ "timeout_secs": 1 }))).await;
+    save_cmd(&actions, "hangs", forever, Some(json!({ "timeout_secs": 1 }))).await;
 
     let start = Instant::now();
     let err = tokio::time::timeout(Duration::from_secs(30), actions.exec("/t", "hangs", json!({})))

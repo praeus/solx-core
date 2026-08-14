@@ -1,19 +1,31 @@
 {
 	"folders": [
 		{
+			"name": "solx-core",
 			"path": "."
 		},
 		{
+			"name": "solx-packages",
 			"path": "../solx-packages"
 		},
 		{
+			"name": "solx-js",
 			"path": "../solx-js"
 		},
 		{
+			"name": "solx-web",
+			"path": "../solx-web"
+		},
+		{
+			"name": "examples",
 			"path": "../examples"
 		},
 		{
+			"name": "test",
 			"path": "../test"
+		},
+		{
+			"path": "../sol/sol-browser/src"
 		}
 	]
 }

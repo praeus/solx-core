@@ -15,7 +15,7 @@ interface types {
 /// Calls are attributed to the calling action: the host tags each one with the
 /// guest's own reference, which the built-ins use to scope what it can reach.
 /// Concretely, `get-secret`/`set-secret` resolve only against keys in the
-/// *calling* action's own `action_config.secrets`, and `entity_post_action` /
+/// *calling* action's own `action_config.secrets`, and `entity_save_action` /
 /// `entity_delete_action` refuse to create, modify, or remove `command` and
 /// `webhook` actions — a guest cannot grant itself shell or outbound HTTP.
 /// Everything else in the built-in catalogue is reachable without restriction;

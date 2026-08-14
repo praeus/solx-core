@@ -294,7 +294,7 @@ async fn get_row(conn: &Connection, path: &str, name: &str) -> Result<Option<Act
 
 #[async_trait]
 impl ActionManager for LocalActionManager {
-    async fn post(&self, path: &str, name: &str, input: ActionInput) -> Result<Action> {
+    async fn save(&self, path: &str, name: &str, input: ActionInput) -> Result<Action> {
         let path = normalize_path(path)?;
         validate_name(name)?;
         let name = name.trim().to_string();
@@ -654,7 +654,7 @@ mod tests {
             action_config: Some(cfg_with_secret("c3VwZXItc2VjcmV0LWtleS1oZXJlLXBhZGRpbmc=")),
             ..Default::default()
         };
-        m.post("/tools", "s", input).await.unwrap();
+        m.save("/tools", "s", input).await.unwrap();
 
         // Outbound reads are redacted...
         let got = m.get("/tools", "s").await.unwrap();
@@ -677,12 +677,12 @@ mod tests {
     }
 
     /// The round trip that would otherwise destroy a key: fetch (redacted),
-    /// edit an unrelated field, post the whole thing back.
+    /// edit an unrelated field, save the whole thing back.
     #[tokio::test]
-    async fn posting_back_a_redacted_config_preserves_the_key() {
+    async fn saving_back_a_redacted_config_preserves_the_key() {
         let (_d, _c, m) = setup().await;
         let real_key = "c3VwZXItc2VjcmV0LWtleS1oZXJlLXBhZGRpbmc=";
-        m.post(
+        m.save(
             "/tools",
             "s",
             ActionInput {
@@ -697,7 +697,7 @@ mod tests {
 
         let mut fetched = m.get("/tools", "s").await.unwrap().action_config.unwrap();
         fetched["cwd"] = serde_json::json!("/elsewhere");
-        m.post(
+        m.save(
             "/tools",
             "s",
             ActionInput { action_config: Some(fetched), ..Default::default() },
@@ -711,10 +711,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn posting_an_invented_mask_sentinel_is_rejected() {
+    async fn saving_an_invented_mask_sentinel_is_rejected() {
         let (_d, _c, m) = setup().await;
         let err = m
-            .post(
+            .save(
                 "/tools",
                 "s",
                 ActionInput {
@@ -729,7 +729,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_get_delete() {
+    async fn save_get_delete() {
         let (_d, _c, m) = setup().await;
         let input = ActionInput {
             description: Some("echoes".into()),
@@ -737,7 +737,7 @@ mod tests {
             fn_name: Some("echo".into()),
             ..Default::default()
         };
-        let a = m.post("/tools", "echo", input).await.unwrap();
+        let a = m.save("/tools", "echo", input).await.unwrap();
         assert_eq!(a.path, "/tools");
         assert_eq!(a.action_type, Some(ActionType::Command));
 
@@ -757,7 +757,7 @@ mod tests {
             fn_name: Some("echo 42".into()),
             ..Default::default()
         };
-        m.post("/tools", "echo", input).await.unwrap();
+        m.save("/tools", "echo", input).await.unwrap();
 
         let res = m
             .exec("/tools", "echo", serde_json::json!({}))
@@ -767,11 +767,11 @@ mod tests {
         assert_eq!(res.result, serde_json::json!(42));
     }
 
-    // ── entity_post_action: no self-granting shell ───────────────────────
+    // ── entity_save_action: no self-granting shell ───────────────────────
     //
-    // These go through `exec` on `/builtin/entity_post_action`, which is the
+    // These go through `exec` on `/builtin/entity_save_action`, which is the
     // exact path an MCP tool call, a WASM guest's `action-exec`, and a
-    // `.solx` script all take. A direct `m.post(...)` is the CLI's path and
+    // `.solx` script all take. A direct `m.save(...)` is the CLI's path and
     // stays allowed — that's the whole distinction being enforced.
 
     async fn exec_builtin(m: &Arc<LocalActionManager>, fn_name: &str, params: Value) -> Result<Value> {
@@ -779,13 +779,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entity_post_action_refuses_to_create_command_or_webhook() {
+    async fn entity_save_action_refuses_to_create_command_or_webhook() {
         let (_d, m) = setup_wired().await;
 
         for ty in ["command", "webhook"] {
             let err = exec_builtin(
                 &m,
-                "entity_post_action",
+                "entity_save_action",
                 serde_json::json!({
                     "path": "/evil", "name": "shell",
                     "action_type": ty, "fn_name": "rm -rf /"
@@ -798,13 +798,13 @@ mod tests {
         }
     }
 
-    /// `post` is a merge-upsert, so a payload with no `action_type` at all
+    /// `save` is a merge-upsert, so a payload with no `action_type` at all
     /// would otherwise silently rewrite an existing Command action's shell
     /// command. The guard has to consult the stored row, not just the input.
     #[tokio::test]
-    async fn entity_post_action_refuses_to_repoint_an_existing_command() {
+    async fn entity_save_action_refuses_to_repoint_an_existing_command() {
         let (_d, m) = setup_wired().await;
-        m.post(
+        m.save(
             "/tools",
             "safe",
             ActionInput {
@@ -818,7 +818,7 @@ mod tests {
 
         let err = exec_builtin(
             &m,
-            "entity_post_action",
+            "entity_save_action",
             serde_json::json!({ "path": "/tools", "name": "safe", "fn_name": "rm -rf /" }),
         )
         .await
@@ -833,7 +833,7 @@ mod tests {
     #[tokio::test]
     async fn entity_delete_action_refuses_to_remove_a_command() {
         let (_d, m) = setup_wired().await;
-        m.post(
+        m.save(
             "/tools",
             "safe",
             ActionInput {
@@ -859,11 +859,11 @@ mod tests {
     /// The lockdown is limited to the two executable types — everything else
     /// an agent legitimately does through this built-in still works.
     #[tokio::test]
-    async fn entity_post_action_still_allows_non_executable_types() {
+    async fn entity_save_action_still_allows_non_executable_types() {
         let (_d, m) = setup_wired().await;
         exec_builtin(
             &m,
-            "entity_post_action",
+            "entity_save_action",
             serde_json::json!({
                 "path": "/tools", "name": "w",
                 "action_type": "wasm", "bin_name": "x.wasm"
@@ -882,7 +882,7 @@ mod tests {
             bin_name: Some("x.wasm".into()),
             ..Default::default()
         };
-        m.post("/tools", "w", input).await.unwrap();
+        m.save("/tools", "w", input).await.unwrap();
         let err = m
             .exec("/tools", "w", serde_json::json!({}))
             .await
@@ -897,7 +897,7 @@ mod tests {
             action_type: Some(ActionType::Wasm),
             ..Default::default()
         };
-        m.post("/tools", "w", input).await.unwrap();
+        m.save("/tools", "w", input).await.unwrap();
         let err = m
             .exec("/tools", "w", serde_json::json!({}))
             .await
@@ -968,7 +968,7 @@ mod tests {
             "if $params.go == true; exec /builtin/uuid; else; json '\"skipped\"'; endif",
         )
         .await;
-        m.post(
+        m.save(
             "/tools",
             "hello",
             ActionInput {
@@ -999,7 +999,7 @@ mod tests {
             action_type: Some(ActionType::Script),
             ..Default::default()
         };
-        m.post("/tools", "s", input).await.unwrap();
+        m.save("/tools", "s", input).await.unwrap();
         let err = m.exec("/tools", "s", serde_json::json!({})).await.unwrap_err();
         assert!(err.to_string().contains("bin_name"), "{err}");
     }
@@ -1012,7 +1012,7 @@ mod tests {
             bin_name: Some("missing.solx".into()),
             ..Default::default()
         };
-        m.post("/tools", "s", input).await.unwrap();
+        m.save("/tools", "s", input).await.unwrap();
         let err = m.exec("/tools", "s", serde_json::json!({})).await.unwrap_err();
         assert!(err.to_string().contains("missing.solx"), "{err}");
     }
@@ -1021,7 +1021,7 @@ mod tests {
     async fn exec_script_unsupported_stage_verb_errors() {
         let (_d, m, files) = setup_script().await;
         post_script_artifact(&files, "bad.solx", "post doc /a --json '{}'").await;
-        m.post(
+        m.save(
             "/tools",
             "bad",
             ActionInput {
@@ -1040,10 +1040,10 @@ mod tests {
     async fn exec_script_action_not_blocked_by_executable_action_guard() {
         let (_d, m, _files) = setup_script().await;
         // Unlike `command`/`webhook`, `script` may be created through the
-        // guarded `entity_post_action` built-in the same way `wasm` can.
+        // guarded `entity_save_action` built-in the same way `wasm` can.
         exec_builtin(
             &m,
-            "entity_post_action",
+            "entity_save_action",
             serde_json::json!({
                 "path": "/tools", "name": "s",
                 "action_type": "script", "bin_name": "x.solx"
@@ -1058,7 +1058,7 @@ mod tests {
     async fn exec_script_times_out() {
         let (_d, m, files) = setup_script().await;
         post_script_artifact(&files, "slow.solx", "wait 5").await;
-        m.post(
+        m.save(
             "/tools",
             "slow",
             ActionInput {

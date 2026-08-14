@@ -21,9 +21,9 @@ pub struct RefRequest {
     pub name: String,
 }
 
-/// Body for `post` (create-or-replace) on types/docs/actions.
+/// Body for `save` (create-or-replace) on types/docs/actions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PostRequest<T> {
+pub struct SaveRequest<T> {
     pub path: String,
     pub name: String,
     pub input: T,

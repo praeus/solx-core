@@ -41,7 +41,7 @@ async fn types_docs_actions_files_round_trip_over_http() {
 
     // Types.
     let ty = types
-        .post(
+        .save(
             "/types/custom",
             "Person",
             TypeInput {
@@ -64,7 +64,7 @@ async fn types_docs_actions_files_round_trip_over_http() {
 
     // Docs.
     let doc = docs
-        .post(
+        .save(
             "/research/ai",
             "note",
             DocumentInput {
@@ -93,7 +93,7 @@ async fn types_docs_actions_files_round_trip_over_http() {
     // server-side against the unmasked row — still works.
     let real_key = "c3VwZXItc2VjcmV0LWtleS1oZXJlLXBhZGRpbmc=";
     actions
-        .post(
+        .save(
             "/tools",
             "echo",
             ActionInput {
@@ -118,7 +118,7 @@ async fn types_docs_actions_files_round_trip_over_http() {
     let mut edited = cfg.clone();
     edited["cwd"] = json!("..");
     actions
-        .post("/tools", "echo", ActionInput { action_config: Some(edited), ..Default::default() })
+        .save("/tools", "echo", ActionInput { action_config: Some(edited), ..Default::default() })
         .await
         .unwrap();
     assert!(

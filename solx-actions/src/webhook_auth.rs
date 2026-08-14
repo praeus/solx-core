@@ -534,7 +534,7 @@ async fn persist_rotated_refresh_token(
             //
             // Build on the `action_config` we were handed — which `exec_as`
             // read unmasked — rather than re-reading through
-            // `ActionManager::get`, whose result is redacted. `post` would
+            // `ActionManager::get`, whose result is redacted. `save` would
             // restore the sentinels either way (see `crate::mask`), but a
             // security-sensitive write shouldn't depend on that.
             let mut new_cfg = action_config.clone();
@@ -561,7 +561,7 @@ async fn persist_rotated_refresh_token(
                 action_config: Some(new_cfg),
                 ..Default::default()
             };
-            if let Err(e) = actions.post(path, name, input).await {
+            if let Err(e) = actions.save(path, name, input).await {
                 tracing::warn!("failed to persist rotated refresh_token for action '{name}': {e}");
             }
         }
@@ -716,8 +716,8 @@ mod tests {
 
     #[async_trait]
     impl ActionManager for StubActionManager {
-        async fn post(&self, _path: &str, _name: &str, _input: ActionInput) -> solx_surface::error::Result<Action> {
-            panic!("stub ActionManager::post should not be called by these tests")
+        async fn save(&self, _path: &str, _name: &str, _input: ActionInput) -> solx_surface::error::Result<Action> {
+            panic!("stub ActionManager::save should not be called by these tests")
         }
         async fn get(&self, _path: &str, _name: &str) -> solx_surface::error::Result<Action> {
             panic!("stub ActionManager::get should not be called by these tests")

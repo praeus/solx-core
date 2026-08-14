@@ -29,18 +29,18 @@ if [ "$ready" != true ]; then
   exit $?
 fi
 
-out=$(solx post action /demo/actions/ping-webhook \
+out=$(solx save action /demo/actions/ping-webhook \
   --json "{\"action_type\":\"webhook\",\"fn_name\":\"http://127.0.0.1:$PORT/echo\",\"action_config\":{\"auth\":{\"type\":\"bearer\",\"token\":\"secret-token\"},\"headers\":{\"X-Demo\":\"1\"}}}")
-assert_eq "$(jget "$out" action_type)" "webhook" "post action: action_type is webhook"
+assert_eq "$(jget "$out" action_type)" "webhook" "save action: action_type is webhook"
 
 out=$(solx exec /demo/actions/ping-webhook --json '{"greeting":"hi"}')
-assert_eq "$(jget "$out" result.received.greeting)" "hi" "exec: mock server received the posted JSON body"
+assert_eq "$(jget "$out" result.received.greeting)" "hi" "exec: mock server received the saved JSON body"
 assert_eq "$(jget "$out" result.auth)" "Bearer secret-token" "exec: bearer auth header resolved and forwarded"
 
-# No allowlist gate: any URL works purely by being posted as an action's
+# No allowlist gate: any URL works purely by being saved as an action's
 # fn_name (Preliminary phase decision) — a second, differently-pathed action
 # hitting the same URL needs no separate registration.
-out=$(solx post action /demo/other/another-ping \
+out=$(solx save action /demo/other/another-ping \
   --json "{\"action_type\":\"webhook\",\"fn_name\":\"http://127.0.0.1:$PORT/echo\"}")
 out=$(solx exec /demo/other/another-ping --json '{"n":1}')
 assert_eq "$(jget "$out" result.received.n)" "1" "exec: no config-level webhook allowlist required"

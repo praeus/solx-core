@@ -4,7 +4,7 @@ use solx_surface::entities::{TypeEntity, TypeInput};
 use solx_surface::error::Result;
 use solx_surface::managers::TypeManager;
 use solx_surface::query::{ListOptions, Page};
-use solx_surface::wire::{PostRequest, RefRequest, ResolveRequest, ValidateRequest};
+use solx_surface::wire::{RefRequest, ResolveRequest, SaveRequest, ValidateRequest};
 
 use crate::http::post_json;
 
@@ -27,9 +27,9 @@ impl RemoteTypeManager {
 
 #[async_trait]
 impl TypeManager for RemoteTypeManager {
-    async fn post(&self, path: &str, name: &str, input: TypeInput) -> Result<TypeEntity> {
-        let req = PostRequest { path: path.to_string(), name: name.to_string(), input };
-        post_json(&self.http, &self.base_url, &self.token, "/types/post", &req).await
+    async fn save(&self, path: &str, name: &str, input: TypeInput) -> Result<TypeEntity> {
+        let req = SaveRequest { path: path.to_string(), name: name.to_string(), input };
+        post_json(&self.http, &self.base_url, &self.token, "/types/save", &req).await
     }
 
     async fn get(&self, path: &str, name: &str) -> Result<TypeEntity> {

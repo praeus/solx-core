@@ -4,25 +4,25 @@ use axum::{Json, Router};
 use solx_surface::entities::{Action, ActionExecResult};
 use solx_surface::managers::Solx;
 use solx_surface::query::{ListOptions, Page};
-use solx_surface::wire::{ExecRequest, PostRequest, RefRequest};
+use solx_surface::wire::{ExecRequest, RefRequest, SaveRequest};
 
 use crate::error::ApiError;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/actions/post", post(post_action))
+        .route("/actions/save", post(save_action))
         .route("/actions/get", post(get_action))
         .route("/actions/delete", post(delete_action))
         .route("/actions/list", post(list_actions))
         .route("/actions/exec", post(exec_action))
 }
 
-async fn post_action(
+async fn save_action(
     State(state): State<AppState>,
-    Json(req): Json<PostRequest<solx_surface::entities::ActionInput>>,
+    Json(req): Json<SaveRequest<solx_surface::entities::ActionInput>>,
 ) -> Result<Json<Action>, ApiError> {
-    let action = state.app.actions().post(&req.path, &req.name, req.input).await?;
+    let action = state.app.actions().save(&req.path, &req.name, req.input).await?;
     Ok(Json(action))
 }
 

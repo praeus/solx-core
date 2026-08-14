@@ -1,6 +1,6 @@
 //! Entity CRUD and search built-ins: documents, types, actions.
 //!
-//! The `entity_post_action` / `entity_delete_action` handlers apply the
+//! The `entity_save_action` / `entity_delete_action` handlers apply the
 //! shell-/webhook-guard that prevents an MCP tool call, a WASM guest, or a
 //! `.solx` script from creating or modifying an executable action — see
 //! [`super::guard_executable_action`] for the shared helper.
@@ -21,10 +21,10 @@ use super::{
 
 // ── document CRUD ────────────────────────────────────────────────────────────
 
-pub(super) async fn doc_post(params: &Value, docs: &Arc<dyn DocManager>) -> Result<Value, String> {
+pub(super) async fn doc_save(params: &Value, docs: &Arc<dyn DocManager>) -> Result<Value, String> {
     let name = require_str(params, "name")?;
     let input: DocumentInput = parse_input(params)?;
-    let doc = docs.post(path_or_root(params), name, input).await.map_err(|e| e.to_string())?;
+    let doc = docs.save(path_or_root(params), name, input).await.map_err(|e| e.to_string())?;
     to_value(&doc)
 }
 
@@ -48,10 +48,10 @@ pub(super) async fn doc_list(params: &Value, docs: &Arc<dyn DocManager>) -> Resu
 
 // ── type CRUD ────────────────────────────────────────────────────────────────
 
-pub(super) async fn type_post(params: &Value, types: &Arc<dyn TypeManager>) -> Result<Value, String> {
+pub(super) async fn type_save(params: &Value, types: &Arc<dyn TypeManager>) -> Result<Value, String> {
     let name = require_str(params, "name")?;
     let input: TypeInput = parse_input(params)?;
-    let ty = types.post(path_or_root(params), name, input).await.map_err(|e| e.to_string())?;
+    let ty = types.save(path_or_root(params), name, input).await.map_err(|e| e.to_string())?;
     to_value(&ty)
 }
 
@@ -75,13 +75,13 @@ pub(super) async fn type_list(params: &Value, types: &Arc<dyn TypeManager>) -> R
 
 // ── action CRUD ──────────────────────────────────────────────────────────────
 //
-// `action_post` / `action_delete` apply the executable-action guard that
+// `action_save` / `action_delete` apply the executable-action guard that
 // closes MCP/guest/script routes to creating, modifying, or removing
 // Command and Webhook actions. The same check is performed by the CLI,
 // MCP, and HTTP surfaces — see `super::guard_executable_action` for the
 // shared helper.
 
-pub(super) async fn action_post(params: &Value, actions: &Arc<dyn ActionManager>) -> Result<Value, String> {
+pub(super) async fn action_save(params: &Value, actions: &Arc<dyn ActionManager>) -> Result<Value, String> {
     let name = require_str(params, "name")?;
     let input: ActionInput = parse_input(params)?;
     let path = path_or_root(params);
@@ -96,7 +96,7 @@ pub(super) async fn action_post(params: &Value, actions: &Arc<dyn ActionManager>
     };
     guard_executable_action(existing, input.action_type, path, name, "create or modify")?;
 
-    let a = actions.post(path, name, input).await.map_err(|e| e.to_string())?;
+    let a = actions.save(path, name, input).await.map_err(|e| e.to_string())?;
     to_value(&a)
 }
 
@@ -109,7 +109,7 @@ pub(super) async fn action_get(params: &Value, actions: &Arc<dyn ActionManager>)
 pub(super) async fn action_delete(params: &Value, actions: &Arc<dyn ActionManager>) -> Result<Value, String> {
     let name = require_str(params, "name")?;
     let path = path_or_root(params);
-    // Same reasoning as `action_post`: if these callers can't create or
+    // Same reasoning as `action_save`: if these callers can't create or
     // modify an executable action, they shouldn't be able to remove one
     // either.
     let existing = match actions.get(path, name).await {

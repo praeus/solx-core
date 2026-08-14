@@ -3,9 +3,9 @@
 //!
 //! Deliberately narrow: [`ActionCommandRunner`] understands exactly two
 //! stage verbs, `exec` and `json` — not the full `solx-cli` grammar
-//! (`post`/`get`/`delete`/`list`/`search`). A script that needs entity CRUD
+//! (`save`/`get`/`delete`/`list`/`search`). A script that needs entity CRUD
 //! reaches it the same way a WASM guest or an MCP tool call already does —
-//! `exec /builtin/doc_post ...` etc. — so it stays subject to the same
+//! `exec /builtin/entity_save_document ...` etc. — so it stays subject to the same
 //! executable-action guard and param-type validation the `Internal`
 //! handlers apply (see `crate::internal::entity`). Bypassing that by giving
 //! scripts direct access to `docs`/`types`/`files` would be a real

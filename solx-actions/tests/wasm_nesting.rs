@@ -123,7 +123,7 @@ impl Harness {
         actions.set_self_ref(Arc::downgrade(&actions));
 
         actions
-            .post(
+            .save(
                 "/t",
                 "guest",
                 ActionInput {
@@ -140,9 +140,9 @@ impl Harness {
 
     /// Register a second action pointing at the same artifact, with its own
     /// `action_config` (used for the timeout tests).
-    async fn post_variant(&self, name: &str, config: serde_json::Value) {
+    async fn save_variant(&self, name: &str, config: serde_json::Value) {
         self.actions
-            .post(
+            .save(
                 "/t",
                 name,
                 ActionInput {
@@ -237,7 +237,7 @@ async fn concurrent_chains_all_complete() {
 async fn a_spinning_guest_is_preempted_and_then_timed_out() {
     let guest = guest_or_skip!();
     let h = Arc::new(Harness::new(guest).await);
-    h.post_variant("spinner", json!({ "timeout_secs": 2 })).await;
+    h.save_variant("spinner", json!({ "timeout_secs": 2 })).await;
 
     let spinner = {
         let h = h.clone();

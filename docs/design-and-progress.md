@@ -178,11 +178,11 @@ against the parameter type (if declared), then dispatched:
 - **Webhook** — HTTP POST to `fn_name` (the URL), with optional bearer-token /
   custom headers from `action_config`, plus
   `oauth_refresh`/`oauth_service_account`/`oauth_authorization_code` flows.
-  There is no URL allowlist — any action posted to the DB can POST anywhere
+  There is no URL allowlist — any action saved to the DB can POST anywhere
   (see §10).
 - **Internal** — native Rust dispatch, no shell/HTTP/WASM (`solx-actions/src/internal.rs`).
   This is where the entire `/builtin` catalogue lives: entity CRUD
-  (`entity_post/get/delete/list_{document,type,action}`), document field ops,
+  (`entity_save/get/delete/list_{document,type,action}`), document field ops,
   full-text/faceted search, general-purpose file-store access, an
   in-process environment store, HTML fetch, scoped secrets, and the OAuth
   2.0 authorization-code loopback (see [`built-in-actions.md`](built-in-actions.md)
@@ -299,7 +299,7 @@ local and remote impls are interchangeable behind `Arc<dyn _>`, so callers
 
 The `solx` binary exposes:
 
-- `post <entity> <ref>` — upsert (create-or-replace); body from `--json`,
+- `save <entity> <ref>` — upsert (create-or-replace); body from `--json`,
   piped input, or stdin; `--type` sets a document's type; `--file` supplies a
   file's bytes.
 - `get <entity> <ref>`, `delete <entity> <ref>`
@@ -323,15 +323,15 @@ Entities: `doc`, `action`, `type`, `file`.
 | `solx-surface` | DTOs, error, wire types, path helpers, manager traits, `Solx` facade | path normalize / full_ref / split_ref |
 | `solx-config` | cross-process RMW, mtime reload, package registry | unknown-field preservation, cross-instance reload, registry |
 | `solx-files` | put/get/delete/list, traversal rejection, conventional paths | roundtrip, traversal rejected |
-| `solx-types` | own DB, schema validation + enrichment, seed incl. `BlogPostWithComments` + `/builtin/types/*` param schemas | seed, post/get/validate, list+delete, enrich |
-| `solx-docs` | own DB, cross-DB type validation, Tantivy full-text + path facet | post/get/list/search/delete, invalid-contents rejection |
+| `solx-types` | own DB, schema validation + enrichment, seed incl. `BlogPostWithComments` + `/builtin/types/*` param schemas | seed, save/get/validate, list+delete, enrich |
+| `solx-docs` | own DB, cross-DB type validation, Tantivy full-text + path facet | save/get/list/search/delete, invalid-contents rejection |
 | `solx-actions` | own DB, `Command`/`Webhook`/`Internal`/`Wasm` execution; the entire `/builtin` catalogue (30 actions) is native `Internal` dispatch | CRUD, command exec, internal dispatch (entity CRUD/search/files/env/secrets/OAuth), wasm host trait impls |
 | `solx-scripts` | pipeline language over `CommandRunner` | assign+substitute, quote-aware tokenize |
 | `solx-packages` | install/uninstall via script runner + config registry | (exercised via CLI) |
 | `solx-manager` | implements `Solx`; shared manager wiring for `solx-cli`, `solx-mcp`, and `solx-server`; builds local or `solx-client` remote impls per config | (exercised via all three consumers' tests) |
 | `solx-client` | HTTP proxy impls of the manager traits (`reqwest`); flips `solx-manager` into remote mode when `server_url`/`SOLX_SERVER_URL` is set | roundtrip against a real `solx-server` |
 | `solx-server` | axum HTTP server hosting the local managers; bearer-token auth; `127.0.0.1`-only bind; always uses `App::build_local` (never proxies to itself) | end-to-end CLI/server/client roundtrip |
-| `solx-cli` | wires `solx-manager`; `post/get/delete/exec/list/search/script`; works in both local and remote mode (no flag needed — picked up from config/env) | end-to-end smoke test + `examples/*.sh` (local and against `solx-server`) |
+| `solx-cli` | wires `solx-manager`; `save/get/delete/exec/list/search/script`; works in both local and remote mode (no flag needed — picked up from config/env) | end-to-end smoke test + `examples/*.sh` (local and against `solx-server`) |
 | `solx-mcp` | MCP server (stdio, `rmcp`); every action is a dynamic tool, no separate CRUD tool layer | in-process client/server integration test |
 
 An end-to-end CLI run verified: custom type → document validated against it →
@@ -368,7 +368,7 @@ OAuth actions end-to-end against a real compiled binary.
    deferred rather than designed now, to avoid adding permission-system
    complexity while solx-core's core surface is still being built out;
    everything running through it today is trusted by construction
-   ("posted to the DB = trusted"). Recorded here so the gap isn't lost:
+   ("saved to the DB = trusted"). Recorded here so the gap isn't lost:
    - **Package signing and verification at install time**, so
      `install-package` can refuse a package whose signature doesn't check
      out rather than trusting any local directory unconditionally.
