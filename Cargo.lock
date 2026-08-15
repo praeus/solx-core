@@ -3769,6 +3769,8 @@ dependencies = [
  "solx-scripts",
  "solx-surface",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3851,6 +3853,7 @@ dependencies = [
  "rmcp",
  "serde_json",
  "solx-config",
+ "solx-files",
  "solx-manager",
  "solx-surface",
  "tempfile",

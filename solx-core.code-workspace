@@ -25,7 +25,12 @@
 			"path": "../test"
 		},
 		{
+			"name": "src",
 			"path": "../sol/sol-browser/src"
+		},
+		{
+			"name": "sol-manager",
+			"path": "../sol/sol-manager"
 		}
 	]
 }

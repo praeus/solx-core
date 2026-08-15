@@ -26,3 +26,8 @@ tempfile = "3"
 # additive on top of the binary's own "server"/"transport-io" features for
 # `cargo test`, not part of the shipped `solx-mcp` binary.
 rmcp = { version = "3.0.0", features = ["client"] }
+# Test-only, to register a Script action's artifact directly against the
+# concrete `App`/`ActionManager` (bypassing the MCP tool layer, exactly like
+# `solx-actions`'s own unit tests do) rather than duplicating its file-path
+# convention as a string literal.
+solx-files = { workspace = true }

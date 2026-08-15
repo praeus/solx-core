@@ -57,6 +57,18 @@ pub struct SolxConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_mappings: Option<HashMap<String, String>>,
 
+    /// Persisted environment-store variables, `namespace -> key -> value`.
+    /// Written by the `set_env` built-in when called with `persist: true`,
+    /// and loaded back into the store at startup, so a variable survives a
+    /// restart. Distinct from `env_mappings`, which is a read-only allowlist
+    /// over the *system* environment and is never written here.
+    ///
+    /// **Plaintext.** Anything sensitive belongs in `get_secret`/`set_secret`,
+    /// which are encrypted and held in the OS credential manager. Delete a
+    /// variable by removing it from this map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_vars: Option<HashMap<String, HashMap<String, String>>>,
+
     /// Base URL of a remote `solx-server` to proxy all manager calls to
     /// (e.g. `"http://127.0.0.1:8766"`). `None` (default) means local mode
     /// — every existing user's exact current behavior, no server needed.
@@ -72,4 +84,13 @@ pub struct SolxConfig {
     /// won't normally have its own config's `server_url` set at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_port: Option<u16>,
+
+    /// Ring-buffer cap on entries retained per action console. Oldest
+    /// entries are evicted once a console exceeds this. Defaults to 5000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub console_max_entries: Option<i64>,
+    /// A console whose most recent write is older than this many days is
+    /// dropped entirely by the startup sweep. Defaults to 7.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub console_ttl_days: Option<i64>,
 }

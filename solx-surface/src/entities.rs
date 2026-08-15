@@ -154,6 +154,30 @@ pub enum ActionType {
     /// A `solx-scripts` script (`bin_name` = the `.solx` artifact). The
     /// caller's params are available inside the script as `$params`.
     Script,
+    /// A client-side UI widget (`bin_name` = the JS/ESM bundle artifact,
+    /// `fn_name` = the custom-element tag name). Not executed server-side:
+    /// `exec` returns a [`WidgetDescriptor`] the host frontend uses to load
+    /// and mount the widget in a dialog.
+    Widget,
+}
+
+/// Descriptor returned by `exec` on a [`ActionType::Widget`] action. It tells
+/// a host frontend how to load and mount the widget: which custom-element tag
+/// to create, where to fetch the bundle from, and any initial context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WidgetDescriptor {
+    /// The custom-element tag name the bundle registers (e.g. `my-widget`).
+    pub tag_name: String,
+    /// URL the host should fetch the widget's JS/ESM bundle from.
+    pub entry_url: String,
+    /// Initial context handed to the widget on mount (as a `hostContext`
+    /// property). May be `null`.
+    #[serde(default)]
+    pub initial_data: Value,
+    /// Capabilities the widget declares it needs (informational — the host
+    /// decides what to grant). Defaults to empty.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,7 +204,8 @@ pub struct Action {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_name: Option<String>,
     /// Wasm: the artifact file name. Script: the `.solx` script artifact
-    /// file name. Unused by Command/Webhook/Internal.
+    /// file name. Widget: the JS/ESM bundle artifact file name. Unused by
+    /// Command/Webhook/Internal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bin_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

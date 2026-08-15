@@ -10,6 +10,7 @@
 
 mod types;
 
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -254,6 +255,24 @@ impl ConfigService {
         }
     }
 
+    /// Ring-buffer cap on entries retained per action console. Defaults to
+    /// 5000 when unset or non-positive.
+    pub fn console_max_entries(&self) -> i64 {
+        match self.snapshot().console_max_entries {
+            Some(n) if n > 0 => n,
+            _ => 5000,
+        }
+    }
+
+    /// TTL (in days) before an idle console is swept away entirely. Defaults
+    /// to 7 when unset or non-positive.
+    pub fn console_ttl_days(&self) -> i64 {
+        match self.snapshot().console_ttl_days {
+            Some(n) if n > 0 => n,
+            _ => 7,
+        }
+    }
+
     pub fn logs_dir(&self) -> PathBuf {
         self.appdata.join("logs")
     }
@@ -285,6 +304,32 @@ impl ConfigService {
                 .unwrap_or_default();
             list.retain(|p| p.name != name);
             obj.insert("installed_packages".into(), serde_json::to_value(list)?);
+            Ok(())
+        })
+    }
+
+    // ── persisted environment variables ──────────────────────────────────────
+
+    /// Every persisted variable, `namespace -> key -> value`. Loaded into the
+    /// in-process environment store at startup.
+    pub fn env_vars(&self) -> HashMap<String, HashMap<String, String>> {
+        self.snapshot().env_vars.unwrap_or_default()
+    }
+
+    /// Persist `value` under `namespace`/`key`, creating the namespace if
+    /// needed. Goes through the same cross-process `mutate()` lock as every
+    /// other config write, so concurrent `set_env` calls can't lose an entry
+    /// by read-modify-writing a stale snapshot.
+    pub fn set_env_var(&self, namespace: &str, key: &str, value: &str) -> Result<()> {
+        self.mutate(|obj| {
+            let mut all: HashMap<String, HashMap<String, String>> = obj
+                .get("env_vars")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            all.entry(namespace.to_string())
+                .or_default()
+                .insert(key.to_string(), value.to_string());
+            obj.insert("env_vars".into(), serde_json::to_value(all)?);
             Ok(())
         })
     }

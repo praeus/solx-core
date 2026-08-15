@@ -26,7 +26,7 @@ include = [
 #
 # The `wit/custom-action.wit` file in this crate is the canonical home for the
 # `custom-action` WIT world; `solx-actions`' wasmtime host
-# (`solx-actions/src/wasm_host.rs`) binds directly against this same file by
+# (`solx-actions/src/wasm/host.rs`) binds directly against this same file by
 # relative path.
 #
 # Build your custom component:

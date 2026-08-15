@@ -8,7 +8,7 @@
 //! native dispatch is strictly simpler (no sync/async host-function bridging,
 //! no separate guest build/packaging step) and was already how everything
 //! else in this module worked. WASM now exists solely for third-party
-//! *custom* actions (`crate::wasm_host`), which reach every one of these
+//! *custom* actions (`crate::wasm`), which reach every one of these
 //! same operations recursively via `action-exec` — no separate WASM ABI
 //! needed for them.
 //!
@@ -30,7 +30,7 @@
 //! All of these are reached through the single [`run_internal`] dispatch
 //! table below; there is no public per-submodule API beyond what
 //! non-`internal` modules of this crate need (the OAuth registry is
-//! referenced by `crate::oauth_loopback`, and `init_env_mappings` is
+//! referenced by `crate::loopback::oauth`, and `init_env_mappings` is
 //! called once at startup by `solx-manager`).
 
 use std::sync::Arc;
@@ -42,6 +42,7 @@ use solx_surface::managers::{ActionManager, DocManager, FileStore, TypeManager};
 
 use crate::caller::Caller;
 
+pub mod console;
 pub mod doc_fields;
 pub mod entity;
 pub mod file;
@@ -55,7 +56,7 @@ pub mod utils;
 // `solx_actions::internal::init_env_mappings` (used by `solx-manager`
 // at startup) keeps working without modification. The function lives
 // in `utils.rs` next to the env store it manages.
-pub use utils::init_env_mappings;
+pub use utils::{init_env_mappings, init_persisted_env, DEFAULT_NAMESPACE};
 
 // ── Context ──────────────────────────────────────────────────────────────────
 
@@ -69,6 +70,12 @@ pub struct InternalCtx {
     pub types: Arc<dyn TypeManager>,
     pub actions: Arc<dyn ActionManager>,
     pub files: Arc<dyn FileStore>,
+    /// Needed by `set_env` to write persisted variables through to
+    /// `SolxConfig.env_vars`. Every other handler reaches its state through
+    /// the managers above.
+    pub config: Arc<solx_config::ConfigService>,
+    /// Shared handle to the action-console store — see `crate::console`.
+    pub console: Arc<crate::console::ConsoleStore>,
     /// The *executing* action's own `action_config` — i.e. the row whose
     /// `fn_name` dispatched to this handler, which for a built-in is the
     /// `/builtin/...` row itself.
@@ -131,7 +138,7 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
 
         // ── environment store ────────────────────────────────────────────
         "get_env" => Ok(utils::get_env(params)),
-        "set_env" => Ok(utils::set_env(params)),
+        "set_env" => utils::set_env(params, &ctx.config),
 
         // ── HTTP ─────────────────────────────────────────────────────────
         "http_request" => http::http_request(params).await,
@@ -148,6 +155,13 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
         // ── secrets (per-caller scoped) ──────────────────────────────────
         "get_secret" => secrets::get_secret(params, ctx.caller.as_ref()).await,
         "set_secret" => secrets::set_secret(params, ctx.caller.as_ref()).await,
+
+        // ── action consoles ──────────────────────────────────────────────
+        "console_print" => console::print(params, ctx.caller.as_ref(), &ctx.console).await,
+        "console_read" => console::read(params, &ctx.console).await,
+        "console_tail" => console::tail(params, &ctx.console).await,
+        "console_clear" => console::clear(params, &ctx.console).await,
+        "console_list" => console::list(params, &ctx.console).await,
 
         other => Err(format!("unknown internal fn_name '{other}'")),
     }
@@ -253,7 +267,7 @@ mod tests {
     use serde_json::json;
     use tokio::sync::oneshot;
 
-    use crate::oauth_loopback::LoopbackResult;
+    use crate::loopback::oauth::LoopbackResult;
 
     /// A valid 32-byte AES key, base64-encoded — `crate::secrets` rejects
     /// anything else.
@@ -317,7 +331,7 @@ mod tests {
         let actions_concrete = Arc::new(
             crate::LocalActionManager::open(
                 &dir.path().join("actions.db"),
-                cfg,
+                cfg.clone(),
                 types.clone(),
                 docs.clone(),
                 files.clone(),
@@ -326,10 +340,11 @@ mod tests {
             .unwrap(),
         );
         actions_concrete.set_self_ref(Arc::downgrade(&actions_concrete));
+        let console = actions_concrete.console().clone();
         let actions: Arc<dyn ActionManager> = actions_concrete;
         (
             dir,
-            InternalCtx { docs, types, actions, files, action_config, caller: None },
+            InternalCtx { docs, types, actions, files, config: cfg, console, action_config, caller: None },
         )
     }
 
@@ -569,6 +584,97 @@ mod tests {
         run_internal("set_env", &json!({"key": "SOLX_TEST_KEY", "value": "hi"}), &ctx).await.unwrap();
         let got = run_internal("get_env", &json!({"key": "SOLX_TEST_KEY"}), &ctx).await.unwrap();
         assert_eq!(got.get("value").and_then(Value::as_str), Some("hi"));
+    }
+
+    /// The env store is a process-global static, so each of these tests uses
+    /// its own namespace rather than serializing them.
+    #[tokio::test]
+    async fn env_namespaces_isolate_the_same_key() {
+        let (_d, ctx) = test_ctx(None).await;
+        let set = |ns: &str, v: &str| json!({"namespace": ns, "key": "cursor", "value": v});
+
+        run_internal("set_env", &set("ns_iso_a", "alpha"), &ctx).await.unwrap();
+        run_internal("set_env", &set("ns_iso_b", "beta"), &ctx).await.unwrap();
+
+        let a = run_internal("get_env", &json!({"namespace": "ns_iso_a", "key": "cursor"}), &ctx).await.unwrap();
+        let b = run_internal("get_env", &json!({"namespace": "ns_iso_b", "key": "cursor"}), &ctx).await.unwrap();
+        assert_eq!(a.get("value").and_then(Value::as_str), Some("alpha"));
+        assert_eq!(b.get("value").and_then(Value::as_str), Some("beta"));
+
+        // A namespace nobody wrote to resolves to null, not to another's value.
+        let miss = run_internal("get_env", &json!({"namespace": "ns_iso_c", "key": "cursor"}), &ctx).await.unwrap();
+        assert_eq!(miss.get("value").cloned(), Some(Value::Null));
+    }
+
+    /// Persistence is a property of the variable, not of the individual write:
+    /// once persisted, a later write with no `persist` flag must keep updating
+    /// `solx-config.json` rather than silently dropping to memory-only.
+    #[tokio::test]
+    async fn set_env_persist_is_sticky_and_writes_config() {
+        let (dir, ctx) = test_ctx(None).await;
+        let cfg = solx_config::ConfigService::open_in(dir.path()).unwrap();
+
+        let res = run_internal(
+            "set_env",
+            &json!({"namespace": "ns_sticky", "key": "cursor", "value": "/?skip=10", "persist": true}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.get("persisted").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            cfg.env_vars().get("ns_sticky").and_then(|m| m.get("cursor")).map(String::as_str),
+            Some("/?skip=10")
+        );
+
+        // No `persist` this time — the config entry must still advance.
+        let res = run_internal(
+            "set_env",
+            &json!({"namespace": "ns_sticky", "key": "cursor", "value": "/?skip=20"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.get("persisted").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            cfg.env_vars().get("ns_sticky").and_then(|m| m.get("cursor")).map(String::as_str),
+            Some("/?skip=20")
+        );
+
+        // A different key in the same namespace stays ephemeral unless asked.
+        run_internal(
+            "set_env",
+            &json!({"namespace": "ns_sticky", "key": "scratch", "value": "x"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert!(cfg.env_vars().get("ns_sticky").and_then(|m| m.get("scratch")).is_none());
+    }
+
+    /// What makes a cursor survive a restart: startup reloads `env_vars` into
+    /// the store, and those variables come back already marked persistent.
+    #[tokio::test]
+    async fn init_persisted_env_reloads_into_the_store() {
+        let (_d, ctx) = test_ctx(None).await;
+        let mut ns = std::collections::HashMap::new();
+        ns.insert("cursor".to_string(), "/?skip=90".to_string());
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("ns_reload".to_string(), ns);
+        init_persisted_env(vars);
+
+        let got = run_internal("get_env", &json!({"namespace": "ns_reload", "key": "cursor"}), &ctx).await.unwrap();
+        assert_eq!(got.get("value").and_then(Value::as_str), Some("/?skip=90"));
+
+        // Reloaded variables are persistent, so a plain write still writes through.
+        let res = run_internal(
+            "set_env",
+            &json!({"namespace": "ns_reload", "key": "cursor", "value": "/?skip=100"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.get("persisted").and_then(Value::as_bool), Some(true));
     }
 
     /// The CLI, MCP, and the HTTP route all reach these built-ins with no
@@ -1139,5 +1245,175 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.contains("timeout_secs must be > 0"), "{err}");
+    }
+
+    // ── action consoles ──────────────────────────────────────────────────
+
+    /// Mirrors `secrets_are_refused_without_an_action_caller`: the CLI, MCP,
+    /// and HTTP route all reach built-ins with no action caller, so
+    /// `console_print` — which always targets *the calling action's own*
+    /// console — has nothing to resolve.
+    #[tokio::test]
+    async fn console_print_is_refused_without_an_action_caller() {
+        let (_d, ctx) = test_ctx(None).await;
+        assert!(ctx.caller.is_none());
+        let err = run_internal("console_print", &json!({"message": "hi"}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(err.contains("no action caller"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn console_print_writes_to_the_callers_own_console() {
+        let (_d, mut ctx) = test_ctx(None).await;
+        ctx.caller = Some(Caller::from_action("/pkg/foo", None));
+
+        let v = run_internal("console_print", &json!({"message": "hello"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(v.get("seq").and_then(Value::as_i64), Some(1));
+
+        let read = run_internal("console_read", &json!({"action_ref": "/pkg/foo"}), &ctx)
+            .await
+            .unwrap();
+        let entries = read.get("entries").and_then(Value::as_array).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].get("message").and_then(Value::as_str), Some("hello"));
+        assert_eq!(entries[0].get("source").and_then(Value::as_str), Some("guest"));
+        assert_eq!(entries[0].get("level").and_then(Value::as_str), Some("info"));
+    }
+
+    #[tokio::test]
+    async fn console_print_defaults_level_and_honors_an_explicit_one() {
+        let (_d, mut ctx) = test_ctx(None).await;
+        ctx.caller = Some(Caller::from_action("/pkg/foo", None));
+
+        run_internal("console_print", &json!({"message": "a"}), &ctx).await.unwrap();
+        run_internal("console_print", &json!({"level": "warn", "message": "b"}), &ctx)
+            .await
+            .unwrap();
+
+        let read = run_internal("console_read", &json!({"action_ref": "/pkg/foo"}), &ctx)
+            .await
+            .unwrap();
+        let entries = read.get("entries").and_then(Value::as_array).unwrap();
+        assert_eq!(entries[0].get("level").and_then(Value::as_str), Some("info"));
+        assert_eq!(entries[1].get("level").and_then(Value::as_str), Some("warn"));
+    }
+
+    #[tokio::test]
+    async fn console_read_requires_action_ref() {
+        let (_d, ctx) = test_ctx(None).await;
+        let err = run_internal("console_read", &json!({}), &ctx).await.unwrap_err();
+        assert!(err.contains("missing required param: action_ref"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn console_read_of_an_unwritten_console_is_empty_not_an_error() {
+        let (_d, ctx) = test_ctx(None).await;
+        let v = run_internal("console_read", &json!({"action_ref": "/never/printed"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(v.get("entries").and_then(Value::as_array).map(Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn console_read_respects_from_seq_cursor() {
+        let (_d, mut ctx) = test_ctx(None).await;
+        ctx.caller = Some(Caller::from_action("/pkg/foo", None));
+        for i in 0..3 {
+            run_internal("console_print", &json!({"message": format!("m{i}")}), &ctx)
+                .await
+                .unwrap();
+        }
+
+        let v = run_internal(
+            "console_read",
+            &json!({"action_ref": "/pkg/foo", "from_seq": 2}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let entries = v.get("entries").and_then(Value::as_array).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].get("seq").and_then(Value::as_i64), Some(2));
+        assert_eq!(v.get("next_cursor").and_then(Value::as_i64), Some(4));
+    }
+
+    /// A caller does *not* need to be the action it's reading — this is
+    /// what lets an orchestrator watch a child's console.
+    #[tokio::test]
+    async fn console_read_is_not_restricted_to_the_callers_own_console() {
+        let (_d, mut ctx) = test_ctx(None).await;
+        ctx.caller = Some(Caller::from_action("/pkg/child", None));
+        run_internal("console_print", &json!({"message": "child status"}), &ctx)
+            .await
+            .unwrap();
+
+        // Read it back as an unrelated caller (here: no caller at all).
+        ctx.caller = None;
+        let v = run_internal("console_read", &json!({"action_ref": "/pkg/child"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(v.get("entries").and_then(Value::as_array).map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn console_tail_returns_immediately_when_entries_exist() {
+        let (_d, mut ctx) = test_ctx(None).await;
+        ctx.caller = Some(Caller::from_action("/pkg/foo", None));
+        run_internal("console_print", &json!({"message": "hi"}), &ctx).await.unwrap();
+        ctx.caller = None;
+
+        let v = run_internal(
+            "console_tail",
+            &json!({"action_ref": "/pkg/foo", "wait_secs": 5}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(v.get("entries").and_then(Value::as_array).map(Vec::len), Some(1));
+    }
+
+    #[tokio::test]
+    async fn console_clear_drops_from_the_front() {
+        let (_d, mut ctx) = test_ctx(None).await;
+        ctx.caller = Some(Caller::from_action("/pkg/foo", None));
+        for i in 0..3 {
+            run_internal("console_print", &json!({"message": format!("m{i}")}), &ctx)
+                .await
+                .unwrap();
+        }
+        ctx.caller = None;
+
+        let v = run_internal(
+            "console_clear",
+            &json!({"action_ref": "/pkg/foo", "before_seq": 2}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(v.get("removed").and_then(Value::as_i64), Some(1));
+
+        let read = run_internal("console_read", &json!({"action_ref": "/pkg/foo"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(read.get("entries").and_then(Value::as_array).map(Vec::len), Some(2));
+    }
+
+    #[tokio::test]
+    async fn console_list_reflects_written_consoles() {
+        let (_d, mut ctx) = test_ctx(None).await;
+        ctx.caller = Some(Caller::from_action("/pkg/a", None));
+        run_internal("console_print", &json!({"message": "x"}), &ctx).await.unwrap();
+        ctx.caller = Some(Caller::from_action("/pkg/b", None));
+        run_internal("console_print", &json!({"message": "y"}), &ctx).await.unwrap();
+        ctx.caller = None;
+
+        let v = run_internal("console_list", &json!({"prefix": "/pkg"}), &ctx)
+            .await
+            .unwrap();
+        let consoles = v.get("consoles").and_then(Value::as_array).unwrap();
+        assert_eq!(consoles.len(), 2);
     }
 }

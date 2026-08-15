@@ -9,17 +9,18 @@
 //! WASM at all), and `Script` (a `solx-scripts` script artifact, see
 //! `crate::script`).
 
+pub mod auth;
 pub mod caller;
+pub mod console;
 mod db;
 mod exec;
 pub mod internal;
+pub mod loopback;
 mod mask;
-pub mod oauth_loopback;
 pub mod script;
 mod seed;
 pub mod secrets;
-pub mod wasm_host;
-pub mod webhook_auth;
+pub mod wasm;
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock, Weak};
@@ -74,9 +75,13 @@ pub struct LocalActionManager {
     types: Arc<dyn TypeManager>,
     docs: Arc<dyn DocManager>,
     files: Arc<dyn FileStore>,
+    /// Shares this manager's own `Db` (same physical file as `actions`) —
+    /// see the module doc on `crate::console` for what moving it to a
+    /// separate file later would cost.
+    console: Arc<console::ConsoleStore>,
     /// Set once, right after construction, to this manager's own
     /// `Arc<LocalActionManager>` — needed so WASM guests can recursively
-    /// call back into `action-exec` (see `wasm_host`). `&self` methods
+    /// call back into `action-exec` (see `wasm`). `&self` methods
     /// can't hand out `Arc<Self>` on their own, hence the `OnceLock`.
     ///
     /// Concrete rather than `Weak<dyn ActionManager>` so the recursive hop
@@ -102,14 +107,30 @@ impl LocalActionManager {
         let conn = db.connect().await?;
         conn.execute_batch(DDL).await.map_err(map_db)?;
         seed::seed_builtins(&conn).await?;
+
+        let console = Arc::new(console::ConsoleStore::new(db.clone(), config.clone()));
+        console.ensure_schema().await?;
+        // Best-effort: a sweep failure shouldn't block startup.
+        if let Err(e) = console.sweep_expired().await {
+            tracing::warn!("console TTL sweep failed: {e}");
+        }
+
         Ok(LocalActionManager {
             db,
             config,
             types,
             docs,
             files,
+            console,
             self_ref: OnceLock::new(),
         })
+    }
+
+    /// Shared handle to this manager's console store — used by `wasm::host`
+    /// to redirect a WASM guest's `logger.log` calls without going through
+    /// a synthetic `action-exec` round trip.
+    pub fn console(&self) -> &Arc<console::ConsoleStore> {
+        &self.console
     }
 
     /// Provide this manager's own handle for recursive WASM `action-exec`
@@ -137,7 +158,7 @@ impl LocalActionManager {
     /// Read a row **without** redacting `action_config`.
     ///
     /// Execution needs the real thing — `run_command` reads `cwd`,
-    /// `run_webhook` reads `auth`/`headers`, and `webhook_auth` resolves
+    /// `run_webhook` reads `auth`/`headers`, and `crate::auth` resolves
     /// credentials out of it. The [`ActionManager::get`] trait method wraps
     /// this and masks; nothing that leaves the process should use this one.
     async fn get_unmasked(&self, path: &str, name: &str) -> Result<Action> {
@@ -154,7 +175,7 @@ impl LocalActionManager {
     /// artifact location first, then the action's own scratch space.
     ///
     /// Returned behind an `Arc` because the bytes are handed to
-    /// `wasm_host::exec`, which moves them onto the blocking pool to
+    /// `wasm::exec`, which moves them onto the blocking pool to
     /// compile on a cache miss.
     async fn load_wasm_bytes(&self, action: &Action, bin_name: &str) -> Result<Arc<Vec<u8>>> {
         let shared = solx_files::shared_action_file_path(bin_name);
@@ -190,7 +211,7 @@ impl LocalActionManager {
     }
 }
 
-fn opt(s: String) -> Option<String> {
+pub(crate) fn opt(s: String) -> Option<String> {
     Some(s).filter(|v| !v.is_empty())
 }
 
@@ -201,6 +222,7 @@ fn action_type_to_str(t: Option<ActionType>) -> String {
         Some(ActionType::Command) => "command",
         Some(ActionType::Internal) => "internal",
         Some(ActionType::Script) => "script",
+        Some(ActionType::Widget) => "widget",
         None => "",
     }
     .to_string()
@@ -213,6 +235,7 @@ fn action_type_from_str(s: &str) -> Option<ActionType> {
         "command" => Some(ActionType::Command),
         "internal" => Some(ActionType::Internal),
         "script" => Some(ActionType::Script),
+        "widget" => Some(ActionType::Widget),
         _ => None,
     }
 }
@@ -478,7 +501,7 @@ impl LocalActionManager {
     /// it.
     ///
     /// `caller` is `Some` only on the recursive hop: a WASM guest calling
-    /// `action-exec` (see [`crate::wasm_host`]), which is the sole
+    /// `action-exec` (see [`crate::wasm`]), which is the sole
     /// re-entrant path into execution. It scopes `get_secret`/`set_secret`
     /// to the *calling* action's own keys.
     pub async fn exec_as(
@@ -503,6 +526,8 @@ impl LocalActionManager {
                 })?;
                 exec::run_command(
                     &self.config,
+                    self.console.clone(),
+                    &action_ref,
                     fn_name,
                     &action.action_config,
                     &params,
@@ -514,7 +539,17 @@ impl LocalActionManager {
                 let url = action.fn_name.as_deref().ok_or_else(|| {
                     SolxError::Exec("webhook action has no fn_name (URL)".into())
                 })?;
-                exec::run_webhook(self, &action.path, &action.name, url, &action.action_config, &params).await?
+                exec::run_webhook(
+                    self,
+                    self.console.clone(),
+                    &action_ref,
+                    &action.path,
+                    &action.name,
+                    url,
+                    &action.action_config,
+                    &params,
+                )
+                .await?
             }
             Some(ActionType::Internal) => {
                 let fn_name = action.fn_name.as_deref().ok_or_else(|| {
@@ -525,6 +560,8 @@ impl LocalActionManager {
                     types: self.types.clone(),
                     actions: self.self_arc()?,
                     files: self.files.clone(),
+                    config: self.config.clone(),
+                    console: self.console.clone(),
                     action_config: action.action_config.clone(),
                     caller: caller.cloned(),
                 };
@@ -546,7 +583,7 @@ impl LocalActionManager {
                 // report a handled failure without erroring the host call), so
                 // it returns a full ActionExecResult directly rather than
                 // going through the common Value-wrapping below.
-                return wasm_host::exec(
+                return wasm::exec(
                     self.self_arc()?,
                     self.files.clone(),
                     bytes,
@@ -579,6 +616,28 @@ impl LocalActionManager {
                 tokio::time::timeout(budget, run).await.map_err(|_| {
                     SolxError::Exec(format!("script action {action_ref} timed out"))
                 })??
+            }
+            Some(ActionType::Widget) => {
+                // Not executed server-side (see the ActionType::Widget doc
+                // comment): `exec` just describes the widget so a host
+                // frontend can load and mount it. Minimal stopgap — full
+                // wiring (a real fetchable `entry_url`, initial_data) belongs
+                // to whatever finishes hooking up `solx-widgets`/
+                // `docs/widget-actions.md`; this only needs to keep the
+                // dispatch exhaustive.
+                let bin_name = action.bin_name.as_deref().ok_or_else(|| {
+                    SolxError::Exec("widget action has no bin_name (bundle artifact)".into())
+                })?;
+                let tag_name = action.fn_name.clone().ok_or_else(|| {
+                    SolxError::Exec("widget action has no fn_name (custom-element tag name)".into())
+                })?;
+                let descriptor = solx_surface::entities::WidgetDescriptor {
+                    tag_name,
+                    entry_url: solx_files::shared_action_file_path(bin_name),
+                    initial_data: Value::Null,
+                    capabilities: action.capabilities.clone(),
+                };
+                serde_json::to_value(descriptor)?
             }
             None => {
                 return Err(SolxError::Exec(format!(
@@ -765,6 +824,89 @@ mod tests {
             .unwrap();
         assert!(res.success);
         assert_eq!(res.result, serde_json::json!(42));
+    }
+
+    /// Minimal single-shot HTTP server for the webhook logging tests below —
+    /// always replies 200 with a tiny JSON body, regardless of what was sent.
+    async fn start_ok_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 8192];
+                    let _ = stream.read(&mut buf).await;
+                    let body = r#"{"ok":true}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body,
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn exec_webhook_logs_start_and_success_to_the_console() {
+        let (_d, _c, m) = setup().await;
+        let (url, server) = start_ok_server().await;
+
+        m.save(
+            "/tools",
+            "hook",
+            ActionInput {
+                action_type: Some(ActionType::Webhook),
+                fn_name: Some(url),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let res = m.exec("/tools", "hook", serde_json::json!({"x": 1})).await.unwrap();
+        assert!(res.success);
+
+        let entries = m.console().read("/tools/hook", None, 10).await.unwrap().entries;
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert_eq!(entries[0].source, "webhook");
+        assert!(entries[0].message.as_deref().unwrap().starts_with("POST http"));
+        assert!(entries[1].message.as_deref().unwrap().contains("succeeded"));
+        // Params must never be logged — they can carry secrets a nested
+        // reader of the console has no business seeing.
+        assert!(!entries.iter().any(|e| e.message.as_deref().unwrap_or("").contains("\"x\"")));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn exec_webhook_logs_failure_to_the_console() {
+        let (_d, _c, m) = setup().await;
+        m.save(
+            "/tools",
+            "deadhook",
+            ActionInput {
+                action_type: Some(ActionType::Webhook),
+                // Nothing listens here — a fast, deterministic transport failure.
+                fn_name: Some("http://127.0.0.1:1".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let err = m.exec("/tools", "deadhook", serde_json::json!({})).await;
+        assert!(err.is_err());
+
+        let entries = m.console().read("/tools/deadhook", None, 10).await.unwrap().entries;
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert_eq!(entries[1].level, "warn");
+        assert!(entries[1].message.as_deref().unwrap().contains("failed"));
     }
 
     // ── entity_save_action: no self-granting shell ───────────────────────
@@ -990,6 +1132,63 @@ mod tests {
 
         let skipped = m.exec("/tools", "hello", serde_json::json!({"go": false})).await.unwrap();
         assert_eq!(skipped.result, serde_json::json!("skipped"));
+    }
+
+    #[tokio::test]
+    async fn exec_script_logs_each_stage_to_the_console() {
+        let (_d, m, files) = setup_script().await;
+        post_script_artifact(
+            &files,
+            "count.solx",
+            "exec /builtin/now; exec /builtin/uuid",
+        )
+        .await;
+        m.save(
+            "/tools",
+            "count",
+            ActionInput {
+                action_type: Some(ActionType::Script),
+                bin_name: Some("count.solx".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        m.exec("/tools", "count", serde_json::json!({})).await.unwrap();
+
+        let entries = m.console().read("/tools/count", None, 10).await.unwrap().entries;
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert_eq!(entries[0].source, "script");
+        assert_eq!(entries[0].message.as_deref(), Some("exec /builtin/now"));
+        assert_eq!(entries[1].message.as_deref(), Some("exec /builtin/uuid"));
+        // Both stages share the one script invocation's identity.
+        assert_eq!(entries[0].invocation_id, entries[1].invocation_id);
+    }
+
+    #[tokio::test]
+    async fn exec_script_logs_a_stage_failure() {
+        let (_d, m, files) = setup_script().await;
+        post_script_artifact(&files, "bad.solx", "exec /builtin/nope").await;
+        m.save(
+            "/tools",
+            "bad",
+            ActionInput {
+                action_type: Some(ActionType::Script),
+                bin_name: Some("bad.solx".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let err = m.exec("/tools", "bad", serde_json::json!({})).await;
+        assert!(err.is_err());
+
+        let entries = m.console().read("/tools/bad", None, 10).await.unwrap().entries;
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert_eq!(entries[1].level, "warn");
+        assert!(entries[1].message.as_deref().unwrap().contains("failed"));
     }
 
     #[tokio::test]

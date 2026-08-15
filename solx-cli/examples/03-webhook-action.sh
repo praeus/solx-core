@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Exercises: ActionType::Webhook — fn_name is the literal URL, bearer auth
-# resolved via webhook_auth::resolve_auth, custom headers merged in.
+# resolved via auth::resolve_auth, custom headers merged in.
 set -uo pipefail
 source "$(dirname "$0")/lib.sh"
 

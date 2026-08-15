@@ -5,15 +5,16 @@
 //! * **Webhook** — `fn_name` is the literal URL to POST to; auth/headers come
 //!   from `action_config`. OAuth token exchange (bearer, refresh_token,
 //!   service_account, authorization_code) is resolved via
-//!   [`crate::webhook_auth::resolve_auth`].
+//!   [`crate::auth::resolve_auth`].
 //!
 //! Actions are trusted by virtue of being `post`ed into the actions
 //! database — there is no separate config-level allowlist for either kind.
 //!
-//! `Wasm`-typed actions are executed by [`crate::wasm_host`], not here —
+//! `Wasm`-typed actions are executed by [`crate::wasm`], not here —
 //! see [`crate::LocalActionManager::exec`]'s `Wasm` arm.
 
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -21,11 +22,26 @@ use solx_config::ConfigService;
 use solx_surface::error::{Result, SolxError};
 use solx_surface::managers::ActionManager;
 use tokio::io::AsyncWriteExt;
+use uuid::Uuid;
+
+use crate::console::ConsoleStore;
+use crate::loopback::console as console_loopback;
 
 /// Wall-clock ceiling on a command, overridable per action via
 /// `action_config.timeout_secs`. Also reused by `crate::script` as the
 /// default ceiling on a whole `Script` action's execution.
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 300;
+
+/// Turn an action ref into a filesystem-safe path segment for
+/// [`ConfigService::logs_dir`] — `/packages/solx-omniparse/process-file` ->
+/// `packages_solx-omniparse_process-file`.
+fn log_dir_slug(action_ref: &str) -> String {
+    action_ref
+        .trim_start_matches('/')
+        .chars()
+        .map(|c| if c == '/' { '_' } else { c })
+        .collect()
+}
 
 /// Run a `Command` action. `fn_name` is the literal command to execute.
 /// Params are passed as JSON on stdin only (no env var) — no payload size
@@ -37,8 +53,11 @@ pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 300;
 /// running command held an async *worker* thread — only `num_cpus` of
 /// those exist, so a handful of concurrent commands could wedge the whole
 /// process, HTTP routes included.
+
 pub async fn run_command(
     cfg: &ConfigService,
+    console: Arc<ConsoleStore>,
+    action_ref: &str,
     fn_name: &str,
     action_config: &Option<Value>,
     params: &Value,
@@ -54,10 +73,31 @@ pub async fn run_command(
     let params_json = serde_json::to_string(params)?;
     let (shell, flag) = if cfg!(windows) { ("cmd", "/C") } else { ("sh", "-c") };
 
-    let mut child = tokio::process::Command::new(shell)
-        .arg(flag)
+    // `SOL_LOG_DIR` is the env var `solx-omniparse`/`solx-media` already read
+    // for their own file logging (a convention carried over from old sol) —
+    // this is what actually turns it on. It was never set here before, so
+    // that logging has been silently inert regardless of what any package
+    // does on its own. One subdirectory per action ref, so two actions in
+    // the same package (e.g. omniparse's process/write variants) don't
+    // collide on one shared file.
+    let log_dir = cfg.logs_dir().join(log_dir_slug(action_ref));
+
+    // A one-shot credential letting this specific invocation POST to its
+    // own console over loopback HTTP — see `crate::loopback::console` for
+    // why this replaced reading the child's stderr. Best-effort: if the
+    // loopback can't start, the command still runs, it just has no console
+    // access for this run. `registration` must stay bound (not `_`) for the
+    // rest of this function — dropping it deregisters the token, and we
+    // want that to happen automatically on every exit path below, not just
+    // the success path.
+    let invocation_id = Uuid::new_v4().to_string();
+    let registration = console_loopback::register(console, action_ref, &invocation_id).await;
+
+    let mut cmd = tokio::process::Command::new(shell);
+    cmd.arg(flag)
         .arg(fn_name)
         .current_dir(&cwd)
+        .env("SOL_LOG_DIR", &log_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -71,9 +111,11 @@ pub async fn run_command(
         // or `cmd /C ping ...` spawning `ping` — outlives the timeout and
         // keeps the inherited stdout pipe open. Killing the tree properly
         // would mean putting each command in its own job/process group.
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| SolxError::Exec(format!("spawn '{fn_name}': {e}")))?;
+        .kill_on_drop(true);
+    if let Some(reg) = &registration {
+        cmd.env("SOLX_CONSOLE_URL", reg.url()).env("SOLX_CONSOLE_TOKEN", reg.token());
+    }
+    let mut child = cmd.spawn().map_err(|e| SolxError::Exec(format!("spawn '{fn_name}': {e}")))?;
 
     // Feed stdin *concurrently* with draining stdout/stderr. Writing it all
     // up front deadlocks whenever the payload exceeds the pipe buffer
@@ -122,9 +164,65 @@ pub async fn run_command(
 /// When `action_config.auth.type == "oauth_authorization_code"`, this
 /// performs the RFC 6749 §4.1.3 form-encoded POST to `url` (the token
 /// endpoint) directly and returns the token JSON — no Bearer header is
-/// injected. For all other auth types, [`crate::webhook_auth::resolve_auth`]
+/// injected. For all other auth types, [`crate::auth::resolve_auth`]
 /// resolves the `Authorization` header.
+///
+/// Logs method, URL, and outcome (status/duration, or the error) to
+/// `action_ref`'s console — deliberately never the body, headers, or
+/// resolved auth, any of which could carry a secret straight into a log a
+/// nested action can read (`console/read` is unrestricted by design, see
+/// `docs/console-implementation-plan.md` §4).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_webhook(
+    actions: &dyn ActionManager,
+    console: Arc<ConsoleStore>,
+    action_ref: &str,
+    path: &str,
+    name: &str,
+    url: &str,
+    action_config: &Option<Value>,
+    params: &Value,
+) -> Result<Value> {
+    let invocation_id = Uuid::new_v4().to_string();
+    let started = std::time::Instant::now();
+    log_webhook(&console, action_ref, &invocation_id, "info", format!("POST {url}")).await;
+
+    let result = run_webhook_inner(actions, path, name, url, action_config, params).await;
+
+    let elapsed_ms = started.elapsed().as_millis();
+    match &result {
+        Ok(_) => {
+            log_webhook(
+                &console,
+                action_ref,
+                &invocation_id,
+                "info",
+                format!("POST {url} succeeded ({elapsed_ms}ms)"),
+            )
+            .await;
+        }
+        Err(e) => {
+            log_webhook(
+                &console,
+                action_ref,
+                &invocation_id,
+                "warn",
+                format!("POST {url} failed after {elapsed_ms}ms: {e}"),
+            )
+            .await;
+        }
+    }
+
+    result
+}
+
+async fn log_webhook(console: &ConsoleStore, action_ref: &str, invocation_id: &str, level: &str, message: String) {
+    let _ = console
+        .print(action_ref, invocation_id, None, level, "webhook", Some(message), None)
+        .await;
+}
+
+async fn run_webhook_inner(
     actions: &dyn ActionManager,
     path: &str,
     name: &str,
@@ -147,7 +245,7 @@ pub async fn run_webhook(
 
     if let Some(cfg) = action_config {
         // Resolve auth via the full pipeline (bearer/oauth_refresh/oauth_service_account).
-        if let Some(auth_header) = crate::webhook_auth::resolve_auth(actions, path, name, cfg)
+        if let Some(auth_header) = crate::auth::resolve_auth(actions, path, name, cfg)
             .await
             .map_err(|e| SolxError::Exec(e))?
         {
@@ -202,7 +300,7 @@ async fn dispatch_oauth_token_exchange(
         .get("code")
         .and_then(Value::as_str)
         .ok_or_else(|| SolxError::Exec("oauth_authorization_code requires 'code' in params".into()))?;
-    let client_id = crate::webhook_auth::secret_field(
+    let client_id = crate::auth::secret_field(
         action_config,
         auth,
         "client_id",
@@ -211,7 +309,7 @@ async fn dispatch_oauth_token_exchange(
     )
     .await
     .map_err(SolxError::Exec)?;
-    let client_secret = crate::webhook_auth::optional_secret_field(
+    let client_secret = crate::auth::optional_secret_field(
         action_config,
         auth,
         "client_secret",

@@ -30,7 +30,17 @@ pub struct ActionCommandRunner {
 #[async_trait]
 impl CommandRunner for ActionCommandRunner {
     async fn run(&self, tokens: Vec<String>, piped: Option<Value>) -> Result<Value> {
-        match tokens.first().map(String::as_str) {
+        // Logged before running, not after: the value here is seeing which
+        // stage a stuck or slow script is currently on, not a full trace
+        // after the fact. Deliberately just the action ref for `exec` (not
+        // its params) and nothing at all for `json` — a script's own author
+        // already sees every stage in the source; a *reader* of the console
+        // shouldn't get a copy of whatever secrets an `exec --json` literal
+        // happens to carry.
+        let summary = stage_summary(&tokens);
+        self.log("info", summary.clone()).await;
+
+        let result = match tokens.first().map(String::as_str) {
             Some("exec") => self.run_exec(&tokens, piped).await,
             Some("json") => run_json(&tokens),
             Some(other) => Err(SolxError::Invalid(format!(
@@ -38,11 +48,33 @@ impl CommandRunner for ActionCommandRunner {
                  'exec <path/name> [--json '<params>']' and 'json <value>')"
             ))),
             None => Ok(Value::Null),
+        };
+
+        if let Err(e) = &result {
+            self.log("warn", format!("{summary} failed: {e}")).await;
         }
+
+        result
     }
 }
 
 impl ActionCommandRunner {
+    async fn log(&self, level: &str, message: String) {
+        let _ = self
+            .actions
+            .console()
+            .print(
+                self.caller.action_ref(),
+                self.caller.invocation_id(),
+                None,
+                level,
+                "script",
+                Some(message),
+                None,
+            )
+            .await;
+    }
+
     async fn run_exec(&self, tokens: &[String], piped: Option<Value>) -> Result<Value> {
         let (reference, json) = parse_exec_stage(tokens)?;
         let params = match json {
@@ -57,6 +89,20 @@ impl ActionCommandRunner {
             .await?;
         serde_json::to_value(&result)
             .map_err(|e| SolxError::Invalid(format!("serialize exec result: {e}")))
+    }
+}
+
+/// A short, params-free description of a stage, for the console log line —
+/// see the doc comment on `CommandRunner::run` for why params are excluded.
+fn stage_summary(tokens: &[String]) -> String {
+    match tokens.first().map(String::as_str) {
+        Some("exec") => match parse_exec_stage(tokens) {
+            Ok((reference, _)) => format!("exec {reference}"),
+            Err(_) => "exec (invalid)".to_string(),
+        },
+        Some("json") => "json".to_string(),
+        Some(other) => other.to_string(),
+        None => "(empty stage)".to_string(),
     }
 }
 
@@ -159,6 +205,27 @@ mod tests {
     fn run_json_parses_literal() {
         let tokens = vec!["json".to_string(), "5".to_string()];
         assert_eq!(run_json(&tokens).unwrap(), Value::from(5));
+    }
+
+    #[test]
+    fn stage_summary_names_the_action_ref_but_not_params() {
+        let tokens = vec![
+            "exec".to_string(),
+            "/pkg/name".to_string(),
+            "--json".to_string(),
+            r#"{"secret":"shh"}"#.to_string(),
+        ];
+        let s = stage_summary(&tokens);
+        assert_eq!(s, "exec /pkg/name");
+        assert!(!s.contains("shh"), "params must not leak into the summary");
+    }
+
+    #[test]
+    fn stage_summary_covers_json_and_invalid_and_empty() {
+        assert_eq!(stage_summary(&["json".to_string(), "5".to_string()]), "json");
+        assert_eq!(stage_summary(&["exec".to_string()]), "exec (invalid)");
+        assert_eq!(stage_summary(&["bogus".to_string()]), "bogus");
+        assert_eq!(stage_summary(&[]), "(empty stage)");
     }
 
     #[test]

@@ -21,7 +21,11 @@ use serde_json::{json, Value};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::oauth_loopback::{self, LoopbackResult, LoopbackState};
+// Aliased: this file is itself `crate::internal::oauth`, so importing the
+// loopback module under its own bare name (`oauth`) would read ambiguously
+// against this file's own identity at every call site below.
+use crate::loopback::oauth as oauth_loopback;
+use crate::loopback::oauth::{LoopbackResult, LoopbackState};
 
 use super::require_str;
 

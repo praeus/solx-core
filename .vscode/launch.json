@@ -1,0 +1,84 @@
+{
+  // VS Code launch configurations for solx-core.
+  //
+  // Two debug styles:
+  //   1. "Debug: solx-server (CodeLLDB, launch)" — CodeLLDB spawns
+  //      solx-server.exe itself, attaches from birth, and stops at
+  //      main(). One-click; no race. Server only runs while the
+  //      debugger is attached.
+  //   2. "Debug: solx-server (CodeLLDB, attach)" — attach to a
+  //      solx-server.exe you started yourself (via Run Task →
+  //      `solx: start solx-server`, or in another terminal).
+  //
+  // The compound uses (1) so a single Run/Debug click brings the
+  // server up under the debugger with no coordination timing issue.
+  //
+  // Requires: CodeLLDB extension (vadimcn.vscode-lldb) — pairs with
+  // rust-analyzer on Windows.
+
+  "version": "0.2.0",
+  "configurations": [
+    /* ──────────────────────────────────────────────────────────────────
+     * Launch — CodeLLDB spawns solx-server.exe, attaches immediately,
+     * stops at main(). One click; no PID race.
+     * ────────────────────────────────────────────────────────────────── */
+
+    {
+      "name": "Debug: solx-server (CodeLLDB, launch)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/solx-server.exe",
+      "args": ["--port", "8766"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "RUST_LOG": "info,solx_server=debug"
+      },
+      "stopOnEntry": false,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "close": false
+      }
+    },
+
+    /* ──────────────────────────────────────────────────────────────────
+     * Attach — use when solx-server is already running (e.g. you
+     * started it via Run Task → `solx: start solx-server`, or in
+     * another terminal).
+     * ────────────────────────────────────────────────────────────────── */
+
+    {
+      "name": "Debug: solx-server (CodeLLDB, attach)",
+      "type": "lldb",
+      "request": "attach",
+      "program": "${workspaceFolder}/target/debug/solx-server.exe",
+      "pid": "${command:pickProcess}",
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "close": false
+      }
+    }
+  ],
+
+  /* ──────────────────────────────────────────────────────────────────
+   * Compound config — single Run/Debug click that brings up the
+   * server under the debugger. The child launch config handles
+   * spawning, so no preLaunchTask is needed and there's no PID race.
+   * ────────────────────────────────────────────────────────────────── */
+
+  "compounds": [
+    {
+      "name": "Debug: solx-server",
+      "configurations": [
+        "Debug: solx-server (CodeLLDB, launch)"
+      ],
+      "stopAll": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "solx-dev"
+      }
+    }
+  ]
+}

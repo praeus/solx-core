@@ -6,6 +6,15 @@ This document describes the new `solx` system: why it exists, the architecture
 and key design decisions, and the current implementation status. It is the
 canonical overview for the `solx-core` workspace.
 
+Companion documents:
+
+- [background-action-features.md](background-action-features.md) — audit of
+  what logging actually reaches an operator today (short answer: almost
+  nothing), and a design for action consoles, with notifications and action
+  events sketched as future work. **Design discussion, not implemented.**
+- [oauth-integration.md](oauth-integration.md)
+- [future-security-enhancements.md](future-security-enhancements.md)
+
 ---
 
 ## 1. Background & motivation
@@ -188,7 +197,7 @@ against the parameter type (if declared), then dispatched:
   2.0 authorization-code loopback (see [`built-in-actions.md`](built-in-actions.md)
   for the full reference).
 - **Wasm** — a *custom*, third-party component executed under wasmtime
-  (`solx-actions/src/wasm_host.rs`), sandboxed to `action-exec` (recurse
+  (`solx-actions/src/wasm/host.rs & actions.rs`), sandboxed to `action-exec` (recurse
   into any other action, including every built-in above) and `artifact-read`
   (unrestricted file reads). There is no first-party/"trusted" WASM world
   anymore — every built-in operation moved to `Internal` dispatch instead
@@ -407,7 +416,7 @@ reading)
   initially-mysterious content-independent `unreachable` wasm trap that
   looked like a wasmtime version mismatch (see next point) but wasn't.
 - **`wasmtime`/`wasmtime-wasi` were bumped from 28 to 47** in `solx-actions`
-  (`wasm_host.rs`) to test the above trap's original hypothesis. The version
+  (`wasm/host.rs`) to test the above trap's original hypothesis. The version
   bump was not actually the fix (pinning the exact version `componentize-qjs`
   itself uses, 45.0.3, reproduced the identical trap), but it's still a good
   idea to have taken — solx-core was 17 major versions behind, and 47 is now

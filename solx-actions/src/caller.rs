@@ -27,11 +27,19 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use serde_json::Value;
+use uuid::Uuid;
 
 /// The action that invoked the action currently executing.
 #[derive(Debug, Clone)]
 pub struct Caller {
     action_ref: String,
+    /// Minted fresh every time this frame is built — i.e. once per
+    /// `exec_as` dispatch to a `Wasm`/`Script` action, since those are the
+    /// only two call sites that construct a `Caller`. Stamped onto every
+    /// console entry this invocation writes, so two concurrent runs of the
+    /// same action (same console — see `crate::console`) stay separable
+    /// even though they share a console.
+    invocation_id: String,
     /// `action_config.secrets` of the calling action: secret name -> base64
     /// AES key. Typed as a string map rather than a `Value` so it is a
     /// type-level fact that nothing else can ride along.
@@ -53,6 +61,7 @@ impl Caller {
             .unwrap_or_default();
         Caller {
             action_ref: action_ref.into(),
+            invocation_id: Uuid::new_v4().to_string(),
             secrets,
         }
     }
@@ -60,6 +69,12 @@ impl Caller {
     /// Full reference of the calling action, e.g. `/pkg/summarize`.
     pub fn action_ref(&self) -> &str {
         &self.action_ref
+    }
+
+    /// Identifies this one run of `action_ref`, distinct from any other
+    /// concurrent or subsequent run.
+    pub fn invocation_id(&self) -> &str {
+        &self.invocation_id
     }
 
     /// The AES key this action has configured for `name`, if any.

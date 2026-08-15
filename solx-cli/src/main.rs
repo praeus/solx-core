@@ -20,7 +20,7 @@ use solx_scripts::{execute_script, CommandRunner};
 use solx_surface::entities::{ActionInput, DocumentInput, TypeInput};
 use solx_surface::error::SolxError;
 use solx_surface::managers::Solx;
-use solx_surface::path::split_ref;
+use solx_surface::path::{full_ref, split_ref};
 use solx_surface::query::{ListOptions, SearchQuery};
 
 #[derive(Parser)]
@@ -65,6 +65,12 @@ enum Commands {
         reference: String,
         #[arg(long, short = 'j')]
         json: Option<String>,
+        /// Don't render the action's console live to stderr while it runs.
+        /// stdout's JSON result is unaffected either way — rendering never
+        /// touches stdout, so `solx exec ... | jq` works identically with
+        /// or without this flag.
+        #[arg(long)]
+        no_console: bool,
     },
     /// List entities with pagination and an optional path facet.
     List {
@@ -117,6 +123,17 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Writer is stderr, not the default stdout — stdout is the single JSON
+    // result `solx exec ... | jq` depends on, same reasoning as solx-mcp
+    // (whose stdout is its JSON-RPC channel). Without this, every
+    // `tracing::*` call in solx-core was silently dropped under the CLI —
+    // the primary development surface had no logging at all.
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .init();
+
     let cli = Cli::parse();
     let app = App::build().await?;
     let result = run_command(&app, cli.command, None).await?;
@@ -142,7 +159,9 @@ async fn run_command(app: &Arc<App>, command: Commands, piped: Option<Value>) ->
         } => handle_save(app, entity, reference, json, type_ref, file, piped).await,
         Commands::Get { entity, reference } => handle_get(app, entity, reference).await,
         Commands::Delete { entity, reference } => handle_delete(app, entity, reference).await,
-        Commands::Exec { reference, json } => handle_exec(app, reference, json, piped).await,
+        Commands::Exec { reference, json, no_console } => {
+            handle_exec(app, reference, json, piped, no_console).await
+        }
         Commands::List {
             entity,
             path,
@@ -284,15 +303,132 @@ async fn handle_exec(
     reference: String,
     json: Option<String>,
     piped: Option<Value>,
+    no_console: bool,
 ) -> Result<Value> {
     let params = match json {
         Some(j) => serde_json::from_str(&j).context("parse --json params")?,
         None => piped.unwrap_or(Value::Object(Map::new())),
     };
     let (path, name) = split_ref(&reference).map_err(to_anyhow)?;
-    Ok(serde_json::to_value(
-        app.actions().exec(&path, &name, params).await.map_err(to_anyhow)?,
-    )?)
+
+    if no_console {
+        return Ok(serde_json::to_value(
+            app.actions().exec(&path, &name, params).await.map_err(to_anyhow)?,
+        )?);
+    }
+
+    let action_ref = full_ref(&path, &name).map_err(to_anyhow)?;
+    let tail_handle = spawn_console_tail(app.clone(), action_ref).await;
+
+    let result = app.actions().exec(&path, &name, params).await;
+    tail_handle.stop_and_drain().await;
+
+    Ok(serde_json::to_value(result.map_err(to_anyhow)?)?)
+}
+
+/// Renders an action's console to stderr while it runs, so `solx exec`
+/// shows progress live without disturbing stdout's single JSON result
+/// (which is what makes `--no-console` unnecessary for scripted callers —
+/// `solx exec ... | jq` behaves identically either way).
+struct ConsoleTailHandle {
+    stop: Arc<tokio::sync::Notify>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl ConsoleTailHandle {
+    async fn stop_and_drain(self) {
+        self.stop.notify_one();
+        let _ = self.task.await;
+    }
+}
+
+/// Long-poll interval passed to `console/tail` between renders. Short
+/// enough that a human sees output promptly; the loop yields entirely
+/// (no busy-wait) between polls via the long-poll itself.
+const TAIL_WAIT_SECS: i64 = 2;
+
+async fn spawn_console_tail(app: Arc<App>, action_ref: String) -> ConsoleTailHandle {
+    // Start from the console's current tip, not seq 0 — otherwise every
+    // invocation of a frequently-run action would replay its entire prior
+    // history to the terminal. A console that has never been written to
+    // has no row yet, which `find` treats the same as "starts at 0".
+    let start_cursor = current_tip(&app, &action_ref).await.unwrap_or(0);
+
+    let stop = Arc::new(tokio::sync::Notify::new());
+    let task_stop = stop.clone();
+    let task = tokio::spawn(async move {
+        let actions = app.actions();
+        let mut cursor = start_cursor;
+        loop {
+            let tail = actions.exec(
+                "/builtin/console",
+                "tail",
+                serde_json::json!({ "action_ref": action_ref, "cursor": cursor, "wait_secs": TAIL_WAIT_SECS }),
+            );
+            tokio::select! {
+                res = tail => {
+                    cursor = render_console_result(res, cursor);
+                }
+                _ = task_stop.notified() => {
+                    // One last non-blocking read so nothing printed by the
+                    // action right before it returned is lost to a race
+                    // against this task's own poll cadence.
+                    let res = actions.exec(
+                        "/builtin/console",
+                        "read",
+                        serde_json::json!({ "action_ref": action_ref, "from_seq": cursor }),
+                    ).await;
+                    render_console_result(res, cursor);
+                    return;
+                }
+            }
+        }
+    });
+
+    ConsoleTailHandle { stop, task }
+}
+
+/// Print any entries in a `console/tail` or `console/read` result to
+/// stderr, and return the cursor to continue from. Failures are swallowed —
+/// rendering is best-effort and must never fail the exec it's watching.
+fn render_console_result(
+    res: std::result::Result<solx_surface::entities::ActionExecResult, SolxError>,
+    fallback_cursor: i64,
+) -> i64 {
+    let Ok(res) = res else { return fallback_cursor };
+    if let Some(entries) = res.result.get("entries").and_then(Value::as_array) {
+        for entry in entries {
+            let level = entry.get("level").and_then(Value::as_str).unwrap_or("info");
+            let message = entry.get("message").and_then(Value::as_str).unwrap_or("");
+            eprintln!("[{}] {message}", level.to_ascii_uppercase());
+        }
+    }
+    res.result
+        .get("next_cursor")
+        .and_then(Value::as_i64)
+        .unwrap_or(fallback_cursor)
+}
+
+/// The seq that will be assigned to this console's next write, or `None` if
+/// it has never been written to. One `console/list` lookup by exact
+/// `action_ref` — O(1) against the `consoles` table, not a history scan.
+async fn current_tip(app: &Arc<App>, action_ref: &str) -> Option<i64> {
+    let actions = app.actions();
+    let res = actions
+        .exec(
+            "/builtin/console",
+            "list",
+            serde_json::json!({ "prefix": action_ref, "limit": 50 }),
+        )
+        .await
+        .ok()?;
+    res.result
+        .get("consoles")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|c| c.get("action_ref").and_then(Value::as_str) == Some(action_ref))
+        .and_then(|c| c.get("next_seq"))
+        .and_then(Value::as_i64)
 }
 
 async fn handle_list(

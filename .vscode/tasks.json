@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "solx-server: start",
+      "label": "solx: start solx-server",
       "type": "process",
       "command": "${workspaceFolder}/target/debug/solx-server.exe",
       "args": ["--port", "8766"],

@@ -111,6 +111,12 @@ impl App {
         solx_actions::internal::init_env_mappings(
             config.snapshot().env_mappings.unwrap_or_default(),
         );
+        // Then load variables persisted by `set_env { persist: true }`, so a
+        // resume cursor (or any other durable variable) survives a restart.
+        // Ordering matters: these win over an `env_mappings` key of the same
+        // name, since they were written deliberately rather than mirrored
+        // from the ambient system environment.
+        solx_actions::internal::init_persisted_env(config.env_vars());
 
         let types: Arc<dyn TypeManager> = Arc::new(
             LocalTypeManager::open(&config.types_db_path())

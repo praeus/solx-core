@@ -71,6 +71,14 @@ pub fn builtin_types() -> Vec<SeedType> {
         groups: vec!["document-type"],
     });
 
+    out.push(SeedType {
+        path: BUILTIN_TYPES_PATH,
+        name: "MediaDocument",
+        description: "Result of a solx-media extraction. Persisted to solx-server via entity_save_document by the solx-media actions.",
+        schema: media_document_schema(),
+        groups: vec!["media", "document-type"],
+    });
+
     out.extend(builtin_action_param_types());
 
     out
@@ -186,7 +194,7 @@ fn builtin_action_param_types() -> Vec<SeedType> {
                     "category": { "type": "string" },
                     "param_type_ref": { "type": "string" },
                     "result_type_ref": { "type": "string" },
-                    "action_type": { "type": "string", "enum": ["wasm", "webhook", "command", "internal", "script"], "description": "Required on create." },
+                    "action_type": { "type": "string", "enum": ["wasm", "webhook", "command", "internal", "script", "widget"], "description": "Required on create." },
                     "fn_name": { "type": "string", "description": "Command string / URL / internal op name / WASM export, depending on action_type." },
                     "bin_name": { "type": "string", "description": "Artifact file name (wasm: component; script: .solx source)." },
                     "action_config": {},
@@ -331,24 +339,38 @@ fn builtin_action_param_types() -> Vec<SeedType> {
         SeedType {
             path: BUILTIN_TYPES_PATH,
             name: "GetEnvParams",
-            description: "Read a variable from the in-process environment store.",
+            description: "Read a variable from the environment store.",
             schema: json!({
                 "type": "object",
                 "required": ["key"],
-                "properties": { "key": { "type": "string" } }
+                "properties": {
+                    "key": { "type": "string" },
+                    "namespace": {
+                        "type": "string",
+                        "description": "Namespace to read from. Defaults to 'default', which is also where env_mappings entries land."
+                    }
+                }
             }),
             groups: vec!["builtin-params"],
         },
         SeedType {
             path: BUILTIN_TYPES_PATH,
             name: "SetEnvParams",
-            description: "Write a variable to the in-process environment store.",
+            description: "Write a variable to the environment store, optionally persisting it across restarts.",
             schema: json!({
                 "type": "object",
                 "required": ["key", "value"],
                 "properties": {
                     "key": { "type": "string" },
                     "value": { "type": "string" },
+                    "namespace": {
+                        "type": "string",
+                        "description": "Namespace to write to. Defaults to 'default'."
+                    },
+                    "persist": {
+                        "type": "boolean",
+                        "description": "Also write the variable to solx-config.json under env_vars, so it survives a restart. Persistence is sticky: once a variable is persisted, later writes keep updating the config even without this flag. Stored in plaintext — use set_secret for anything sensitive. Remove a persisted variable by deleting it from solx-config.json."
+                    }
                 }
             }),
             groups: vec!["builtin-params"],
@@ -482,6 +504,80 @@ fn builtin_action_param_types() -> Vec<SeedType> {
             }),
             groups: vec!["builtin-params"],
         },
+        // Action consoles — see `solx-actions::console` and
+        // `docs/console-implementation-plan.md`.
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "ConsolePrintParams",
+            description: "Write one entry to the calling action's own console. Requires an action caller.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "level": { "type": "string", "description": "Defaults to 'info'. Free-form — debug/info/warn/error/chunk are the conventional values." },
+                    "message": { "type": "string" },
+                    "data": { "description": "Optional structured payload, any JSON value." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "ConsoleReadParams",
+            description: "Read entries from an action's console, oldest first, starting at from_seq.",
+            schema: json!({
+                "type": "object",
+                "required": ["action_ref"],
+                "properties": {
+                    "action_ref": { "type": "string", "description": "Full reference of the console to read, e.g. /packages/solx-ollama/ollama-chat." },
+                    "from_seq": { "type": "integer", "description": "Inclusive lower bound. Defaults to the oldest retained entry." },
+                    "limit": { "type": "integer", "description": "Defaults to 200, capped at 1000." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "ConsoleTailParams",
+            description: "Like console/read, but if nothing new is available yet, long-polls up to wait_secs before returning an empty result.",
+            schema: json!({
+                "type": "object",
+                "required": ["action_ref"],
+                "properties": {
+                    "action_ref": { "type": "string" },
+                    "cursor": { "type": "integer", "description": "Pass the previous call's next_cursor to continue from there." },
+                    "limit": { "type": "integer", "description": "Defaults to 200, capped at 1000." },
+                    "wait_secs": { "type": "integer", "description": "Long-poll ceiling, capped at 60. Omit to return immediately (empty if nothing new)." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "ConsoleClearParams",
+            description: "Drop entries from the front of an action's console, freeing retention.",
+            schema: json!({
+                "type": "object",
+                "required": ["action_ref"],
+                "properties": {
+                    "action_ref": { "type": "string" },
+                    "before_seq": { "type": "integer", "description": "Drop everything with seq < this. Omit to drop everything currently retained." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "ConsoleListParams",
+            description: "List known consoles, most recently written first.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "prefix": { "type": "string", "description": "Only consoles whose action_ref starts with this." },
+                    "limit": { "type": "integer", "description": "Defaults to 100, capped at 1000." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
     ]
 }
 
@@ -514,6 +610,95 @@ fn blog_post_with_comments_schema() -> Value {
                         "type": "array",
                         "items": { "$ref": "#/$defs/BlogComment" }
                     }
+                }
+            }
+        }
+    })
+}
+
+/// Schema for the `MediaDocument` shape returned by the solx-media package
+/// (`solx-media` action results, registered as `/builtin/types/MediaDocument`).
+///
+/// One flat shape covers all four extraction modes (`image-text`,
+/// `audio-transcript`, `video-transcript`, `materialized-html`). The `kind`
+/// discriminator picks which fields are populated. Future fields can be added
+/// without a schema migration — unknown fields are ignored on read.
+fn media_document_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["kind", "document_name", "contents"],
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": [
+                    "image-text",
+                    "audio-transcript",
+                    "video-transcript",
+                    "materialized-html"
+                ],
+                "description": "Discriminator for which extraction mode produced this document."
+            },
+            "document_name": {
+                "type": "string",
+                "description": "Suggested document name (used as the basename under the persisted path)."
+            },
+            "title": { "type": ["string", "null"] },
+            "summary": { "type": ["string", "null"] },
+            "author": { "type": ["string", "null"] },
+            "contents": {
+                "type": "object",
+                "description": "Free-form JSON contents of the document. Specific shape depends on `kind`."
+            },
+            "artifacts": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/EmbeddedArtifact" },
+                "description": "Embedded artifacts (e.g. images materialized from HTML)."
+            },
+            "transcript": {
+                "type": "string",
+                "description": "For audio/video: full transcript text concatenated."
+            },
+            "segments": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/TimecodedSegment" },
+                "description": "For audio/video: timecoded transcript segments from whisper."
+            },
+            "scene_captions": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/TimecodedSegment" },
+                "description": "For video: per-frame vision captions (text only, no speaker)."
+            },
+            "description": {
+                "type": "string",
+                "description": "Synthesized description (audio/video) or extracted description (image)."
+            },
+            "notes": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Free-form notes (e.g. transcription availability warnings)."
+            }
+        },
+        "$defs": {
+            "EmbeddedArtifact": {
+                "type": "object",
+                "required": ["name", "content_type", "data"],
+                "properties": {
+                    "name": { "type": "string" },
+                    "content_type": { "type": "string" },
+                    "data": {
+                        "type": "string",
+                        "description": "Base64-encoded artifact bytes."
+                    }
+                }
+            },
+            "TimecodedSegment": {
+                "type": "object",
+                "required": ["start_ms", "end_ms", "text"],
+                "properties": {
+                    "start_ms": { "type": "integer", "minimum": 0 },
+                    "end_ms": { "type": "integer", "minimum": 0 },
+                    "speaker": { "type": ["string", "null"] },
+                    "text": { "type": "string" }
                 }
             }
         }

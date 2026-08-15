@@ -183,7 +183,7 @@ pub async fn load_keyring_with_test_override(r: &KeyringRef) -> Result<String, S
 // fields. Every value is additionally encrypted with a caller-supplied
 // 32-byte key before being written to the OS credential manager, and
 // that key lives in the calling action's own `action_config.secrets`
-// map (see `wasm_host::get_secret`/`set_secret`) — so reading a secret
+// map (see `internal::secrets::get_secret`/`set_secret`) — so reading a secret
 // back out requires both a keyring hit *and* possession of the
 // matching key. The host never hands a key to a guest itself; it only
 // ever looks one up from the config of the action that is currently
