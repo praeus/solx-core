@@ -41,12 +41,16 @@ use solx_surface::entities::{ActionType, Document, DocumentInput};
 use solx_surface::managers::{ActionManager, DocManager, FileStore, TypeManager};
 
 use crate::caller::Caller;
+use crate::invocations::InvocationStore;
+use crate::LocalActionManager;
 
 pub mod console;
 pub mod doc_fields;
 pub mod entity;
 pub mod file;
 pub mod http;
+pub mod http_stream;
+pub mod invocation;
 pub mod oauth;
 pub mod open_url;
 pub mod secrets;
@@ -76,6 +80,15 @@ pub struct InternalCtx {
     pub config: Arc<solx_config::ConfigService>,
     /// Shared handle to the action-console store — see `crate::console`.
     pub console: Arc<crate::console::ConsoleStore>,
+    /// Shared handle to the invocation-state store — see
+    /// `crate::invocations`. Backs `action_start`/`action_stop`/
+    /// `action_poll`/`action_cancelled`.
+    pub invocations: Arc<InvocationStore>,
+    /// Concrete manager handle, distinct from `actions` (`Arc<dyn
+    /// ActionManager>`) above — `action_start`/`action_stop` need
+    /// `LocalActionManager`'s own inherent methods (`start_invocation` et
+    /// al.), which aren't on the `ActionManager` trait.
+    pub local: Arc<LocalActionManager>,
     /// The *executing* action's own `action_config` — i.e. the row whose
     /// `fn_name` dispatched to this handler, which for a built-in is the
     /// `/builtin/...` row itself.
@@ -143,6 +156,11 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
         // ── HTTP ─────────────────────────────────────────────────────────
         "http_request" => http::http_request(params).await,
 
+        // ── HTTP streaming ──────────────────────────────────────────────
+        "http_stream_start" => http_stream::start(params, &ctx.config).await,
+        "http_stream_poll" => http_stream::poll(params).await,
+        "http_stream_close" => http_stream::close(params).await,
+
         // ── small stateless utilities ────────────────────────────────────
         "now" => Ok(utils::now_value()),
         "uuid" => Ok(utils::uuid_value()),
@@ -162,6 +180,12 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
         "console_tail" => console::tail(params, &ctx.console).await,
         "console_clear" => console::clear(params, &ctx.console).await,
         "console_list" => console::list(params, &ctx.console).await,
+
+        // ── asynchronous actions (start/stop/poll) ────────────────────────
+        "action_start" => invocation::start(params, ctx).await,
+        "action_stop" => invocation::stop(params, ctx).await,
+        "action_poll" => invocation::poll(params, ctx).await,
+        "action_cancelled" => invocation::cancelled(ctx.caller.as_ref(), &ctx.invocations).await,
 
         other => Err(format!("unknown internal fn_name '{other}'")),
     }
@@ -263,6 +287,7 @@ mod tests {
 
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
     use base64::Engine as _;
     use serde_json::json;
     use tokio::sync::oneshot;
@@ -341,10 +366,23 @@ mod tests {
         );
         actions_concrete.set_self_ref(Arc::downgrade(&actions_concrete));
         let console = actions_concrete.console().clone();
+        let invocations = actions_concrete.invocations().clone();
+        let local = actions_concrete.clone();
         let actions: Arc<dyn ActionManager> = actions_concrete;
         (
             dir,
-            InternalCtx { docs, types, actions, files, config: cfg, console, action_config, caller: None },
+            InternalCtx {
+                docs,
+                types,
+                actions,
+                files,
+                config: cfg,
+                console,
+                invocations,
+                local,
+                action_config,
+                caller: None,
+            },
         )
     }
 
@@ -1247,6 +1285,303 @@ mod tests {
         assert!(err.contains("timeout_secs must be > 0"), "{err}");
     }
 
+    // ── http_stream_start / poll / close ──────────────────────────────────
+
+    /// Spin up an HTTP server that answers `/stream` with a chunked-encoding
+    /// response emitting `lines` (each already newline-terminated or not —
+    /// a trailing `\n` is added if missing) with a short delay between each,
+    /// then closes the connection. `/hang` sends one line then holds the
+    /// connection open indefinitely (for idle-TTL testing) until the test
+    /// aborts the server task.
+    async fn start_stream_server(lines: Vec<String>) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+        let handle = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => break,
+                };
+                let lines = lines.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = match stream.read(&mut buf).await {
+                        Ok(n) if n > 0 => n,
+                        _ => return,
+                    };
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = req
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or("/");
+
+                    let header = "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n";
+                    if stream.write_all(header.as_bytes()).await.is_err() {
+                        return;
+                    }
+
+                    for line in &lines {
+                        let mut data = line.clone();
+                        if !data.ends_with('\n') {
+                            data.push('\n');
+                        }
+                        let framed = format!("{:x}\r\n{data}\r\n", data.len());
+                        if stream.write_all(framed.as_bytes()).await.is_err() {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                    }
+
+                    if path.starts_with("/hang") {
+                        // Never send the terminating chunk — hold the
+                        // connection open until the server task is aborted.
+                        tokio::time::sleep(Duration::from_secs(3600)).await;
+                        return;
+                    }
+
+                    let _ = stream.write_all(b"0\r\n\r\n").await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (base, handle)
+    }
+
+    #[tokio::test]
+    async fn http_stream_start_returns_immediately_with_status() {
+        let (_d, ctx) = test_ctx(None).await;
+        let (base, server) = start_stream_server(vec![
+            r#"{"n":1}"#.to_string(),
+            r#"{"n":2}"#.to_string(),
+        ])
+        .await;
+
+        let v = run_internal(
+            "http_stream_start",
+            &json!({"url": format!("{base}/stream")}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(v.get("status").and_then(Value::as_u64), Some(200));
+        assert!(v.get("stream_id").and_then(Value::as_str).is_some());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn http_stream_poll_drains_chunks_in_order_and_reports_done() {
+        let (_d, ctx) = test_ctx(None).await;
+        let (base, server) = start_stream_server(vec![
+            r#"{"n":1}"#.to_string(),
+            r#"{"n":2}"#.to_string(),
+            r#"{"n":3}"#.to_string(),
+        ])
+        .await;
+
+        let started = run_internal(
+            "http_stream_start",
+            &json!({"url": format!("{base}/stream")}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let stream_id = started.get("stream_id").and_then(Value::as_str).unwrap();
+
+        // Long-poll until the stream reports done — the writer trickles
+        // chunks in with a delay, so a single immediate poll may race ahead
+        // of them.
+        let mut chunks = Vec::new();
+        let mut cursor = 0i64;
+        for _ in 0..50 {
+            let v = run_internal(
+                "http_stream_poll",
+                &json!({"stream_id": stream_id, "cursor": cursor, "wait_secs": 2}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+            chunks.extend(v.get("chunks").and_then(Value::as_array).cloned().unwrap_or_default());
+            cursor = v.get("next_cursor").and_then(Value::as_i64).unwrap();
+            if v.get("done").and_then(Value::as_bool) == Some(true) {
+                break;
+            }
+        }
+
+        assert_eq!(chunks.len(), 3, "{chunks:?}");
+        assert_eq!(chunks[0].get("n").and_then(Value::as_i64), Some(1));
+        assert_eq!(chunks[1].get("n").and_then(Value::as_i64), Some(2));
+        assert_eq!(chunks[2].get("n").and_then(Value::as_i64), Some(3));
+
+        run_internal("http_stream_close", &json!({"stream_id": stream_id}), &ctx)
+            .await
+            .unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn http_stream_poll_missing_cursor_reads_from_the_start() {
+        let (_d, ctx) = test_ctx(None).await;
+        let (base, server) = start_stream_server(vec![r#"{"n":1}"#.to_string()]).await;
+
+        let started = run_internal(
+            "http_stream_start",
+            &json!({"url": format!("{base}/stream")}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let stream_id = started.get("stream_id").and_then(Value::as_str).unwrap();
+
+        let v = run_internal(
+            "http_stream_poll",
+            &json!({"stream_id": stream_id, "wait_secs": 2}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let chunks = v.get("chunks").and_then(Value::as_array).cloned().unwrap_or_default();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].get("n").and_then(Value::as_i64), Some(1));
+
+        run_internal("http_stream_close", &json!({"stream_id": stream_id}), &ctx)
+            .await
+            .unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn http_stream_poll_unknown_stream_id_errors() {
+        let (_d, ctx) = test_ctx(None).await;
+        let err = run_internal("http_stream_poll", &json!({"stream_id": "nope"}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(err.contains("no stream registered"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn http_stream_close_aborts_and_further_polls_fail() {
+        let (_d, ctx) = test_ctx(None).await;
+        let (base, server) = start_stream_server(vec![r#"{"n":1}"#.to_string()]).await;
+
+        let started = run_internal(
+            "http_stream_start",
+            &json!({"url": format!("{base}/stream")}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let stream_id = started.get("stream_id").and_then(Value::as_str).unwrap().to_string();
+
+        let closed = run_internal("http_stream_close", &json!({"stream_id": stream_id}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(closed.get("closed").and_then(Value::as_bool), Some(true));
+
+        let err = run_internal("http_stream_poll", &json!({"stream_id": stream_id}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(err.contains("no stream registered"), "{err}");
+
+        // Closing again is a no-op, not an error.
+        let closed_again = run_internal("http_stream_close", &json!({"stream_id": stream_id}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(closed_again.get("closed").and_then(Value::as_bool), Some(false));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn http_stream_reports_dropped_chunks_once_over_the_buffer_cap() {
+        let (dir, ctx) = test_ctx(None).await;
+        let cfg = solx_config::ConfigService::open_in(dir.path()).unwrap();
+        cfg.patch(json!({ "http_stream_max_buffer_bytes": 1 })).unwrap();
+        // `test_ctx`'s InternalCtx holds its own Arc<ConfigService> over the
+        // same directory; reopening and patching here mutates the same
+        // on-disk config, which the handler reads fresh via `snapshot()`.
+
+        let (base, server) = start_stream_server(vec![
+            r#"{"n":1}"#.to_string(),
+            r#"{"n":2}"#.to_string(),
+            r#"{"n":3}"#.to_string(),
+        ])
+        .await;
+
+        let started = run_internal(
+            "http_stream_start",
+            &json!({"url": format!("{base}/stream")}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let stream_id = started.get("stream_id").and_then(Value::as_str).unwrap();
+
+        let mut last = json!({});
+        for _ in 0..50 {
+            last = run_internal(
+                "http_stream_poll",
+                &json!({"stream_id": stream_id, "cursor": 0, "wait_secs": 2}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+            if last.get("done").and_then(Value::as_bool) == Some(true) {
+                break;
+            }
+        }
+        assert!(
+            last.get("dropped").and_then(Value::as_i64).unwrap_or(0) > 0,
+            "{last:?}"
+        );
+
+        run_internal("http_stream_close", &json!({"stream_id": stream_id}), &ctx)
+            .await
+            .unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn http_stream_self_terminates_after_idle_ttl() {
+        let (dir, ctx) = test_ctx(None).await;
+        let cfg = solx_config::ConfigService::open_in(dir.path()).unwrap();
+        cfg.patch(json!({ "http_stream_idle_ttl_secs": 1 })).unwrap();
+
+        let (base, server) = start_stream_server(vec![r#"{"n":1}"#.to_string()]).await;
+
+        let started = run_internal(
+            "http_stream_start",
+            &json!({"url": format!("{base}/hang")}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let stream_id = started.get("stream_id").and_then(Value::as_str).unwrap().to_string();
+
+        // Poll once so the reader task starts, then don't poll again until
+        // past the (patched, 1s) idle TTL.
+        run_internal(
+            "http_stream_poll",
+            &json!({"stream_id": stream_id, "cursor": 0}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        let v = run_internal("http_stream_poll", &json!({"stream_id": stream_id}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(v.get("done").and_then(Value::as_bool), Some(true));
+        let error = v.get("error").and_then(Value::as_str).unwrap_or_default();
+        assert!(error.contains("idle"), "{v:?}");
+
+        server.abort();
+    }
+
     // ── action consoles ──────────────────────────────────────────────────
 
     /// Mirrors `secrets_are_refused_without_an_action_caller`: the CLI, MCP,
@@ -1415,5 +1750,32 @@ mod tests {
             .unwrap();
         let consoles = v.get("consoles").and_then(Value::as_array).unwrap();
         assert_eq!(consoles.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn action_cancelled_is_refused_without_an_action_caller() {
+        let (_d, ctx) = test_ctx(None).await;
+        assert!(ctx.caller.is_none());
+        let err = run_internal("action_cancelled", &json!({}), &ctx).await.unwrap_err();
+        assert!(err.contains("no action caller"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn action_cancelled_reflects_the_callers_own_invocation() {
+        let (_d, mut ctx) = test_ctx(None).await;
+        // A fixed id (not `Caller::from_action`'s random mint) so the test
+        // can seed and cancel exactly this invocation's row.
+        ctx.caller = Some(Caller::with_invocation("/pkg/foo", None, "inv-fixed"));
+
+        // No row exists yet for "inv-fixed" — must fail closed to `false`,
+        // not error, mirroring the loopback's `/cancelled` route.
+        let before = run_internal("action_cancelled", &json!({}), &ctx).await.unwrap();
+        assert_eq!(before.get("cancelled"), Some(&Value::Bool(false)));
+
+        ctx.invocations.create("inv-fixed", "/pkg/foo", 0).await.unwrap();
+        ctx.invocations.request_cancel("inv-fixed").await.unwrap();
+
+        let after = run_internal("action_cancelled", &json!({}), &ctx).await.unwrap();
+        assert_eq!(after.get("cancelled"), Some(&Value::Bool(true)));
     }
 }

@@ -15,6 +15,7 @@ pub mod console;
 mod db;
 mod exec;
 pub mod internal;
+pub mod invocations;
 pub mod loopback;
 mod mask;
 pub mod script;
@@ -22,25 +23,53 @@ mod seed;
 pub mod secrets;
 pub mod wasm;
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use libsql::Connection;
-use serde_json::Value;
+use serde_json::{json, Value};
 use solx_config::ConfigService;
 use solx_surface::entities::{Action, ActionExecResult, ActionInput, ActionType, FileRef};
 use solx_surface::error::{Result, SolxError};
 use solx_surface::managers::{ActionManager, DocManager, FileStore, TypeManager};
 use solx_surface::path::{full_ref, normalize_path, validate_name};
-use solx_surface::query::{ListOptions, Page};
+use solx_surface::query::{ListOptions, ListSchema, Page};
+use tokio::task::AbortHandle;
 use uuid::Uuid;
 
 use caller::Caller;
 use db::{map_db, Db};
 
 pub use seed::BUILTIN_PATH;
+
+/// Whether this process is a long-lived host (`solx-server`, `solx-mcp`) —
+/// the only kind that can safely run a detached `action_start` invocation.
+/// A `tokio::spawn`'d task is not cancelled when an axum handler future
+/// drops, which is what lets detachment survive client disconnect; but a
+/// CLI process exits the moment `exec` returns, which would kill a
+/// newly-started task before it could ever be polled. See
+/// `docs/async-actions-plan.md` §6.
+///
+/// A process-wide flag rather than a field threaded through
+/// `LocalActionManager::open` because the fact is about the *process*, not
+/// about any one manager instance — every construction site (tests
+/// included) would otherwise have to carry it.
+static LONG_LIVED_HOST: AtomicBool = AtomicBool::new(false);
+
+/// Call once at startup from a long-lived host's `main()` — `solx-server`
+/// and `solx-mcp` do this; `solx-cli` deliberately never does.
+pub fn set_long_lived_host(long_lived: bool) {
+    LONG_LIVED_HOST.store(long_lived, Ordering::Relaxed);
+}
+
+fn is_long_lived_host() -> bool {
+    LONG_LIVED_HOST.load(Ordering::Relaxed)
+}
 
 const DDL: &str = "\
 CREATE TABLE IF NOT EXISTS actions (\
@@ -79,6 +108,17 @@ pub struct LocalActionManager {
     /// see the module doc on `crate::console` for what moving it to a
     /// separate file later would cost.
     console: Arc<console::ConsoleStore>,
+    /// Status/cancel-flag state for `action_start`/`action_stop`/
+    /// `action_poll` — see `crate::invocations` for why the console alone
+    /// isn't enough. Same `Db` handle as `console` and `actions`.
+    invocations: Arc<invocations::InvocationStore>,
+    /// Abort handles for in-flight detached (`action_start`) tasks, keyed by
+    /// `invocation_id`. A field, not a process global — unlike the
+    /// loopback's registry (see `loopback::console`'s doc on why *that* one
+    /// has to be a `OnceCell`), nothing here needs to survive across
+    /// `LocalActionManager` instances, so keeping it per-manager is simpler
+    /// and keeps tests isolated from one another.
+    running: Arc<Mutex<HashMap<String, AbortHandle>>>,
     /// Set once, right after construction, to this manager's own
     /// `Arc<LocalActionManager>` — needed so WASM guests can recursively
     /// call back into `action-exec` (see `wasm`). `&self` methods
@@ -115,6 +155,19 @@ impl LocalActionManager {
             tracing::warn!("console TTL sweep failed: {e}");
         }
 
+        let invocations = Arc::new(invocations::InvocationStore::new(db.clone(), config.clone()));
+        invocations.ensure_schema().await?;
+        // A row still `running`/`cancelling` from before this process last
+        // exited (crash, kill, or an ungraceful restart) has no task behind
+        // it anymore — flip it before anything can `poll` a status that
+        // will never change on its own.
+        if let Err(e) = invocations.mark_orphans().await {
+            tracing::warn!("marking orphaned invocations failed: {e}");
+        }
+        if let Err(e) = invocations.sweep_expired().await {
+            tracing::warn!("invocation TTL sweep failed: {e}");
+        }
+
         Ok(LocalActionManager {
             db,
             config,
@@ -122,6 +175,8 @@ impl LocalActionManager {
             docs,
             files,
             console,
+            invocations,
+            running: Arc::new(Mutex::new(HashMap::new())),
             self_ref: OnceLock::new(),
         })
     }
@@ -131,6 +186,12 @@ impl LocalActionManager {
     /// a synthetic `action-exec` round trip.
     pub fn console(&self) -> &Arc<console::ConsoleStore> {
         &self.console
+    }
+
+    /// Shared handle to this manager's invocation-state store — see
+    /// `crate::invocations`.
+    pub fn invocations(&self) -> &Arc<invocations::InvocationStore> {
+        &self.invocations
     }
 
     /// Provide this manager's own handle for recursive WASM `action-exec`
@@ -301,6 +362,39 @@ fn row_to_action(row: &libsql::Row) -> Result<Action> {
 
 const SELECT: &str = "SELECT id,path,name,caption,description,capabilities,phrases,category,param_type_ref,result_type_ref,action_type,fn_name,bin_name,action_config,files,trusted,created_at,updated_at FROM actions";
 
+/// Columns this store exposes to `ListOptions`. `capabilities` and `phrases`
+/// are JSON arrays, so filtering them is a substring match over that text —
+/// enough to find "every action tagged mcp" without a join table.
+///
+/// `action_config` is deliberately absent: it can hold secrets (see
+/// [`mask`]), and a LIKE filter over it would leak their contents by
+/// letting a caller probe for substrings.
+const LIST_SCHEMA: ListSchema<'static> = ListSchema {
+    filterable: &[
+        "name",
+        "caption",
+        "description",
+        "category",
+        "capabilities",
+        "phrases",
+        "action_type",
+        "param_type_ref",
+        "result_type_ref",
+        "fn_name",
+        "bin_name",
+    ],
+    sortable: &[
+        ("name", "path,name"),
+        ("path", "path,name"),
+        ("category", "category"),
+        ("action_type", "action_type"),
+        ("created_at", "created_at"),
+        ("updated_at", "updated_at"),
+    ],
+    default_sort: "path,name",
+    date_column: Some("created_at"),
+};
+
 async fn get_row(conn: &Connection, path: &str, name: &str) -> Result<Option<Action>> {
     let mut rows = conn
         .query(
@@ -446,24 +540,13 @@ impl ActionManager for LocalActionManager {
         let limit = opts.limit_or(DEFAULT_LIMIT);
         let offset = opts.offset_or_zero();
 
-        let (where_sql, like) = match &opts.path_prefix {
-            Some(p) => {
-                let p = normalize_path(p)?;
-                let like = if p == "/" { "/%".to_string() } else { format!("{p}/%").to_string() };
-                (" WHERE (path=?1 OR path LIKE ?2)".to_string(), Some((p, like)))
-            }
-            None => (String::new(), None),
-        };
+        let q = opts.to_sql(LIST_SCHEMA)?;
+        let binds: Vec<libsql::Value> =
+            q.binds.iter().cloned().map(libsql::Value::from).collect();
 
         let total = {
-            let sql = format!("SELECT COUNT(*) FROM actions{where_sql}");
-            let mut rows = match &like {
-                Some((p, l)) => conn
-                    .query(&sql, libsql::params![p.clone(), l.clone()])
-                    .await
-                    .map_err(map_db)?,
-                None => conn.query(&sql, ()).await.map_err(map_db)?,
-            };
+            let sql = format!("SELECT COUNT(*) FROM actions{}", q.where_clause);
+            let mut rows = conn.query(&sql, binds.clone()).await.map_err(map_db)?;
             rows.next()
                 .await
                 .map_err(map_db)?
@@ -471,14 +554,11 @@ impl ActionManager for LocalActionManager {
                 .unwrap_or(0) as usize
         };
 
-        let sql = format!("{SELECT}{where_sql} ORDER BY path,name LIMIT {limit} OFFSET {offset}");
-        let mut rows = match &like {
-            Some((p, l)) => conn
-                .query(&sql, libsql::params![p.clone(), l.clone()])
-                .await
-                .map_err(map_db)?,
-            None => conn.query(&sql, ()).await.map_err(map_db)?,
-        };
+        let sql = format!(
+            "{SELECT}{}{} LIMIT {limit} OFFSET {offset}",
+            q.where_clause, q.order_clause
+        );
+        let mut rows = conn.query(&sql, binds).await.map_err(map_db)?;
         let mut items = Vec::new();
         while let Some(row) = rows.next().await.map_err(map_db)? {
             let mut action = row_to_action(&row)?;
@@ -498,7 +578,9 @@ impl ActionManager for LocalActionManager {
 
 impl LocalActionManager {
     /// Execute an action, optionally attributed to the action that invoked
-    /// it.
+    /// it. Equivalent to [`Self::exec_as_with`] with `invocation_id: None` —
+    /// i.e. mint a fresh one at dispatch time, the behavior every existing
+    /// caller of this method already gets.
     ///
     /// `caller` is `Some` only on the recursive hop: a WASM guest calling
     /// `action-exec` (see [`crate::wasm`]), which is the sole
@@ -511,6 +593,52 @@ impl LocalActionManager {
         params: Value,
         caller: Option<&Caller>,
     ) -> Result<ActionExecResult> {
+        self.exec_as_with(path, name, params, caller, None).await
+    }
+
+    /// Like [`Self::exec_as`], but lets the caller fix the `invocation_id`
+    /// up front instead of letting one be minted at dispatch time.
+    ///
+    /// Only [`Self::start_invocation`] ever passes `Some` — a detached run
+    /// needs the id known *before* execution begins, so `action_stop`/
+    /// `action_poll` have something to address before the run finishes (or
+    /// even starts). `invocation_id.is_some()` doubles as "this is a
+    /// detached run" for the timeout default below; every other caller goes
+    /// through [`Self::exec_as`], which always passes `None`.
+    ///
+    /// **Why a manually boxed future, not `async fn`:** this method's
+    /// `Internal` arm can dispatch to `action_start`, whose handler calls
+    /// [`Self::start_invocation`], which `tokio::spawn`s a task that calls
+    /// back into *this very method*. An `async fn`'s return type is an
+    /// anonymous, structurally-inferred generator — with that indirect
+    /// self-reference in the call graph, the compiler cannot resolve
+    /// whether the type is `Send` (it would need to already know the answer
+    /// to answer the question) and rejects it outright. Returning an
+    /// explicit `Pin<Box<dyn Future + Send>>` gives the method a *nominal*
+    /// type with a `Send` bound checked once against its own body, which
+    /// every recursive call site (including the one inside
+    /// `start_invocation`'s spawned task) can then simply trust — the same
+    /// trick `#[async_trait]` uses under the hood for object-safe trait
+    /// methods, applied by hand here since this isn't a trait method.
+    pub fn exec_as_with<'a>(
+        &'a self,
+        path: &'a str,
+        name: &'a str,
+        params: Value,
+        caller: Option<&'a Caller>,
+        invocation_id: Option<&'a str>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ActionExecResult>> + Send + 'a>> {
+        Box::pin(self.exec_as_with_inner(path, name, params, caller, invocation_id))
+    }
+
+    async fn exec_as_with_inner(
+        &self,
+        path: &str,
+        name: &str,
+        params: Value,
+        caller: Option<&Caller>,
+        invocation_id: Option<&str>,
+    ) -> Result<ActionExecResult> {
         let action = self.get_unmasked(path, name).await?;
         let action_ref = full_ref(&action.path, &action.name)?;
 
@@ -518,6 +646,24 @@ impl LocalActionManager {
         if let Some(tr) = &action.param_type_ref {
             self.types.validate(&params, tr).await?;
         }
+
+        let detached = invocation_id.is_some();
+        let minted;
+        let invocation_id: &str = match invocation_id {
+            Some(id) => id,
+            None => {
+                minted = Uuid::new_v4().to_string();
+                &minted
+            }
+        };
+        // A detached run should not silently inherit the 300s sync default
+        // — it is expected to outlive any one caller. `action_config`'s own
+        // `timeout_secs` still wins either way.
+        let effective_timeout = if detached {
+            Some(timeout_secs(&action.action_config).unwrap_or_else(|| self.config.background_timeout_secs()))
+        } else {
+            timeout_secs(&action.action_config)
+        };
 
         let result = match action.action_type {
             Some(ActionType::Command) => {
@@ -527,11 +673,13 @@ impl LocalActionManager {
                 exec::run_command(
                     &self.config,
                     self.console.clone(),
+                    self.invocations.clone(),
                     &action_ref,
+                    invocation_id,
                     fn_name,
                     &action.action_config,
                     &params,
-                    timeout_secs(&action.action_config),
+                    effective_timeout,
                 )
                 .await?
             }
@@ -540,9 +688,11 @@ impl LocalActionManager {
                     SolxError::Exec("webhook action has no fn_name (URL)".into())
                 })?;
                 exec::run_webhook(
+                    &self.config,
                     self,
                     self.console.clone(),
                     &action_ref,
+                    invocation_id,
                     &action.path,
                     &action.name,
                     url,
@@ -562,6 +712,8 @@ impl LocalActionManager {
                     files: self.files.clone(),
                     config: self.config.clone(),
                     console: self.console.clone(),
+                    invocations: self.invocations.clone(),
+                    local: self.self_arc()?,
                     action_config: action.action_config.clone(),
                     caller: caller.cloned(),
                 };
@@ -578,7 +730,12 @@ impl LocalActionManager {
                 // by *this* action, not by whoever invoked it. The incoming
                 // `caller` is therefore dropped rather than forwarded, so a
                 // guest can never reach an outer action's secret keys.
-                let frame = Caller::from_action(&action_ref, action.action_config.as_ref());
+                // `with_invocation` rather than `from_action` so a detached
+                // run's guest is stamped with the id `start_invocation`
+                // already committed to the `invocations` row — for a plain
+                // `exec_as` call this is exactly the freshly-minted id above,
+                // so behavior is unchanged from before this method existed.
+                let frame = Caller::with_invocation(&action_ref, action.action_config.as_ref(), invocation_id);
                 // WASM execution reports its own success/message (a guest can
                 // report a handled failure without erroring the host call), so
                 // it returns a full ActionExecResult directly rather than
@@ -590,7 +747,7 @@ impl LocalActionManager {
                     action.fn_name.as_deref(),
                     &params,
                     frame,
-                    timeout_secs(&action.action_config),
+                    effective_timeout,
                 )
                 .await;
             }
@@ -603,7 +760,7 @@ impl LocalActionManager {
                 // for this action's own identity, not the incoming one — a
                 // script's nested `exec` calls must never reach an outer
                 // action's secret keys.
-                let frame = Caller::from_action(&action_ref, action.action_config.as_ref());
+                let frame = Caller::with_invocation(&action_ref, action.action_config.as_ref(), invocation_id);
                 let runner = script::ActionCommandRunner {
                     actions: self.self_arc()?,
                     caller: frame,
@@ -611,7 +768,7 @@ impl LocalActionManager {
                 let initial = std::collections::HashMap::from([("params".to_string(), params.clone())]);
                 let run = solx_scripts::execute_script_with_vars(&runner, &source, initial);
                 let budget = std::time::Duration::from_secs(
-                    timeout_secs(&action.action_config).unwrap_or(exec::DEFAULT_TIMEOUT_SECS),
+                    effective_timeout.unwrap_or(exec::DEFAULT_TIMEOUT_SECS),
                 );
                 tokio::time::timeout(budget, run).await.map_err(|_| {
                     SolxError::Exec(format!("script action {action_ref} timed out"))
@@ -653,6 +810,172 @@ impl LocalActionManager {
             message: None,
         })
     }
+
+    /// Start `path/name` detached: returns as soon as an `invocations` row
+    /// exists, while the actual execution runs on its own `tokio::spawn`ed
+    /// task. See `docs/async-actions-plan.md` §4.
+    ///
+    /// Refuses unless this process has called [`set_long_lived_host`] — a
+    /// spawned task is not what keeps a process alive, so under a CLI
+    /// process (which exits the instant `exec` returns) a "successfully
+    /// started" invocation would be killed before it could ever be polled.
+    pub async fn start_invocation(&self, path: &str, name: &str, params: Value) -> Result<Value> {
+        if !is_long_lived_host() {
+            return Err(SolxError::Exec(
+                "action_start requires a long-lived host (solx-server or solx-mcp). \
+                 This process exits when exec returns, which would kill the invocation \
+                 before it could be polled. Point the CLI at a running server, or use exec."
+                    .into(),
+            ));
+        }
+
+        // Resolved (and validated) up front, outside the spawned task, so a
+        // bad path/name/action_type fails the `start` call itself rather
+        // than silently producing a row that immediately goes `failed`.
+        let action = self.get_unmasked(path, name).await?;
+        let action_ref = full_ref(&action.path, &action.name)?;
+        if action.action_type.is_none() {
+            return Err(SolxError::Exec(format!(
+                "action {action_ref} has no action_type to execute"
+            )));
+        }
+
+        let invocation_id = Uuid::new_v4().to_string();
+        // Captured before the row exists, so a poller can jump straight to
+        // this run's own console output — see `ConsoleStore::current_next_seq`.
+        let console_seq_start = self.console.current_next_seq(&action_ref).await?;
+        self.invocations.create(&invocation_id, &action_ref, console_seq_start).await?;
+
+        let manager = self.self_arc()?;
+        let path = path.to_string();
+        let name = name.to_string();
+        let task_id = invocation_id.clone();
+        let handle = tokio::spawn(async move {
+            let outcome = manager.exec_as_with(&path, &name, params, None, Some(&task_id)).await;
+            let (status, result, error) = match outcome {
+                Ok(r) if r.success => (invocations::status::OK, Some(r.result), None),
+                Ok(r) => (invocations::status::FAILED, Some(r.result), r.message),
+                Err(e) => (invocations::status::FAILED, None, Some(e.to_string())),
+            };
+            // Best-effort: if this write fails there is nothing left to do
+            // with the error — the task is finished either way.
+            let _ = manager.invocations.finish(&task_id, status, result, error).await;
+            if let Ok(mut running) = manager.running.lock() {
+                running.remove(&task_id);
+            }
+        });
+        if let Ok(mut running) = self.running.lock() {
+            running.insert(invocation_id.clone(), handle.abort_handle());
+        }
+
+        Ok(json!({
+            "invocation_id": invocation_id,
+            "action_ref": action_ref,
+            "console_seq_start": console_seq_start,
+        }))
+    }
+
+    /// Request that a detached invocation stop. Cooperative first: sets the
+    /// flag a running Command child (via the loopback `/cancelled` route)
+    /// or a running Wasm/Script/Internal caller (via `action_cancelled`)
+    /// can observe and exit on its own. If it hasn't gone terminal within
+    /// `grace_secs` (default `stop_grace_secs`), the task is force-aborted —
+    /// dropping the future, which reaps a Command child via the existing
+    /// `kill_on_drop(true)` and unwinds a Wasm guest's fiber.
+    ///
+    /// Returns immediately; does **not** block for the grace period unless
+    /// `force` is set.
+    ///
+    /// Caveats:
+    /// - Carried over unchanged from `exec::run_command`: force-abort kills
+    ///   the *shell* a Command action spawned, not its descendants.
+    /// - **Force-abort is process-local.** `cancel_requested` lives in the
+    ///   shared `invocations` table, so the cooperative signal reaches the
+    ///   running task regardless of which process calls `stop`. The
+    ///   `AbortHandle` in [`Self::running`], though, only exists in the
+    ///   memory of whichever process's [`Self::start_invocation`] actually
+    ///   spawned the task. Calling `stop` on a *different* process's
+    ///   `LocalActionManager` (e.g. a CLI run locally against the same
+    ///   appdata dir a `solx-server` is also using, rather than proxied to
+    ///   it via `server_url`) can mark the row `cancelled` in the database
+    ///   without ever reaching the real task. The documented usage pattern
+    ///   — a CLI pointed at `solx-server` via `server_url`, so `stop`/`poll`
+    ///   execute inside the same process that ran `start` — doesn't hit
+    ///   this; two independent `LocalActionManager`s sharing one database
+    ///   file do.
+    ///
+    /// Cooperative exit is the reliable path; force is the backstop, not a
+    /// guarantee.
+    pub async fn stop_invocation(&self, invocation_id: &str, force: bool, grace_secs: Option<u64>) -> Result<Value> {
+        let Some(inv) = self.invocations.request_cancel(invocation_id).await? else {
+            return Err(SolxError::NotFound(format!("invocation {invocation_id}")));
+        };
+        if invocations::is_terminal(&inv.status) {
+            return Ok(inv.to_json());
+        }
+
+        if force {
+            self.force_abort(invocation_id).await?;
+            let inv = self
+                .invocations
+                .get(invocation_id)
+                .await?
+                .ok_or_else(|| SolxError::NotFound(format!("invocation {invocation_id}")))?;
+            return Ok(inv.to_json());
+        }
+
+        let grace = Duration::from_secs(grace_secs.unwrap_or_else(|| self.config.stop_grace_secs()));
+        let manager = self.self_arc()?;
+        let id = invocation_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(grace).await;
+            let _ = manager.force_abort(&id).await;
+        });
+
+        Ok(inv.to_json())
+    }
+
+    /// Abort the task behind `invocation_id` if it is still running, and
+    /// mark the row `cancelled`. A no-op (not an error) if the task already
+    /// finished on its own — [`invocations::InvocationStore::mark_aborted`]
+    /// guards against exactly that race.
+    async fn force_abort(&self, invocation_id: &str) -> Result<()> {
+        if let Ok(mut running) = self.running.lock() {
+            if let Some(handle) = running.remove(invocation_id) {
+                handle.abort();
+            }
+        }
+        self.invocations.mark_aborted(invocation_id).await
+    }
+
+    /// Current status of a detached invocation, optionally long-polling
+    /// (reusing `console`'s 250ms/60s long-poll cadence) until it goes
+    /// terminal.
+    pub async fn poll_invocation(&self, invocation_id: &str, wait_secs: Option<u64>) -> Result<Value> {
+        let wait = wait_secs.map(|s| Duration::from_secs(s.min(console::MAX_TAIL_WAIT_SECS)));
+        let deadline = wait.map(|w| tokio::time::Instant::now() + w);
+
+        loop {
+            let inv = self
+                .invocations
+                .get(invocation_id)
+                .await?
+                .ok_or_else(|| SolxError::NotFound(format!("invocation {invocation_id}")))?;
+            if invocations::is_terminal(&inv.status) {
+                return Ok(inv.to_json());
+            }
+            match deadline {
+                Some(d) => {
+                    let now = tokio::time::Instant::now();
+                    if now >= d {
+                        return Ok(inv.to_json());
+                    }
+                    tokio::time::sleep(console::TAIL_POLL_INTERVAL.min(d - now)).await;
+                }
+                None => return Ok(inv.to_json()),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -661,6 +984,166 @@ mod tests {
     use solx_docs::LocalDocManager;
     use solx_files::LocalFileStore;
     use solx_types::LocalTypeManager;
+
+    /// Seed a handful of actions with distinguishable fields for list tests.
+    async fn seed_list_fixtures(m: &LocalActionManager) {
+        for (path, name, category, caption) in [
+            ("/tools", "alpha-tool", "extraction", "Alpha the first"),
+            ("/tools", "beta-tool", "search", "Beta the second"),
+            ("/other", "gamma-tool", "extraction", "Gamma the third"),
+        ] {
+            m.save(
+                path,
+                name,
+                ActionInput {
+                    action_type: Some(ActionType::Command),
+                    fn_name: Some("echo".into()),
+                    category: Some(category.into()),
+                    caption: Some(caption.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn list_filters_by_name_substring() {
+        let (_d, _c, m) = setup().await;
+        seed_list_fixtures(&m).await;
+        let page = m
+            .list(ListOptions {
+                filter_field: Some("name".into()),
+                filter_value: Some("ALPHA".into()), // case-insensitive
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].name, "alpha-tool");
+    }
+
+    #[tokio::test]
+    async fn list_filters_by_category_and_caption() {
+        let (_d, _c, m) = setup().await;
+        seed_list_fixtures(&m).await;
+
+        let by_category = m
+            .list(ListOptions {
+                filter_field: Some("category".into()),
+                filter_value: Some("extraction".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(by_category.total, 2);
+
+        let by_caption = m
+            .list(ListOptions {
+                filter_field: Some("caption".into()),
+                filter_value: Some("the third".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(by_caption.total, 1);
+        assert_eq!(by_caption.items[0].name, "gamma-tool");
+    }
+
+    #[tokio::test]
+    async fn list_filter_composes_with_path_prefix() {
+        let (_d, _c, m) = setup().await;
+        seed_list_fixtures(&m).await;
+        // "extraction" matches two actions, but only one lives under /tools.
+        let page = m
+            .list(ListOptions {
+                path_prefix: Some("/tools".into()),
+                filter_field: Some("category".into()),
+                filter_value: Some("extraction".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].name, "alpha-tool");
+    }
+
+    #[tokio::test]
+    async fn list_ignores_unknown_filter_field() {
+        let (_d, _c, m) = setup().await;
+        seed_list_fixtures(&m).await;
+        let all = m.list(ListOptions::default()).await.unwrap().total;
+        let page = m
+            .list(ListOptions {
+                filter_field: Some("name) OR 1=1 --".into()),
+                filter_value: Some("x".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.total, all);
+    }
+
+    #[tokio::test]
+    async fn list_never_filters_on_action_config() {
+        let (_d, _c, m) = setup().await;
+        m.save(
+            "/tools",
+            "s",
+            ActionInput {
+                action_type: Some(ActionType::Command),
+                fn_name: Some("echo".into()),
+                action_config: Some(cfg_with_secret("c3VwZXItc2VjcmV0LWtleS1oZXJlLXBhZGRpbmc=")),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let all = m.list(ListOptions::default()).await.unwrap().total;
+        // action_config is not filterable, so a probe for a secret substring
+        // cannot narrow the result set and thereby confirm a guess.
+        let probe = m
+            .list(ListOptions {
+                filter_field: Some("action_config".into()),
+                filter_value: Some("super-secret".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(probe.total, all);
+    }
+
+    #[tokio::test]
+    async fn list_sorts_by_name_in_both_directions() {
+        let (_d, _c, m) = setup().await;
+        seed_list_fixtures(&m).await;
+        let names = |p: Page<Action>| -> Vec<String> {
+            p.items.into_iter().map(|a| format!("{}/{}", a.path, a.name)).collect()
+        };
+        let asc = names(
+            m.list(ListOptions {
+                path_prefix: Some("/tools".into()),
+                sort_by: Some("name".into()),
+                sort_order: solx_surface::query::SortOrder::Asc,
+                ..Default::default()
+            })
+            .await
+            .unwrap(),
+        );
+        let desc = names(
+            m.list(ListOptions {
+                path_prefix: Some("/tools".into()),
+                sort_by: Some("name".into()),
+                sort_order: solx_surface::query::SortOrder::Desc,
+                ..Default::default()
+            })
+            .await
+            .unwrap(),
+        );
+        assert_eq!(asc, vec!["/tools/alpha-tool", "/tools/beta-tool"]);
+        assert_eq!(desc, vec!["/tools/beta-tool", "/tools/alpha-tool"]);
+    }
 
     async fn setup() -> (tempfile::TempDir, Arc<ConfigService>, LocalActionManager) {
         let dir = tempfile::tempdir().unwrap();
@@ -693,11 +1176,30 @@ mod tests {
     }
 
     /// A manager wired for recursive execution, as `solx-manager` does it.
-    async fn setup_wired() -> (tempfile::TempDir, Arc<LocalActionManager>) {
-        let (dir, _cfg, m) = setup().await;
+    async fn setup_wired() -> (tempfile::TempDir, Arc<ConfigService>, Arc<LocalActionManager>) {
+        let (dir, cfg, m) = setup().await;
         let m = Arc::new(m);
         m.set_self_ref(Arc::downgrade(&m));
-        (dir, m)
+        (dir, cfg, m)
+    }
+
+    /// Registers `command` under `command_actions` keyed by `key`, then
+    /// saves a Command action whose `fn_name` is that key. `fn_name` is
+    /// never a literal shell string once the allowlist is in effect — see
+    /// `docs/next-steps.md` §1.
+    fn allow_command(cfg: &ConfigService, key: &str, command: &str) {
+        cfg.register_command(
+            key,
+            solx_config::CommandDef { command: command.into(), description: None, cwd: None },
+        )
+        .unwrap();
+    }
+
+    /// Appends `prefix` to the `allowed_webhook_base_urls` allowlist.
+    fn allow_webhook_prefix(cfg: &ConfigService, prefix: &str) {
+        let mut list = cfg.allowed_webhook_base_urls();
+        list.push(prefix.to_string());
+        cfg.set_allowed_webhook_base_urls(list).unwrap();
     }
 
     fn cfg_with_secret(key: &str) -> Value {
@@ -806,14 +1308,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exec_command_runs_fn_name_directly() {
-        let (_d, _c, m) = setup().await;
-        // fn_name is the literal command to run — no config registration
-        // needed. Echo a bare number so the output is valid JSON on both
-        // cmd.exe and sh without quote handling.
+    async fn exec_command_resolves_fn_name_through_the_allowlist() {
+        let (_d, c, m) = setup().await;
+        // fn_name is a key into `command_actions`, never a literal command —
+        // register it first. Echo a bare number so the output is valid JSON
+        // on both cmd.exe and sh without quote handling.
+        allow_command(&c, "echo-42", "echo 42");
         let input = ActionInput {
             action_type: Some(ActionType::Command),
-            fn_name: Some("echo 42".into()),
+            fn_name: Some("echo-42".into()),
             ..Default::default()
         };
         m.save("/tools", "echo", input).await.unwrap();
@@ -824,6 +1327,22 @@ mod tests {
             .unwrap();
         assert!(res.success);
         assert_eq!(res.result, serde_json::json!(42));
+    }
+
+    #[tokio::test]
+    async fn exec_command_with_unregistered_key_is_denied() {
+        let (_d, _c, m) = setup().await;
+        // Deny-by-default: an empty/absent allowlist rejects every key,
+        // including one that happens to look like a real shell command.
+        let input = ActionInput {
+            action_type: Some(ActionType::Command),
+            fn_name: Some("echo 42".into()),
+            ..Default::default()
+        };
+        m.save("/tools", "echo", input).await.unwrap();
+
+        let err = m.exec("/tools", "echo", serde_json::json!({})).await.unwrap_err();
+        assert!(err.to_string().contains("command_actions"), "{err}");
     }
 
     /// Minimal single-shot HTTP server for the webhook logging tests below —
@@ -854,8 +1373,9 @@ mod tests {
 
     #[tokio::test]
     async fn exec_webhook_logs_start_and_success_to_the_console() {
-        let (_d, _c, m) = setup().await;
+        let (_d, c, m) = setup().await;
         let (url, server) = start_ok_server().await;
+        allow_webhook_prefix(&c, "http://127.0.0.1");
 
         m.save(
             "/tools",
@@ -886,7 +1406,8 @@ mod tests {
 
     #[tokio::test]
     async fn exec_webhook_logs_failure_to_the_console() {
-        let (_d, _c, m) = setup().await;
+        let (_d, c, m) = setup().await;
+        allow_webhook_prefix(&c, "http://127.0.0.1");
         m.save(
             "/tools",
             "deadhook",
@@ -909,6 +1430,30 @@ mod tests {
         assert!(entries[1].message.as_deref().unwrap().contains("failed"));
     }
 
+    #[tokio::test]
+    async fn exec_webhook_with_unlisted_url_is_denied_before_any_request() {
+        let (_d, _c, m) = setup().await;
+        // Deny-by-default, and no console entries at all — the allowlist
+        // check happens before the "POST ..." start log is written.
+        m.save(
+            "/tools",
+            "hook",
+            ActionInput {
+                action_type: Some(ActionType::Webhook),
+                fn_name: Some("http://127.0.0.1:1".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let err = m.exec("/tools", "hook", serde_json::json!({})).await.unwrap_err();
+        assert!(err.to_string().contains("allowed_webhook_base_urls"), "{err}");
+
+        let entries = m.console().read("/tools/hook", None, 10).await.unwrap().entries;
+        assert!(entries.is_empty(), "{entries:?}");
+    }
+
     // ── entity_save_action: no self-granting shell ───────────────────────
     //
     // These go through `exec` on `/builtin/entity_save_action`, which is the
@@ -922,7 +1467,7 @@ mod tests {
 
     #[tokio::test]
     async fn entity_save_action_refuses_to_create_command_or_webhook() {
-        let (_d, m) = setup_wired().await;
+        let (_d, _cfg, m) = setup_wired().await;
 
         for ty in ["command", "webhook"] {
             let err = exec_builtin(
@@ -945,7 +1490,7 @@ mod tests {
     /// command. The guard has to consult the stored row, not just the input.
     #[tokio::test]
     async fn entity_save_action_refuses_to_repoint_an_existing_command() {
-        let (_d, m) = setup_wired().await;
+        let (_d, _cfg, m) = setup_wired().await;
         m.save(
             "/tools",
             "safe",
@@ -974,7 +1519,7 @@ mod tests {
 
     #[tokio::test]
     async fn entity_delete_action_refuses_to_remove_a_command() {
-        let (_d, m) = setup_wired().await;
+        let (_d, _cfg, m) = setup_wired().await;
         m.save(
             "/tools",
             "safe",
@@ -1002,7 +1547,7 @@ mod tests {
     /// an agent legitimately does through this built-in still works.
     #[tokio::test]
     async fn entity_save_action_still_allows_non_executable_types() {
-        let (_d, m) = setup_wired().await;
+        let (_d, _cfg, m) = setup_wired().await;
         exec_builtin(
             &m,
             "entity_save_action",
@@ -1301,5 +1846,152 @@ mod tests {
             page.items.iter().all(|a| a.action_type == Some(ActionType::Internal)),
             "every seeded /builtin action should be action_type=internal"
         );
+    }
+
+    // ── async actions: start/stop/poll ───────────────────────────────────────
+    //
+    // `#[serial]` on every test that touches `set_long_lived_host` —
+    // `LONG_LIVED_HOST` is a process-wide static, and tests in this file run
+    // in parallel threads within one process by default (`serial_test` is
+    // already a dev-dependency for exactly this reason elsewhere).
+
+    use serial_test::serial;
+
+    /// Echoes a bare number immediately — valid JSON on both cmd.exe and sh
+    /// without any quote-handling differences between the two, mirroring
+    /// `exec_command_runs_fn_name_directly` above.
+    fn quick_ok() -> &'static str {
+        "echo 42"
+    }
+
+    /// A shell snippet with no natural end — internal to the shell (a `for`/
+    /// `while` loop), not an external process, for the same reason
+    /// `tests/command_nonblocking.rs`'s `a_hanging_command_hits_its_timeout`
+    /// avoids one: `kill_on_drop` only reaps the shell we spawned, not an
+    /// external descendant, which would otherwise leak and hold the test
+    /// harness's pipes open.
+    fn hangs_forever() -> &'static str {
+        if cfg!(windows) {
+            "for /L %i in (1,1,2000000000) do @rem"
+        } else {
+            "while :; do :; done"
+        }
+    }
+
+    async fn save_command(m: &LocalActionManager, cfg: &ConfigService, name: &str, cmd: &str) {
+        allow_command(cfg, name, cmd);
+        m.save(
+            "/t",
+            name,
+            ActionInput {
+                action_type: Some(ActionType::Command),
+                fn_name: Some(name.into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn start_invocation_refuses_without_a_long_lived_host() {
+        set_long_lived_host(false);
+        let (_d, cfg, m) = setup_wired().await;
+        save_command(&m, &cfg, "quick", quick_ok()).await;
+
+        let err = m
+            .start_invocation("/t", "quick", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("requires a long-lived host"), "{err}");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn start_then_poll_reaches_ok_with_the_started_actions_result() {
+        set_long_lived_host(true);
+        let (_d, cfg, m) = setup_wired().await;
+        save_command(&m, &cfg, "quick", quick_ok()).await;
+
+        let started = m.start_invocation("/t", "quick", serde_json::json!({})).await.unwrap();
+        let id = started["invocation_id"].as_str().unwrap().to_string();
+        assert_eq!(started["action_ref"], "/t/quick");
+        assert_eq!(started["console_seq_start"], 1);
+
+        let polled = m.poll_invocation(&id, Some(10)).await.unwrap();
+        assert_eq!(polled["status"], invocations::status::OK);
+        assert_eq!(polled["result"], serde_json::json!(42));
+        assert_eq!(polled["invocation_id"], id);
+        assert!(polled["finished_at"].is_string());
+
+        set_long_lived_host(false);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn poll_invocation_of_an_unknown_id_is_not_found() {
+        let (_d, _cfg, m) = setup_wired().await;
+        let err = m.poll_invocation("no-such-id", None).await.unwrap_err();
+        assert!(matches!(err, SolxError::NotFound(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn stop_invocation_of_an_unknown_id_is_not_found() {
+        let (_d, _cfg, m) = setup_wired().await;
+        let err = m.stop_invocation("no-such-id", false, None).await.unwrap_err();
+        assert!(matches!(err, SolxError::NotFound(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn stop_force_aborts_a_hanging_command_promptly() {
+        set_long_lived_host(true);
+        let (_d, cfg, m) = setup_wired().await;
+        save_command(&m, &cfg, "hangs", hangs_forever()).await;
+
+        let started = m.start_invocation("/t", "hangs", serde_json::json!({})).await.unwrap();
+        let id = started["invocation_id"].as_str().unwrap().to_string();
+
+        // Give the child a moment to actually be spawned before stopping it.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let start = std::time::Instant::now();
+        let stopped = m.stop_invocation(&id, true, None).await.unwrap();
+        assert_eq!(stopped["status"], invocations::status::CANCELLED);
+        // Force must not wait out the (effectively infinite) hang.
+        assert!(start.elapsed() < Duration::from_secs(10), "{:?}", start.elapsed());
+
+        let polled = m.poll_invocation(&id, None).await.unwrap();
+        assert_eq!(polled["status"], invocations::status::CANCELLED);
+
+        set_long_lived_host(false);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn stop_cooperative_returns_cancelling_without_blocking_then_force_finishes_it() {
+        set_long_lived_host(true);
+        let (_d, cfg, m) = setup_wired().await;
+        save_command(&m, &cfg, "hangs", hangs_forever()).await;
+
+        let started = m.start_invocation("/t", "hangs", serde_json::json!({})).await.unwrap();
+        let id = started["invocation_id"].as_str().unwrap().to_string();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // A long grace period the test does not wait out — proves the
+        // cooperative call itself does not block for it.
+        let start = std::time::Instant::now();
+        let stopped = m.stop_invocation(&id, false, Some(30)).await.unwrap();
+        assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+        assert_eq!(stopped["status"], invocations::status::CANCELLING);
+        assert!(m.invocations().is_cancelled(&id).await.unwrap());
+
+        // Clean up rather than let the 30s watcher fire on its own.
+        let forced = m.stop_invocation(&id, true, None).await.unwrap();
+        assert_eq!(forced["status"], invocations::status::CANCELLED);
+
+        set_long_lived_host(false);
     }
 }

@@ -23,6 +23,10 @@ async fn main() -> anyhow::Result<()> {
         .with_ansi(false)
         .init();
 
+    // See the identical call in solx-server/src/main.rs — same reasoning:
+    // solx-mcp is a long-lived stdio server, unlike solx-cli.
+    solx_actions::set_long_lived_host(true);
+
     let app = solx_manager::App::build().await?;
     let service = server::SolxMcpServer::new(app)
         .serve(stdio())

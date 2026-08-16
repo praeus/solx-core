@@ -17,7 +17,7 @@ use solx_surface::entities::{TypeEntity, TypeInput};
 use solx_surface::error::{Result, SolxError};
 use solx_surface::managers::TypeManager;
 use solx_surface::path::{full_ref, normalize_path, split_ref, validate_name};
-use solx_surface::query::{ListOptions, Page};
+use solx_surface::query::{ListOptions, ListSchema, Page};
 use uuid::Uuid;
 
 use db::{map_db, Db};
@@ -96,6 +96,21 @@ fn row_to_type(row: &libsql::Row) -> Result<TypeEntity> {
 
 const SELECT: &str =
     "SELECT id,path,name,description,schema,groups,created_at,updated_at FROM types";
+
+/// Columns this store exposes to `ListOptions`. `groups` is stored as a JSON
+/// array, so filtering it is a substring match over that text — enough to pick
+/// out a group tag without a join table.
+const LIST_SCHEMA: ListSchema<'static> = ListSchema {
+    filterable: &["name", "description", "groups"],
+    sortable: &[
+        ("name", "path,name"),
+        ("path", "path,name"),
+        ("created_at", "created_at"),
+        ("updated_at", "updated_at"),
+    ],
+    default_sort: "path,name",
+    date_column: Some("created_at"),
+};
 
 async fn get_row(conn: &Connection, path: &str, name: &str) -> Result<Option<TypeEntity>> {
     let mut rows = conn
@@ -217,40 +232,22 @@ impl TypeManager for LocalTypeManager {
         let limit = opts.limit_or(DEFAULT_LIMIT);
         let offset = opts.offset_or_zero();
 
-        let (where_sql, like) = match &opts.path_prefix {
-            Some(p) => {
-                let p = normalize_path(p)?;
-                let like = if p == "/" {
-                    "/%".to_string()
-                } else {
-                    format!("{p}/%")
-                };
-                (" WHERE (path=?1 OR path LIKE ?2)".to_string(), Some((p, like)))
-            }
-            None => (String::new(), None),
-        };
+        let q = opts.to_sql(LIST_SCHEMA)?;
+        let binds: Vec<libsql::Value> =
+            q.binds.iter().cloned().map(libsql::Value::from).collect();
 
         let total = {
-            let sql = format!("SELECT COUNT(*) FROM types{where_sql}");
-            let mut rows = match &like {
-                Some((p, l)) => conn
-                    .query(&sql, libsql::params![p.clone(), l.clone()])
-                    .await
-                    .map_err(map_db)?,
-                None => conn.query(&sql, ()).await.map_err(map_db)?,
-            };
+            let sql = format!("SELECT COUNT(*) FROM types{}", q.where_clause);
+            let mut rows = conn.query(&sql, binds.clone()).await.map_err(map_db)?;
             let row = rows.next().await.map_err(map_db)?;
             row.map(|r| r.get::<i64>(0).unwrap_or(0)).unwrap_or(0) as usize
         };
 
-        let sql = format!("{SELECT}{where_sql} ORDER BY path,name LIMIT {limit} OFFSET {offset}");
-        let mut rows = match &like {
-            Some((p, l)) => conn
-                .query(&sql, libsql::params![p.clone(), l.clone()])
-                .await
-                .map_err(map_db)?,
-            None => conn.query(&sql, ()).await.map_err(map_db)?,
-        };
+        let sql = format!(
+            "{SELECT}{}{} LIMIT {limit} OFFSET {offset}",
+            q.where_clause, q.order_clause
+        );
+        let mut rows = conn.query(&sql, binds).await.map_err(map_db)?;
         let mut items = Vec::new();
         while let Some(row) = rows.next().await.map_err(map_db)? {
             items.push(row_to_type(&row)?);
@@ -314,6 +311,93 @@ mod tests {
             .validate(&serde_json::json!({}), "/types/custom/Person")
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn list_filters_by_name_substring() {
+        let (_d, m) = mgr().await;
+        let page = m
+            .list(ListOptions {
+                filter_field: Some("name".into()),
+                filter_value: Some("blogpost".into()), // case-insensitive
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(page.total >= 1);
+        assert!(page
+            .items
+            .iter()
+            .all(|t| t.name.to_lowercase().contains("blogpost")));
+    }
+
+    #[tokio::test]
+    async fn list_ignores_unknown_filter_field() {
+        let (_d, m) = mgr().await;
+        let all = m.list(ListOptions::default()).await.unwrap().total;
+        // An unrecognized column must be dropped, not interpolated.
+        let page = m
+            .list(ListOptions {
+                filter_field: Some("schema) OR 1=1 --".into()),
+                filter_value: Some("x".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.total, all);
+    }
+
+    #[tokio::test]
+    async fn list_sorts_by_name_in_both_directions() {
+        let (_d, m) = mgr().await;
+        let asc = m
+            .list(ListOptions {
+                sort_by: Some("name".into()),
+                sort_order: solx_surface::query::SortOrder::Asc,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let desc = m
+            .list(ListOptions {
+                sort_by: Some("name".into()),
+                sort_order: solx_surface::query::SortOrder::Desc,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let asc_refs: Vec<_> = asc.items.iter().map(|t| (&t.path, &t.name)).collect();
+        let desc_refs: Vec<_> = desc.items.iter().map(|t| (&t.path, &t.name)).collect();
+        assert!(asc_refs.len() > 1);
+        assert_ne!(asc_refs, desc_refs, "sort_order had no effect");
+
+        let mut reversed = desc_refs.clone();
+        reversed.reverse();
+        assert_eq!(asc_refs, reversed, "desc must be the exact reverse of asc");
+    }
+
+    #[tokio::test]
+    async fn list_paginates_without_repeating_rows() {
+        let (_d, m) = mgr().await;
+        let mut seen = std::collections::HashSet::new();
+        for page_no in 0..4 {
+            let page = m
+                .list(ListOptions {
+                    limit: Some(5),
+                    offset: Some(page_no * 5),
+                    sort_by: Some("updated_at".into()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            for t in page.items {
+                // The (path,name) tiebreak keeps LIMIT/OFFSET stable even
+                // though every seeded row shares an updated_at.
+                assert!(seen.insert(full_ref(&t.path, &t.name).unwrap()), "row repeated across pages");
+            }
+        }
+        assert_eq!(seen.len(), 20);
     }
 
     #[tokio::test]

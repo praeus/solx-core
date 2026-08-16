@@ -26,13 +26,20 @@
 //! `/builtin/console/print`'s params, since that's exactly what this
 //! forwards to. Unknown or missing tokens get `401`.
 //!
+//! `GET /cancelled` with the same header returns `{"cancelled": bool}` —
+//! whether `action_stop` has been called for this invocation. Added
+//! alongside `print` rather than as a separate listener, since it needs the
+//! exact same one-token-one-invocation resolution; see
+//! `docs/async-actions-plan.md` §5a.
+//!
 //! ## Security
 //!
 //! Bound to `127.0.0.1` only. Each token is single-purpose: it resolves to
-//! exactly one `(console, action_ref, invocation_id)` set at registration
-//! time, and [`Registration`] deregisters it on drop, so it can't be
-//! replayed after that Command invocation ends and can't be used to write
-//! to any console other than the one its own invocation owns.
+//! exactly one `(console, invocations, action_ref, invocation_id)` set at
+//! registration time, and [`Registration`] deregisters it on drop, so it
+//! can't be replayed after that Command invocation ends and can't be used
+//! to write to, or query the cancellation state of, any invocation other
+//! than the one it was minted for.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -40,20 +47,23 @@ use std::sync::{Arc, Mutex};
 
 use axum::extract::{Json as JsonExtractor, State as AxumState};
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::post;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::OnceCell;
 use tracing::warn;
 
 use crate::console::ConsoleStore;
+use crate::invocations::InvocationStore;
 
 // ── Registry ─────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 struct Target {
     console: Arc<ConsoleStore>,
+    invocations: Arc<InvocationStore>,
     action_ref: String,
     invocation_id: String,
 }
@@ -84,6 +94,14 @@ impl Registration {
         format!("http://127.0.0.1:{port}/print")
     }
 
+    /// URL for the `GET /cancelled` cancellation check — a second endpoint,
+    /// deliberately, rather than having the child string-munge `/print`
+    /// into `/cancelled` itself.
+    pub fn control_url(&self) -> String {
+        let port = LOOPBACK.get().expect("loopback started before Registration exists").port;
+        format!("http://127.0.0.1:{port}/cancelled")
+    }
+
     pub fn token(&self) -> &str {
         &self.token
     }
@@ -108,6 +126,7 @@ impl Drop for Registration {
 /// than failing the exec over it.
 pub async fn register(
     console: Arc<ConsoleStore>,
+    invocations: Arc<InvocationStore>,
     action_ref: &str,
     invocation_id: &str,
 ) -> Option<Registration> {
@@ -117,6 +136,7 @@ pub async fn register(
         token.clone(),
         Target {
             console,
+            invocations,
             action_ref: action_ref.to_string(),
             invocation_id: invocation_id.to_string(),
         },
@@ -248,6 +268,24 @@ async fn print_handler(
     }
 }
 
+async fn cancelled_handler(AxumState(registry): AxumState<Registry>, headers: HeaderMap) -> Response {
+    let Some(token) = bearer_token(&headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(target) = registry.lock().ok().and_then(|r| r.get(token).cloned()) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+
+    // Fails closed to `false` on a store error — a lookup failure must
+    // never be mistaken for "yes, stop" by the caller.
+    let cancelled = target
+        .invocations
+        .is_cancelled(&target.invocation_id)
+        .await
+        .unwrap_or(false);
+    axum::Json(json!({ "cancelled": cancelled })).into_response()
+}
+
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(axum::http::header::AUTHORIZATION)
@@ -256,7 +294,10 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 }
 
 fn router(registry: Registry) -> Router {
-    Router::new().route("/print", post(print_handler)).with_state(registry)
+    Router::new()
+        .route("/print", post(print_handler))
+        .route("/cancelled", get(cancelled_handler))
+        .with_state(registry)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -264,29 +305,35 @@ fn router(registry: Registry) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::invocations::InvocationStore;
     use solx_config::ConfigService;
 
-    async fn test_console() -> (tempfile::TempDir, Arc<ConsoleStore>) {
+    async fn test_console() -> (tempfile::TempDir, Arc<ConsoleStore>, Arc<InvocationStore>) {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::db::Db::open(&dir.path().join("t.db")).await.unwrap();
         let config = Arc::new(ConfigService::open_in(dir.path()).unwrap());
-        let store = Arc::new(ConsoleStore::new(db, config));
-        store.ensure_schema().await.unwrap();
-        (dir, store)
+        let console = Arc::new(ConsoleStore::new(db.clone(), config.clone()));
+        console.ensure_schema().await.unwrap();
+        let invocations = Arc::new(InvocationStore::new(db, config));
+        invocations.ensure_schema().await.unwrap();
+        (dir, console, invocations)
     }
 
     #[tokio::test]
     async fn register_returns_a_working_url_and_token() {
-        let (_d, console) = test_console().await;
-        let reg = register(console, "/pkg/foo", "inv-1").await.expect("loopback should start");
+        let (_d, console, invocations) = test_console().await;
+        let reg = register(console, invocations, "/pkg/foo", "inv-1")
+            .await
+            .expect("loopback should start");
         assert!(reg.url().starts_with("http://127.0.0.1:"));
+        assert!(reg.control_url().starts_with("http://127.0.0.1:"));
         assert!(!reg.token().is_empty());
     }
 
     #[tokio::test]
     async fn print_over_http_reaches_the_right_console() {
-        let (_d, console) = test_console().await;
-        let reg = register(console.clone(), "/pkg/foo", "inv-1").await.unwrap();
+        let (_d, console, invocations) = test_console().await;
+        let reg = register(console.clone(), invocations, "/pkg/foo", "inv-1").await.unwrap();
 
         let client = reqwest::Client::new();
         let resp = client
@@ -309,8 +356,8 @@ mod tests {
 
     #[tokio::test]
     async fn print_defaults_level_to_info_and_tolerates_an_empty_body() {
-        let (_d, console) = test_console().await;
-        let reg = register(console.clone(), "/pkg/foo", "inv-1").await.unwrap();
+        let (_d, console, invocations) = test_console().await;
+        let reg = register(console.clone(), invocations, "/pkg/foo", "inv-1").await.unwrap();
         let client = reqwest::Client::new();
         let resp = client
             .post(reg.url())
@@ -327,8 +374,8 @@ mod tests {
 
     #[tokio::test]
     async fn missing_token_is_rejected() {
-        let (_d, console) = test_console().await;
-        let reg = register(console, "/pkg/foo", "inv-1").await.unwrap();
+        let (_d, console, invocations) = test_console().await;
+        let reg = register(console, invocations, "/pkg/foo", "inv-1").await.unwrap();
         let client = reqwest::Client::new();
         let resp = client
             .post(reg.url())
@@ -341,8 +388,8 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_token_is_rejected() {
-        let (_d, console) = test_console().await;
-        let reg = register(console, "/pkg/foo", "inv-1").await.unwrap();
+        let (_d, console, invocations) = test_console().await;
+        let reg = register(console, invocations, "/pkg/foo", "inv-1").await.unwrap();
         let client = reqwest::Client::new();
         let resp = client
             .post(reg.url())
@@ -356,8 +403,8 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_the_registration_deregisters_the_token() {
-        let (_d, console) = test_console().await;
-        let reg = register(console, "/pkg/foo", "inv-1").await.unwrap();
+        let (_d, console, invocations) = test_console().await;
+        let reg = register(console, invocations, "/pkg/foo", "inv-1").await.unwrap();
         let url = reg.url();
         let token = reg.token().to_string();
         drop(reg);
@@ -375,9 +422,9 @@ mod tests {
 
     #[tokio::test]
     async fn two_registrations_stay_isolated() {
-        let (_d, console) = test_console().await;
-        let reg_a = register(console.clone(), "/pkg/a", "inv-a").await.unwrap();
-        let reg_b = register(console.clone(), "/pkg/b", "inv-b").await.unwrap();
+        let (_d, console, invocations) = test_console().await;
+        let reg_a = register(console.clone(), invocations.clone(), "/pkg/a", "inv-a").await.unwrap();
+        let reg_b = register(console.clone(), invocations, "/pkg/b", "inv-b").await.unwrap();
 
         let client = reqwest::Client::new();
         client.post(reg_a.url()).bearer_auth(reg_a.token()).json(&serde_json::json!({"message": "a"})).send().await.unwrap();
@@ -393,8 +440,8 @@ mod tests {
 
     #[tokio::test]
     async fn null_data_is_normalized_to_none() {
-        let (_d, console) = test_console().await;
-        let reg = register(console.clone(), "/pkg/foo", "inv-1").await.unwrap();
+        let (_d, console, invocations) = test_console().await;
+        let reg = register(console.clone(), invocations, "/pkg/foo", "inv-1").await.unwrap();
         let client = reqwest::Client::new();
         client
             .post(reg.url())
@@ -405,5 +452,48 @@ mod tests {
             .unwrap();
         let read = console.read("/pkg/foo", None, 10).await.unwrap();
         assert_eq!(read.entries[0].data, None);
+    }
+
+    #[tokio::test]
+    async fn cancelled_reflects_no_row_as_false() {
+        let (_d, console, invocations) = test_console().await;
+        // No invocation row was ever created for "inv-1" (mirrors a plain
+        // synchronous `exec`, which never calls `InvocationStore::create`) —
+        // must fail closed to `false`, not error.
+        let reg = register(console, invocations, "/pkg/foo", "inv-1").await.unwrap();
+        let client = reqwest::Client::new();
+        let resp = client.get(reg.control_url()).bearer_auth(reg.token()).send().await.unwrap();
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body, serde_json::json!({"cancelled": false}));
+    }
+
+    #[tokio::test]
+    async fn cancelled_reflects_a_requested_cancel() {
+        let (_d, console, invocations) = test_console().await;
+        invocations.create("inv-1", "/pkg/foo", 0).await.unwrap();
+        let reg = register(console, invocations.clone(), "/pkg/foo", "inv-1").await.unwrap();
+
+        let client = reqwest::Client::new();
+        let before = client.get(reg.control_url()).bearer_auth(reg.token()).send().await.unwrap();
+        assert_eq!(before.json::<serde_json::Value>().await.unwrap(), serde_json::json!({"cancelled": false}));
+
+        invocations.request_cancel("inv-1").await.unwrap();
+
+        let after = client.get(reg.control_url()).bearer_auth(reg.token()).send().await.unwrap();
+        assert_eq!(after.json::<serde_json::Value>().await.unwrap(), serde_json::json!({"cancelled": true}));
+    }
+
+    #[tokio::test]
+    async fn cancelled_endpoint_rejects_missing_and_unknown_tokens() {
+        let (_d, console, invocations) = test_console().await;
+        let reg = register(console, invocations, "/pkg/foo", "inv-1").await.unwrap();
+        let client = reqwest::Client::new();
+
+        let no_auth = client.get(reg.control_url()).send().await.unwrap();
+        assert_eq!(no_auth.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let bad_auth = client.get(reg.control_url()).bearer_auth("not-a-real-token").send().await.unwrap();
+        assert_eq!(bad_auth.status(), reqwest::StatusCode::UNAUTHORIZED);
     }
 }

@@ -13,10 +13,11 @@ use solx_surface::managers::{ActionManager, DocManager, FileStore, TypeManager};
 use solx_surface::query::{ListOptions, SearchQuery};
 use solx_server::state::AppState;
 
-async fn spawn_server() -> (tempfile::TempDir, String, String) {
+async fn spawn_server() -> (tempfile::TempDir, Arc<solx_config::ConfigService>, String, String) {
     let dir = tempfile::tempdir().unwrap();
     let app = solx_manager::App::build_local_in(dir.path()).await.unwrap();
-    let token = app.config.ensure_server_token().unwrap();
+    let cfg = app.config.clone();
+    let token = cfg.ensure_server_token().unwrap();
 
     let state = AppState { app, token: Arc::from(token.as_str()) };
     let router = solx_server::build_router(state);
@@ -27,12 +28,17 @@ async fn spawn_server() -> (tempfile::TempDir, String, String) {
         axum::serve(listener, router).await.unwrap();
     });
 
-    (dir, format!("http://{addr}"), token)
+    (dir, cfg, format!("http://{addr}"), token)
 }
 
 #[tokio::test]
 async fn types_docs_actions_files_round_trip_over_http() {
-    let (_dir, base_url, token) = spawn_server().await;
+    let (_dir, cfg, base_url, token) = spawn_server().await;
+    cfg.register_command(
+        "echo-42",
+        solx_config::CommandDef { command: "echo 42".into(), description: None, cwd: None },
+    )
+    .unwrap();
 
     let types = RemoteTypeManager::new(base_url.clone(), token.clone());
     let docs = RemoteDocManager::new(base_url.clone(), token.clone());
@@ -98,7 +104,7 @@ async fn types_docs_actions_files_round_trip_over_http() {
             "echo",
             ActionInput {
                 action_type: Some(ActionType::Command),
-                fn_name: Some("echo 42".into()),
+                fn_name: Some("echo-42".into()),
                 action_config: Some(json!({ "cwd": ".", "secrets": { "API_TOKEN": real_key } })),
                 ..Default::default()
             },
@@ -148,7 +154,7 @@ async fn types_docs_actions_files_round_trip_over_http() {
 
 #[tokio::test]
 async fn wrong_token_is_rejected() {
-    let (_dir, base_url, _token) = spawn_server().await;
+    let (_dir, _cfg, base_url, _token) = spawn_server().await;
     let types = RemoteTypeManager::new(base_url, "wrong-token");
     let err = types.list(ListOptions::default()).await.unwrap_err();
     // A 401 with no SolxError body falls back to SolxError::Other — still

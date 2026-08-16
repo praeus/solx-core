@@ -72,11 +72,13 @@ CREATE INDEX IF NOT EXISTS idx_console_entries_invocation \
     ON console_entries(action_ref, invocation_id, seq);
 ";
 
-/// Long-poll granularity for [`ConsoleStore::tail`].
-const TAIL_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Long-poll granularity for [`ConsoleStore::tail`]. `pub(crate)` so
+/// `crate::lib`'s `poll_invocation` can reuse the same cadence rather than
+/// defining a second set of long-poll constants.
+pub(crate) const TAIL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Ceiling on `tail`'s `wait_secs`, mirroring `oauth_await`'s timeout clamp —
 /// an internal action call should never block indefinitely.
-const MAX_TAIL_WAIT_SECS: u64 = 60;
+pub(crate) const MAX_TAIL_WAIT_SECS: u64 = 60;
 /// Evict at least this fraction of the cap at once, so a console pinned at
 /// its limit isn't paying for a `DELETE` on every single insert.
 const EVICT_BATCH_FRACTION: f64 = 0.1;
@@ -390,6 +392,22 @@ impl ConsoleStore {
         Ok(expired.len() as i64)
     }
 
+    /// Current `next_seq` for exactly `action_ref` — the seq that will be
+    /// assigned to the *next* entry written, or `1` if nothing has been
+    /// written yet (no row exists in `consoles` before the first `print`).
+    ///
+    /// Used by `LocalActionManager::start_invocation` to capture a detached
+    /// run's starting cursor. Deliberately an exact lookup through
+    /// [`Self::meta`] rather than [`Self::list`]'s prefix `LIKE` match,
+    /// which could return a *different* console's summary if another
+    /// action's ref happens to share `action_ref` as a literal string
+    /// prefix (e.g. `/pkg/foo` vs. `/pkg/foobar`).
+    pub async fn current_next_seq(&self, action_ref: &str) -> Result<i64> {
+        let conn = self.db.connect().await?;
+        let (_first_seq, next_seq, _dropped) = self.meta(&conn, action_ref).await?;
+        Ok(if next_seq == 0 { 1 } else { next_seq })
+    }
+
     /// `(first_seq, next_seq, dropped)` for `action_ref`, or all-zero if the
     /// console has never been written to.
     async fn meta(&self, conn: &Connection, action_ref: &str) -> Result<(i64, i64, i64)> {
@@ -596,6 +614,25 @@ mod tests {
         store.print("/a", "i", None, "info", "guest", Some("m".into()), None).await.unwrap();
         let removed = store.clear("/a", Some(1)).await.unwrap();
         assert_eq!(removed, 0);
+    }
+
+    #[tokio::test]
+    async fn current_next_seq_is_one_for_a_console_never_written_to() {
+        let (_d, store) = test_store().await;
+        assert_eq!(store.current_next_seq("/never/printed").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn current_next_seq_advances_with_writes_and_is_not_confused_by_a_shared_prefix() {
+        let (_d, store) = test_store().await;
+        store.print("/pkg/foo", "i", None, "info", "guest", Some("a".into()), None).await.unwrap();
+        store.print("/pkg/foo", "i", None, "info", "guest", Some("b".into()), None).await.unwrap();
+        // A sibling console whose ref happens to share "/pkg/foo" as a
+        // literal string prefix, written to more recently — a prefix-based
+        // `list()` lookup could mistake this for "/pkg/foo"'s own summary.
+        store.print("/pkg/foobar", "i", None, "info", "guest", Some("z".into()), None).await.unwrap();
+
+        assert_eq!(store.current_next_seq("/pkg/foo").await.unwrap(), 3);
     }
 
     #[tokio::test]

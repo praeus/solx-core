@@ -9,5 +9,12 @@ description = "Install/uninstall solx packages by running their install.solx scr
 solx-surface = { workspace = true }
 solx-config = { workspace = true }
 solx-scripts = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tempfile = "3"

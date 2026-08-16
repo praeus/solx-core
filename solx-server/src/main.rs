@@ -24,6 +24,13 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    // A tokio::spawn'd task (what `action_start` uses) isn't cancelled when
+    // an axum handler future drops, so detachment survives client
+    // disconnect here — unlike solx-cli, which exits the instant `exec`
+    // returns and would kill a just-started invocation before it could be
+    // polled. See `docs/async-actions-plan.md` §6.
+    solx_actions::set_long_lived_host(true);
+
     // Always local — must never proxy to itself, even if this appdata
     // dir's config happens to contain a stray `server_url`.
     let app = solx_manager::App::build_local().await.context("build local App")?;

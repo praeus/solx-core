@@ -35,6 +35,7 @@ curl_ok() {
 }
 
 JGET="$(to_native_path "$SCRIPT_DIR/jget.py")"
+MERGE_CONFIG="$(to_native_path "$SCRIPT_DIR/merge_config.py")"
 
 PY="${PY:-python3}"
 
@@ -59,6 +60,18 @@ fi
 
 solx() {
   "$SOLX_BIN" "$@"
+}
+
+# Command/Webhook actions are deny-by-default (docs/next-steps.md §1): a
+# Command's fn_name is a key into solx-config.json's command_actions
+# allowlist, and a Webhook's fn_name (URL) must match a prefix in
+# allowed_webhook_base_urls. solx-cli has no `config` subcommand yet, so
+# these write the file directly via merge_config.py.
+allow_command() {
+  "$PY" "$MERGE_CONFIG" allow-command "$1" "$2"
+}
+allow_webhook() {
+  "$PY" "$MERGE_CONFIG" allow-webhook "$1"
 }
 
 # ── Assertions ───────────────────────────────────────────────────────────────

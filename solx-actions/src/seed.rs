@@ -33,6 +33,17 @@ pub const BUILTIN_PATH: &str = "/builtin";
 /// `/builtin` catalogue grows.
 pub const CONSOLE_PATH: &str = "/builtin/console";
 
+/// Subdivision of the builtin namespace for asynchronous actions
+/// (`start`/`stop`/`poll`) — the second `/builtin/<area>/*`, after
+/// `CONSOLE_PATH`. See `docs/async-actions-plan.md`.
+pub const ACTION_PATH: &str = "/builtin/action";
+
+/// Subdivision of the builtin namespace for host-side streaming HTTP
+/// (`start`/`poll`/`close`) — for callers with no sockets or cross-call
+/// state of their own (chiefly WASM guests). See
+/// `solx-packages/solx-ollama/docs/streaming-design.md`.
+pub const HTTP_STREAM_PATH: &str = "/builtin/http_stream";
+
 /// Namespace for the hand-written JSON-schema types backing built-in
 /// actions' `param_type_ref` (see `solx-types/src/seed.rs`). Shared by every
 /// `/builtin/*` subpath — `param_type_ref` doesn't need to mirror the
@@ -136,6 +147,19 @@ pub fn builtin_actions() -> Vec<SeedAction> {
         a_at(CONSOLE_PATH, "tail", "console_tail", "Like read, but if nothing new is available yet, long-polls up to wait_secs before returning.", Some("ConsoleTailParams")),
         a_at(CONSOLE_PATH, "clear", "console_clear", "Drop entries from the front of an action's console, freeing retention.", Some("ConsoleClearParams")),
         a_at(CONSOLE_PATH, "list", "console_list", "List known consoles, most recently written first.", Some("ConsoleListParams")),
+        // Asynchronous actions — start/stop/poll as an async alternative to
+        // exec. See `crate::invocations` and `docs/async-actions-plan.md`.
+        a_at(ACTION_PATH, "start", "action_start", "Start an action detached: returns an invocation_id immediately while it runs in the background. Requires a long-lived host (solx-server/solx-mcp), not the CLI.", Some("ActionStartParams")),
+        a_at(ACTION_PATH, "stop", "action_stop", "Request that a detached invocation stop. Cooperative first (the running action notices and exits on its own); force-aborted after a grace period.", Some("ActionStopParams")),
+        a_at(ACTION_PATH, "poll", "action_poll", "Check a detached invocation's status, optionally long-polling until it finishes.", Some("ActionPollParams")),
+        a_at(ACTION_PATH, "cancelled", "action_cancelled", "Check whether the calling action's own invocation has had a stop requested. Requires an action caller.", Some("EmptyParams")),
+        // Host-side streaming HTTP — for callers with no sockets or
+        // cross-call state of their own. Unrestricted by caller, like the
+        // OAuth loopback and the action consoles: access is a bearer
+        // capability on the unguessable stream_id.
+        a_at(HTTP_STREAM_PATH, "start", "http_stream_start", "Issue a streaming HTTP request. Returns stream_id and status as soon as response headers arrive, without waiting for the body.", Some("HttpStreamStartParams")),
+        a_at(HTTP_STREAM_PATH, "poll", "http_stream_poll", "Drain newline-delimited JSON chunks buffered for a stream since cursor, optionally long-polling up to wait_secs for more.", Some("HttpStreamPollParams")),
+        a_at(HTTP_STREAM_PATH, "close", "http_stream_close", "Stop a stream's reader task and drop its buffer.", Some("HttpStreamCloseParams")),
     ]
 }
 

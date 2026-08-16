@@ -20,7 +20,7 @@ use solx_surface::entities::{DocLink, Document, DocumentInput, FileRef};
 use solx_surface::error::{Result, SolxError};
 use solx_surface::managers::{DocManager, TypeManager};
 use solx_surface::path::{full_ref, normalize_path, validate_name};
-use solx_surface::query::{ListOptions, Page, SearchQuery, SearchResults};
+use solx_surface::query::{ListOptions, ListSchema, Page, SearchQuery, SearchResults};
 use uuid::Uuid;
 
 use db::{map_db, Db};
@@ -309,6 +309,24 @@ fn parse_dt(s: &str) -> Result<DateTime<Utc>> {
 
 const SELECT: &str = "SELECT id,path,name,title,summary,type_ref,contents,author,pub_date,confidence,links,files,created_at,updated_at FROM documents";
 
+/// Columns this store exposes to `ListOptions`.
+///
+/// `contents` is deliberately absent: it holds the whole document body, and a
+/// LIKE filter over it would be both slow and a worse answer than the Tantivy
+/// index that `search` already provides.
+const LIST_SCHEMA: ListSchema<'static> = ListSchema {
+    filterable: &["name", "title", "summary", "author", "type_ref"],
+    sortable: &[
+        ("name", "path,name"),
+        ("path", "path,name"),
+        ("title", "title"),
+        ("created_at", "created_at"),
+        ("updated_at", "updated_at"),
+    ],
+    default_sort: "path,name",
+    date_column: Some("created_at"),
+};
+
 async fn get_row(conn: &Connection, path: &str, name: &str) -> Result<Option<Document>> {
     let mut rows = conn
         .query(
@@ -446,79 +464,12 @@ impl DocManager for LocalDocManager {
         let limit = opts.limit_or(DEFAULT_LIMIT);
         let offset = opts.offset_or_zero();
 
-        // Build WHERE clauses dynamically.
-        let mut conditions: Vec<String> = Vec::new();
-        let mut values: Vec<libsql::Value> = Vec::new();
-
-        // Path prefix filter.
-        if let Some(p) = &opts.path_prefix {
-            let p = normalize_path(p)?;
-            if p == "/" {
-                conditions.push(format!("path LIKE ?{}", values.len() + 1));
-                values.push(libsql::Value::from("/%".to_string()));
-            } else {
-                let i1 = values.len() + 1;
-                let i2 = values.len() + 2;
-                conditions.push(format!("(path=?{i1} OR path LIKE ?{i2})"));
-                values.push(libsql::Value::from(p.clone()));
-                values.push(libsql::Value::from(format!("{p}/%")));
-            }
-        }
-
-        // Date range filter.
-        if let Some(after) = &opts.date_after {
-            let idx = values.len() + 1;
-            conditions.push(format!("created_at >= ?{idx}"));
-            values.push(libsql::Value::from(after.clone()));
-        }
-        if let Some(before) = &opts.date_before {
-            let idx = values.len() + 1;
-            conditions.push(format!("created_at <= ?{idx}"));
-            values.push(libsql::Value::from(before.clone()));
-        }
-
-        // LIKE filter on a column.
-        if let (Some(field), Some(value)) = (&opts.filter_field, &opts.filter_value) {
-            if !value.is_empty() {
-                let col = match field.as_str() {
-                    "type_ref" => "type_ref",
-                    "author" => "author",
-                    "title" => "title",
-                    "summary" => "summary",
-                    "name" => "name",
-                    _ => "",
-                };
-                if !col.is_empty() {
-                    let idx = values.len() + 1;
-                    conditions.push(format!(
-                        "lower(COALESCE({col},'')) LIKE lower(?{idx})"
-                    ));
-                    values.push(libsql::Value::from(format!("%{value}%")));
-                }
-            }
-        }
-
-        let where_sql = if conditions.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", conditions.join(" AND "))
-        };
-
-        // Sort.
-        let sort_col = match opts.sort_by.as_deref() {
-            Some("name") | Some("path") => "path,name",
-            Some("created_at") => "created_at",
-            Some("updated_at") => "updated_at",
-            Some("title") => "title",
-            _ => "path,name",
-        };
-        let sort_dir = match opts.sort_order {
-            solx_surface::query::SortOrder::Desc => "DESC",
-            solx_surface::query::SortOrder::Asc => "ASC",
-        };
+        let q = opts.to_sql(LIST_SCHEMA)?;
+        let values: Vec<libsql::Value> =
+            q.binds.iter().cloned().map(libsql::Value::from).collect();
 
         // Total count.
-        let count_sql = format!("SELECT COUNT(*) FROM documents{where_sql}");
+        let count_sql = format!("SELECT COUNT(*) FROM documents{}", q.where_clause);
         let total = {
             let mut rows = conn
                 .query(&count_sql, values.clone())
@@ -533,7 +484,8 @@ impl DocManager for LocalDocManager {
 
         // Paginated query.
         let sql = format!(
-            "{SELECT}{where_sql} ORDER BY {sort_col} {sort_dir} LIMIT {limit} OFFSET {offset}"
+            "{SELECT}{}{} LIMIT {limit} OFFSET {offset}",
+            q.where_clause, q.order_clause
         );
         let mut rows = conn.query(&sql, values).await.map_err(map_db)?;
         let mut items = Vec::new();

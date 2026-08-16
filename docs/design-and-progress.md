@@ -14,6 +14,9 @@ Companion documents:
   events sketched as future work. **Design discussion, not implemented.**
 - [oauth-integration.md](oauth-integration.md)
 - [future-security-enhancements.md](future-security-enhancements.md)
+- [next-steps.md](next-steps.md) — cross-repo roadmap (solx-core/solx-web/
+  solx-js/Pi): the command/webhook allowlist, MCP Resources/Prompts, the
+  solx-web port, and the future Pi extension.
 
 ---
 
@@ -329,12 +332,12 @@ Entities: `doc`, `action`, `type`, `file`.
 
 | Crate | Highlights | Tests |
 |-------|-----------|-------|
-| `solx-surface` | DTOs, error, wire types, path helpers, manager traits, `Solx` facade | path normalize / full_ref / split_ref |
+| `solx-surface` | DTOs, error, wire types, path helpers, manager traits, `Solx` facade, shared `ListOptions` SQL rendering (`ListSchema`/`to_sql`) | path normalize / full_ref / split_ref, list SQL rendering incl. identifier whitelisting |
 | `solx-config` | cross-process RMW, mtime reload, package registry | unknown-field preservation, cross-instance reload, registry |
 | `solx-files` | put/get/delete/list, traversal rejection, conventional paths | roundtrip, traversal rejected |
-| `solx-types` | own DB, schema validation + enrichment, seed incl. `BlogPostWithComments` + `/builtin/types/*` param schemas | seed, save/get/validate, list+delete, enrich |
+| `solx-types` | own DB, schema validation + enrichment, seed incl. `BlogPostWithComments` + `/builtin/types/*` param schemas; list filter/sort via `ListSchema` | seed, save/get/validate, list+delete, enrich, list filter/sort/pagination |
 | `solx-docs` | own DB, cross-DB type validation, Tantivy full-text + path facet | save/get/list/search/delete, invalid-contents rejection |
-| `solx-actions` | own DB, `Command`/`Webhook`/`Internal`/`Wasm` execution; the entire `/builtin` catalogue (30 actions) is native `Internal` dispatch | CRUD, command exec, internal dispatch (entity CRUD/search/files/env/secrets/OAuth), wasm host trait impls |
+| `solx-actions` | own DB, `Command`/`Webhook`/`Internal`/`Wasm` execution; the entire `/builtin` catalogue (30 actions) is native `Internal` dispatch; list filter/sort via `ListSchema` (`action_config` deliberately not filterable) | CRUD, command exec, internal dispatch (entity CRUD/search/files/env/secrets/OAuth), wasm host trait impls, list filter/sort |
 | `solx-scripts` | pipeline language over `CommandRunner` | assign+substitute, quote-aware tokenize |
 | `solx-packages` | install/uninstall via script runner + config registry | (exercised via CLI) |
 | `solx-manager` | implements `Solx`; shared manager wiring for `solx-cli`, `solx-mcp`, and `solx-server`; builds local or `solx-client` remote impls per config | (exercised via all three consumers' tests) |
@@ -370,14 +373,22 @@ OAuth actions end-to-end against a real compiled binary.
 4. ~~HTTP client/server transport~~ — done (`solx-server` + `solx-client`,
    axum/reqwest); `solx-manager` picks local vs remote impls from
    `server_url`/`SOLX_SERVER_URL` per process.
-5. MCP Resources/Prompts (e.g. `solx://doc/{path}/{name}` URI templates) for
+5. ~~Secrets masking in `action_config`~~ — done (`solx-actions/src/mask.rs`).
+   `mask_action_config` redacts `secrets` and non-metadata `auth` fields on
+   every read (`get`/`list`); `unmask_merge` restores real values when a
+   caller echoes back the `"***"` sentinel on write, so a `get`-edit-`post`
+   round trip can't clobber credentials it was never shown. Execution always
+   reads through `get_unmasked`, so dispatch still sees real values.
+6. MCP Resources/Prompts (e.g. `solx://doc/{path}/{name}` URI templates) for
    GUI/context-attachment MCP clients — `solx-mcp` is tools-only today.
-6. Real config-level allowlists for `Command`/`Webhook` actions — `exec.rs`
-   currently runs `fn_name` directly with no allowlist check. Deliberately
-   deferred rather than designed now, to avoid adding permission-system
-   complexity while solx-core's core surface is still being built out;
-   everything running through it today is trusted by construction
-   ("saved to the DB = trusted"). Recorded here so the gap isn't lost:
+7. ~~Real config-level allowlists for `Command`/`Webhook` actions~~ — done.
+   `command_actions` (key-indirection, ported from old `sol`) and
+   `allowed_webhook_base_urls` (prefix allowlist) in `solx-config`,
+   deny-by-default (an unregistered key or unmatched URL is refused, even
+   with the allowlist entirely unset — stricter than old `sol`'s
+   allow-all-when-unconfigured). See [next-steps.md](next-steps.md) §1 for
+   the full design and what it broke/fixed in the test suite. The rest of
+   this hardening area is still open:
    - **Package signing and verification at install time**, so
      `install-package` can refuse a package whose signature doesn't check
      out rather than trusting any local directory unconditionally.
@@ -388,9 +399,6 @@ OAuth actions end-to-end against a real compiled binary.
    - **File-operation sandboxing to the files directory** — already true
      today (`solx-files` rejects path traversal / absolute paths); keep this
      true as the rest of this hardening is built out.
-   - **Secrets masking in `action_config`** — action configs can embed
-     credentials; these should be redacted when read back by anything other
-     than the action that owns them.
 
 ### Known gotchas (found integrating `solx-omniparse`/`solx-quickjs` from
 `solx-packages`, verified against real installs/builds/execs, not just code

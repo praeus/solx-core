@@ -578,8 +578,156 @@ fn builtin_action_param_types() -> Vec<SeedType> {
             }),
             groups: vec!["builtin-params"],
         },
+        // Asynchronous actions — see `solx-actions::invocations` and
+        // `docs/async-actions-plan.md`.
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "ActionStartParams",
+            description: "Start an action detached: returns an invocation_id immediately while it runs in the background.",
+            schema: json!({
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                    "path": { "type": "string", "description": "Directory-style path of the action to start, e.g. /research/ai. Defaults to the root '/'." },
+                    "name": { "type": "string", "description": "Single path segment identifying the action to start." },
+                    "params": { "description": "Parameters passed to the started action, exactly as exec's params. Defaults to {}." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "ActionStopParams",
+            description: "Request that a detached invocation stop.",
+            schema: json!({
+                "type": "object",
+                "required": ["invocation_id"],
+                "properties": {
+                    "invocation_id": { "type": "string" },
+                    "force": { "type": "boolean", "description": "Skip the cooperative grace period and abort immediately. Defaults to false." },
+                    "grace_secs": { "type": "integer", "description": "Overrides the configured stop_grace_secs for this call." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "ActionPollParams",
+            description: "Check a detached invocation's status, optionally long-polling until it finishes.",
+            schema: json!({
+                "type": "object",
+                "required": ["invocation_id"],
+                "properties": {
+                    "invocation_id": { "type": "string" },
+                    "wait_secs": { "type": "integer", "description": "Long-poll ceiling, capped at 60. Omit to return the current status immediately." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "HttpStreamStartParams",
+            description: "Issue a streaming HTTP request. Returns as soon as response headers arrive; the body is read into a cursor-addressable buffer by http_stream/poll.",
+            schema: json!({
+                "type": "object",
+                "required": ["url"],
+                "properties": {
+                    "url": { "type": "string" },
+                    "method": { "type": "string", "description": "HTTP method (GET, POST, PUT, DELETE, PATCH, HEAD, ...). Defaults to GET." },
+                    "headers": { "type": "object", "description": "Map of header name -> string value.", "additionalProperties": { "type": "string" } },
+                    "body": { "type": "string", "description": "Request body, encoded per `body_encoding` (ignored by methods that have no body)." },
+                    "body_encoding": { "type": "string", "enum": ["utf8", "base64"], "description": "Encoding of `body`. Defaults to utf8." },
+                    "timeout_secs": { "type": "integer", "description": "Connect timeout only - a stream has no overall timeout. Defaults to 30." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "HttpStreamPollParams",
+            description: "Drain newline-delimited JSON chunks buffered for a stream since cursor, optionally long-polling for more.",
+            schema: json!({
+                "type": "object",
+                "required": ["stream_id"],
+                "properties": {
+                    "stream_id": { "type": "string" },
+                    "cursor": { "type": "integer", "description": "Pass the previous call's next_cursor to continue from there. Omit to read from the start." },
+                    "wait_secs": { "type": "integer", "description": "Long-poll ceiling, capped at 60. Omit to return immediately (possibly empty) if nothing new." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "HttpStreamCloseParams",
+            description: "Stop a stream's reader task and drop its buffer.",
+            schema: json!({
+                "type": "object",
+                "required": ["stream_id"],
+                "properties": {
+                    "stream_id": { "type": "string" },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
     ]
 }
+
+/// Client-side preview template for `BlogPostWithComments` (consumed by
+/// `DocumentPreview.tsx` in solx-web via `x-sol-template`). Renders the
+/// extracted `paragraphs` as `<p>` tags — the rich-text `content` field is
+/// intentionally not rendered here, since it duplicates `paragraphs`/`text`
+/// and is far less readable as a preview. Also renders the `icon` (as an
+/// `<img>` resolved through the files store) and the `comments` tree
+/// (recursively, via a self-referencing helper declared inline in the EJS
+/// scriptlet).
+const BLOG_POST_WITH_COMMENTS_TEMPLATE: &str = r#"<div class="doc-preview blog-preview">
+  <% function iconRelPath(icon) {
+    if (typeof icon === "string") return icon;
+    if (icon && typeof icon === "object") {
+      if (typeof icon.relPath === "string" && icon.relPath) return icon.relPath;
+      if (typeof icon.name === "string" && icon.name) return "files/docs/shared/" + icon.name;
+    }
+    return "";
+  } %>
+  <% const iconPath = iconRelPath(contents.icon); %>
+  <% if (iconPath) { %>
+    <img class="blog-preview__icon" src="/api/files/raw?relPath=<%- encodeURIComponent(iconPath) %>" alt="" />
+  <% } %>
+  <h1><%= document.title || document.name %></h1>
+  <p class="doc-preview__meta">
+    <code><%= document.path %>/<%= document.name %></code>
+  </p>
+  <% if (document.summary) { %><p class="doc-preview__summary"><%= document.summary %></p><% } %>
+
+  <% const paragraphs = (contents.paragraphs && contents.paragraphs.length)
+       ? contents.paragraphs
+       : (contents.text ? contents.text.split(/\n\s*\n/).filter(Boolean) : []); %>
+  <% paragraphs.forEach(function (para) { %>
+    <p><%= para %></p>
+  <% }); %>
+
+  <% if (contents.comments && contents.comments.length) { %>
+    <h2>Comments (<%= contents.comments.length %>)</h2>
+    <ul class="blog-preview__comments">
+      <% function renderComment(c) { %>
+        <li class="blog-preview__comment">
+          <div class="blog-preview__comment-meta">
+            <strong><%= c.author || "Anonymous" %></strong>
+            <% if (c.date) { %><span class="blog-preview__comment-date"><%= c.date %></span><% } %>
+          </div>
+          <p class="blog-preview__comment-text"><%= c.text %></p>
+          <% if (c.replies && c.replies.length) { %>
+            <ul class="blog-preview__comment-replies">
+              <% c.replies.forEach(function (reply) { renderComment(reply); }); %>
+            </ul>
+          <% } %>
+        </li>
+      <% } %>
+      <% contents.comments.forEach(function (c) { renderComment(c); }); %>
+    </ul>
+  <% } %>
+</div>"#;
 
 /// Hand-written schema for `BlogPostWithComments`, mirroring the shape of the
 /// old `sol-core` extraction type (icon/content/comments/text/paragraphs with a
@@ -598,6 +746,7 @@ fn blog_post_with_comments_schema() -> Value {
                 "items": { "$ref": "#/$defs/BlogComment" }
             }
         },
+        "x-sol-template": BLOG_POST_WITH_COMMENTS_TEMPLATE,
         "$defs": {
             "BlogComment": {
                 "type": "object",

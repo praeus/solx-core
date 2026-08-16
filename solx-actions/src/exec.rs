@@ -1,14 +1,23 @@
 //! Action execution backends.
 //!
-//! * **Command** — `fn_name` is the literal shell command to run; any fixed
-//!   settings (e.g. `cwd`) come from the action's own `action_config`.
-//! * **Webhook** — `fn_name` is the literal URL to POST to; auth/headers come
-//!   from `action_config`. OAuth token exchange (bearer, refresh_token,
-//!   service_account, authorization_code) is resolved via
-//!   [`crate::auth::resolve_auth`].
+//! * **Command** — `fn_name` is never the literal shell command. It's a key
+//!   resolved against `ConfigService::command_actions` (the
+//!   `command_actions` allowlist in `solx-config.json`); the matching
+//!   [`solx_config::CommandDef`]'s `command` field is what actually runs.
+//!   **Deny-by-default**: an unregistered key is a hard error, not a
+//!   fallback to running the key text itself.
+//! * **Webhook** — `fn_name` is the literal URL to POST to, but the URL must
+//!   start with one of the prefixes in `ConfigService::allowed_webhook_base_urls`
+//!   (also `solx-config.json`) or dispatch is refused before any network
+//!   call. Auth/headers come from `action_config`; OAuth token exchange
+//!   (bearer, refresh_token, service_account, authorization_code) is
+//!   resolved via [`crate::auth::resolve_auth`].
 //!
-//! Actions are trusted by virtue of being `post`ed into the actions
-//! database — there is no separate config-level allowlist for either kind.
+//! Both allowlists are deny-by-default: an unset or empty allowlist rejects
+//! every Command/Webhook action, not the old behavior of permitting
+//! everything until configured. See `docs/next-steps.md` §1 for why (ported
+//! from old `sol`'s `command_actions` key-indirection and
+//! `allowed_webhook_base_urls` prefix allowlist, with the default flipped).
 //!
 //! `Wasm`-typed actions are executed by [`crate::wasm`], not here —
 //! see [`crate::LocalActionManager::exec`]'s `Wasm` arm.
@@ -22,9 +31,9 @@ use solx_config::ConfigService;
 use solx_surface::error::{Result, SolxError};
 use solx_surface::managers::ActionManager;
 use tokio::io::AsyncWriteExt;
-use uuid::Uuid;
 
 use crate::console::ConsoleStore;
+use crate::invocations::InvocationStore;
 use crate::loopback::console as console_loopback;
 
 /// Wall-clock ceiling on a command, overridable per action via
@@ -43,9 +52,11 @@ fn log_dir_slug(action_ref: &str) -> String {
         .collect()
 }
 
-/// Run a `Command` action. `fn_name` is the literal command to execute.
-/// Params are passed as JSON on stdin only (no env var) — no payload size
-/// limit, and it doesn't leak into process listings.
+/// Run a `Command` action. `fn_name` is a key resolved against the
+/// `command_actions` allowlist (see the module doc); the matching
+/// `CommandDef.command` is what actually executes. Params are passed as
+/// JSON on stdin only (no env var) — no payload size limit, and it doesn't
+/// leak into process listings.
 ///
 /// Fully async: the child is spawned with `tokio::process`, so an action
 /// that takes minutes parks no thread. This used to be a synchronous
@@ -53,22 +64,50 @@ fn log_dir_slug(action_ref: &str) -> String {
 /// running command held an async *worker* thread — only `num_cpus` of
 /// those exist, so a handful of concurrent commands could wedge the whole
 /// process, HTTP routes included.
-
+///
+/// `invocation_id` is minted by the caller (`exec_as_with`), not here — a
+/// detached `action_start` run needs the id fixed *before* execution begins
+/// so `action_stop`/`action_poll` have something to address.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_command(
     cfg: &ConfigService,
     console: Arc<ConsoleStore>,
+    invocations: Arc<InvocationStore>,
     action_ref: &str,
+    invocation_id: &str,
     fn_name: &str,
     action_config: &Option<Value>,
     params: &Value,
     timeout_secs: Option<u64>,
 ) -> Result<Value> {
-    let cwd = action_config
-        .as_ref()
-        .and_then(|c| c.get("cwd"))
-        .and_then(|v| v.as_str())
-        .map(String::from)
+    // `fn_name` is a key, not a command — resolve it against the
+    // `command_actions` allowlist before anything else runs. Deny-by-default:
+    // an unregistered key (including every key when the allowlist itself is
+    // unset) is a hard error naming the fix, not a fallback to running the
+    // key text as a shell command.
+    let def = cfg.command_actions().remove(fn_name).ok_or_else(|| {
+        SolxError::Exec(format!(
+            "command key '{fn_name}' is not registered in solx-config.json's \
+             'command_actions' allowlist; add an entry there to allow this \
+             command to run"
+        ))
+    })?;
+
+    // The allowlist's own `cwd` wins over the action's `action_config.cwd`
+    // when both are set — the allowlist author decides where an approved
+    // command runs, not the (potentially untrusted) action that invokes it.
+    let cwd = def
+        .cwd
+        .clone()
+        .or_else(|| {
+            action_config
+                .as_ref()
+                .and_then(|c| c.get("cwd"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
         .unwrap_or_else(|| cfg.appdata().to_string_lossy().into_owned());
+    let command = def.command.as_str();
 
     let params_json = serde_json::to_string(params)?;
     let (shell, flag) = if cfg!(windows) { ("cmd", "/C") } else { ("sh", "-c") };
@@ -86,16 +125,15 @@ pub async fn run_command(
     // own console over loopback HTTP — see `crate::loopback::console` for
     // why this replaced reading the child's stderr. Best-effort: if the
     // loopback can't start, the command still runs, it just has no console
-    // access for this run. `registration` must stay bound (not `_`) for the
-    // rest of this function — dropping it deregisters the token, and we
-    // want that to happen automatically on every exit path below, not just
-    // the success path.
-    let invocation_id = Uuid::new_v4().to_string();
-    let registration = console_loopback::register(console, action_ref, &invocation_id).await;
+    // (or cancellation-check) access for this run. `registration` must stay
+    // bound (not `_`) for the rest of this function — dropping it
+    // deregisters the token, and we want that to happen automatically on
+    // every exit path below, not just the success path.
+    let registration = console_loopback::register(console, invocations, action_ref, invocation_id).await;
 
     let mut cmd = tokio::process::Command::new(shell);
     cmd.arg(flag)
-        .arg(fn_name)
+        .arg(command)
         .current_dir(&cwd)
         .env("SOL_LOG_DIR", &log_dir)
         .stdin(Stdio::piped())
@@ -113,9 +151,34 @@ pub async fn run_command(
         // would mean putting each command in its own job/process group.
         .kill_on_drop(true);
     if let Some(reg) = &registration {
-        cmd.env("SOLX_CONSOLE_URL", reg.url()).env("SOLX_CONSOLE_TOKEN", reg.token());
+        cmd.env("SOLX_CONSOLE_URL", reg.url())
+            .env("SOLX_CONSOLE_TOKEN", reg.token())
+            .env("SOLX_CONTROL_URL", reg.control_url());
     }
-    let mut child = cmd.spawn().map_err(|e| SolxError::Exec(format!("spawn '{fn_name}': {e}")))?;
+
+    // Forward any `action_config.env` map to the spawned child, so
+    // packages like `solx-media` that read SOLX_SERVER_URL/SOLX_SERVER_TOKEN
+    // from their own env don't fail with "config error: ... is required".
+    // String values only — non-string entries are skipped with a warning
+    // rather than silently dropped, since silently dropping a secret
+    // would be the worse failure mode.
+    if let Some(cfg) = action_config {
+        if let Some(env) = cfg.get("env").and_then(|v| v.as_object()) {
+            for (k, v) in env {
+                match v.as_str() {
+                    Some(s) => { cmd.env(k, s); }
+                    None => tracing::warn!(
+                        action_ref = %action_ref,
+                        env_key = %k,
+                        "action_config.env entry is not a string; skipping",
+                    ),
+                }
+            }
+        }
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| SolxError::Exec(format!("spawn command key '{fn_name}' ('{command}'): {e}")))?;
 
     // Feed stdin *concurrently* with draining stdout/stderr. Writing it all
     // up front deadlocks whenever the payload exceeds the pipe buffer
@@ -141,7 +204,7 @@ pub async fn run_command(
         Ok(res) => res.map_err(|e| SolxError::Exec(e.to_string()))?,
         Err(_) => {
             return Err(SolxError::Exec(format!(
-                "command '{fn_name}' timed out after {}s",
+                "command key '{fn_name}' timed out after {}s",
                 timeout.as_secs()
             )))
         }
@@ -151,7 +214,7 @@ pub async fn run_command(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(SolxError::Exec(format!(
-            "command '{fn_name}' failed ({}): {}",
+            "command key '{fn_name}' failed ({}): {}",
             output.status,
             stderr.trim()
         )));
@@ -174,16 +237,30 @@ pub async fn run_command(
 /// `docs/console-implementation-plan.md` §4).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_webhook(
+    cfg: &ConfigService,
     actions: &dyn ActionManager,
     console: Arc<ConsoleStore>,
     action_ref: &str,
+    invocation_id: &str,
     path: &str,
     name: &str,
     url: &str,
     action_config: &Option<Value>,
     params: &Value,
 ) -> Result<Value> {
-    let invocation_id = Uuid::new_v4().to_string();
+    // Deny-by-default, checked before anything else — including the console
+    // log line below, so a denied webhook leaves no trace of the attempt
+    // beyond the returned error. The URL must start with one of the
+    // configured prefixes; an unset or empty allowlist rejects every URL.
+    let allowlist = cfg.allowed_webhook_base_urls();
+    if !allowlist.iter().any(|base| url.starts_with(base.as_str())) {
+        return Err(SolxError::Exec(format!(
+            "webhook URL '{url}' does not match any prefix in solx-config.json's \
+             'allowed_webhook_base_urls' allowlist; add a matching prefix there to \
+             allow this webhook to run"
+        )));
+    }
+
     let started = std::time::Instant::now();
     log_webhook(&console, action_ref, &invocation_id, "info", format!("POST {url}")).await;
 

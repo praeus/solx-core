@@ -22,7 +22,7 @@ use fs2::FileExt;
 use serde_json::{Map, Value};
 use solx_surface::error::{Result, SolxError};
 
-pub use types::{InstalledPackage, SolxConfig};
+pub use types::{CommandDef, InstalledPackage, SolxConfig};
 
 const CONFIG_FILE: &str = "solx-config.json";
 
@@ -277,6 +277,52 @@ impl ConfigService {
         self.appdata.join("logs")
     }
 
+    /// Wall-clock ceiling for a detached invocation with no
+    /// `action_config.timeout_secs` of its own. Defaults to 86400 (24h)
+    /// when unset or non-positive.
+    pub fn background_timeout_secs(&self) -> u64 {
+        match self.snapshot().background_timeout_secs {
+            Some(n) if n > 0 => n,
+            _ => 86400,
+        }
+    }
+
+    /// Grace period `action_stop` waits for cooperative exit before
+    /// force-aborting. Defaults to 10 when unset or non-positive.
+    pub fn stop_grace_secs(&self) -> u64 {
+        match self.snapshot().stop_grace_secs {
+            Some(n) if n > 0 => n,
+            _ => 10,
+        }
+    }
+
+    /// TTL (in days) before a terminal invocation row is swept away.
+    /// Defaults to 7 when unset or non-positive.
+    pub fn invocation_ttl_days(&self) -> i64 {
+        match self.snapshot().invocation_ttl_days {
+            Some(n) if n > 0 => n,
+            _ => 7,
+        }
+    }
+
+    /// Idle TTL (in seconds) before an unpolled http_stream self-terminates.
+    /// Defaults to 120 when unset or non-positive.
+    pub fn http_stream_idle_ttl_secs(&self) -> u64 {
+        match self.snapshot().http_stream_idle_ttl_secs {
+            Some(n) if n > 0 => n,
+            _ => 120,
+        }
+    }
+
+    /// Max bytes buffered per http_stream before oldest chunks are dropped.
+    /// Defaults to 8 MiB when unset or non-positive.
+    pub fn http_stream_max_buffer_bytes(&self) -> u64 {
+        match self.snapshot().http_stream_max_buffer_bytes {
+            Some(n) if n > 0 => n,
+            _ => 8 * 1024 * 1024,
+        }
+    }
+
     // ── Package registry ──────────────────────────────────────────────────────
 
     pub fn list_packages(&self) -> Vec<InstalledPackage> {
@@ -330,6 +376,83 @@ impl ConfigService {
                 .or_default()
                 .insert(key.to_string(), value.to_string());
             obj.insert("env_vars".into(), serde_json::to_value(all)?);
+            Ok(())
+        })
+    }
+
+    // ── Command / Webhook allowlists ─────────────────────────────────────────
+
+    /// The full `command_actions` allowlist: opaque key -> command
+    /// definition. A `Command` action's `fn_name` is looked up here, never
+    /// run as a literal shell string. Deny-by-default: unset or empty means
+    /// no key resolves.
+    pub fn command_actions(&self) -> HashMap<String, CommandDef> {
+        self.snapshot().command_actions.unwrap_or_default()
+    }
+
+    /// Register (or replace) a single `command_actions` entry.
+    pub fn register_command(&self, key: &str, def: CommandDef) -> Result<()> {
+        self.mutate(|obj| {
+            let mut map: HashMap<String, CommandDef> = obj
+                .get("command_actions")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            map.insert(key.to_string(), def);
+            obj.insert("command_actions".into(), serde_json::to_value(map)?);
+            Ok(())
+        })
+    }
+
+    /// URL prefixes a `Webhook` action's `fn_name` must start with.
+    /// Deny-by-default: unset or empty means no URL is permitted.
+    pub fn allowed_webhook_base_urls(&self) -> Vec<String> {
+        self.snapshot().allowed_webhook_base_urls.unwrap_or_default()
+    }
+
+    /// Replace the webhook base-URL allowlist wholesale.
+    pub fn set_allowed_webhook_base_urls(&self, list: Vec<String>) -> Result<()> {
+        self.set("allowed_webhook_base_urls", serde_json::to_value(list)?)
+    }
+
+    /// Remove a single `command_actions` entry. No-op if `key` isn't present.
+    /// Used by `solx-packages::uninstall_package` to revoke exactly what a
+    /// package's manifest granted (see `docs/next-steps.md` §1).
+    pub fn deregister_command(&self, key: &str) -> Result<()> {
+        self.mutate(|obj| {
+            let mut map: HashMap<String, CommandDef> = obj
+                .get("command_actions")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            map.remove(key);
+            obj.insert("command_actions".into(), serde_json::to_value(map)?);
+            Ok(())
+        })
+    }
+
+    /// Append `prefix` to the webhook allowlist if not already present.
+    pub fn add_allowed_webhook_base_url(&self, prefix: &str) -> Result<()> {
+        self.mutate(|obj| {
+            let mut list: Vec<String> = obj
+                .get("allowed_webhook_base_urls")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            if !list.iter().any(|p| p == prefix) {
+                list.push(prefix.to_string());
+            }
+            obj.insert("allowed_webhook_base_urls".into(), serde_json::to_value(list)?);
+            Ok(())
+        })
+    }
+
+    /// Remove a single webhook base-URL prefix. No-op if not present.
+    pub fn remove_allowed_webhook_base_url(&self, prefix: &str) -> Result<()> {
+        self.mutate(|obj| {
+            let mut list: Vec<String> = obj
+                .get("allowed_webhook_base_urls")
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_default();
+            list.retain(|p| p != prefix);
+            obj.insert("allowed_webhook_base_urls".into(), serde_json::to_value(list)?);
             Ok(())
         })
     }
@@ -440,11 +563,39 @@ mod tests {
             version: "1.0".into(),
             path: "/p".into(),
             installed_at: "now".into(),
+            granted_commands: vec![],
+            granted_webhook_prefixes: vec![],
         })
         .unwrap();
         assert_eq!(cfg.list_packages().len(), 1);
         cfg.unregister_package("pkg").unwrap();
         assert!(cfg.list_packages().is_empty());
+    }
+
+    #[test]
+    fn command_and_webhook_allowlists_default_empty_and_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ConfigService::open_in(dir.path()).unwrap();
+
+        // Deny-by-default: nothing registered yet.
+        assert!(cfg.command_actions().is_empty());
+        assert!(cfg.allowed_webhook_base_urls().is_empty());
+
+        cfg.register_command(
+            "compress-pdf",
+            CommandDef {
+                command: "gs -o out.pdf in.pdf".into(),
+                description: Some("Compress a PDF".into()),
+                cwd: None,
+            },
+        )
+        .unwrap();
+        let map = cfg.command_actions();
+        assert_eq!(map["compress-pdf"].command, "gs -o out.pdf in.pdf");
+
+        cfg.set_allowed_webhook_base_urls(vec!["https://hooks.example.com".into()])
+            .unwrap();
+        assert_eq!(cfg.allowed_webhook_base_urls(), vec!["https://hooks.example.com".to_string()]);
     }
 
     #[test]

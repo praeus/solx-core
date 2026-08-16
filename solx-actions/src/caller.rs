@@ -66,6 +66,21 @@ impl Caller {
         }
     }
 
+    /// Like [`Self::from_action`], but stamped with a caller-chosen
+    /// `invocation_id` rather than a freshly minted one — used by a
+    /// detached `action_start` run, where the id has to be known *before*
+    /// execution begins so `action_stop`/`action_poll` have something to
+    /// address.
+    pub fn with_invocation(
+        action_ref: impl Into<String>,
+        action_config: Option<&Value>,
+        invocation_id: impl Into<String>,
+    ) -> Self {
+        let mut caller = Self::from_action(action_ref, action_config);
+        caller.invocation_id = invocation_id.into();
+        caller
+    }
+
     /// Full reference of the calling action, e.g. `/pkg/summarize`.
     pub fn action_ref(&self) -> &str {
         &self.action_ref
@@ -117,6 +132,13 @@ mod tests {
         let c = Caller::from_action("/a/b", Some(&odd));
         assert_eq!(c.secret_key("x"), None);
         assert_eq!(c.secret_key("y"), Some("b2s="));
+    }
+
+    #[test]
+    fn with_invocation_uses_the_supplied_id_not_a_fresh_one() {
+        let c = Caller::with_invocation("/pkg/foo", None, "fixed-id");
+        assert_eq!(c.invocation_id(), "fixed-id");
+        assert_eq!(c.action_ref(), "/pkg/foo");
     }
 
     #[test]

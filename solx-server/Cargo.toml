@@ -13,6 +13,9 @@ path = "src/main.rs"
 solx-manager = { workspace = true }
 solx-surface = { workspace = true }
 solx-config = { workspace = true }
+# Only for `set_long_lived_host` — everything else about action execution
+# stays behind `solx-manager`'s `App`/`Solx` facade.
+solx-actions = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }

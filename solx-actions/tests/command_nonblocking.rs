@@ -28,7 +28,7 @@ fn ignores_stdin() -> &'static str {
     "echo done"
 }
 
-async fn setup() -> (tempfile::TempDir, Arc<LocalActionManager>) {
+async fn setup() -> (tempfile::TempDir, Arc<solx_config::ConfigService>, Arc<LocalActionManager>) {
     let dir = tempfile::tempdir().unwrap();
     let cfg = Arc::new(solx_config::ConfigService::open_in(dir.path()).unwrap());
     let types: Arc<dyn TypeManager> = Arc::new(
@@ -48,27 +48,37 @@ async fn setup() -> (tempfile::TempDir, Arc<LocalActionManager>) {
     let files: Arc<dyn FileStore> =
         Arc::new(solx_files::LocalFileStore::new(dir.path().join("files")));
     let actions = Arc::new(
-        LocalActionManager::open(&dir.path().join("actions.db"), cfg, types, docs, files)
+        LocalActionManager::open(&dir.path().join("actions.db"), cfg.clone(), types, docs, files)
             .await
             .unwrap(),
     );
     actions.set_self_ref(Arc::downgrade(&actions));
-    (dir, actions)
+    (dir, cfg, actions)
 }
 
+/// Registers `cmd` under the `command_actions` allowlist keyed by `name`
+/// (unique per test / tempdir, so no collision risk), then saves a Command
+/// action whose `fn_name` is that key — `fn_name` is never a literal shell
+/// string once the allowlist is in effect.
 async fn save_cmd(
     actions: &LocalActionManager,
+    cfg: &solx_config::ConfigService,
     name: &str,
     cmd: &str,
     config: Option<serde_json::Value>,
 ) {
+    cfg.register_command(
+        name,
+        solx_config::CommandDef { command: cmd.into(), description: None, cwd: None },
+    )
+    .unwrap();
     actions
         .save(
             "/t",
             name,
             ActionInput {
                 action_type: Some(ActionType::Command),
-                fn_name: Some(cmd.into()),
+                fn_name: Some(name.into()),
                 action_config: config,
                 ..Default::default()
             },
@@ -82,8 +92,8 @@ async fn save_cmd(
 /// finish in a shade over 2s.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn concurrent_commands_do_not_serialize_on_the_worker() {
-    let (_d, actions) = setup().await;
-    save_cmd(&actions, "slow", sleep_2s(), None).await;
+    let (_d, cfg, actions) = setup().await;
+    save_cmd(&actions, &cfg, "slow", sleep_2s(), None).await;
 
     let start = Instant::now();
     let mut tasks = Vec::new();
@@ -106,8 +116,8 @@ async fn concurrent_commands_do_not_serialize_on_the_worker() {
 /// symptom of the old inline `wait_with_output()`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn the_runtime_stays_responsive_during_a_command() {
-    let (_d, actions) = setup().await;
-    save_cmd(&actions, "slow", sleep_2s(), None).await;
+    let (_d, cfg, actions) = setup().await;
+    save_cmd(&actions, &cfg, "slow", sleep_2s(), None).await;
 
     let a = actions.clone();
     let running = tokio::spawn(async move { a.exec("/t", "slow", json!({})).await });
@@ -127,8 +137,8 @@ async fn the_runtime_stays_responsive_during_a_command() {
 /// pipe is tolerated.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_large_stdin_payload_does_not_deadlock() {
-    let (_d, actions) = setup().await;
-    save_cmd(&actions, "ignores-stdin", ignores_stdin(), None).await;
+    let (_d, cfg, actions) = setup().await;
+    save_cmd(&actions, &cfg, "ignores-stdin", ignores_stdin(), None).await;
 
     let big = json!({ "blob": "x".repeat(512 * 1024) });
     let res = tokio::time::timeout(Duration::from_secs(30), actions.exec("/t", "ignores-stdin", big))
@@ -149,13 +159,13 @@ async fn a_large_stdin_payload_does_not_deadlock() {
 /// caveat on `kill_on_drop` in `exec.rs`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hanging_command_hits_its_timeout() {
-    let (_d, actions) = setup().await;
+    let (_d, cfg, actions) = setup().await;
     let forever = if cfg!(windows) {
         "for /L %i in (1,1,2000000000) do @rem"
     } else {
         "while :; do :; done"
     };
-    save_cmd(&actions, "hangs", forever, Some(json!({ "timeout_secs": 1 }))).await;
+    save_cmd(&actions, &cfg, "hangs", forever, Some(json!({ "timeout_secs": 1 }))).await;
 
     let start = Instant::now();
     let err = tokio::time::timeout(Duration::from_secs(30), actions.exec("/t", "hangs", json!({})))
