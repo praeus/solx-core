@@ -45,6 +45,7 @@ url        = "2"
 rand       = "0.8"
 tracing    = "0.1"
 axum       = "0.7"
+tower-http = { version = "0.5", features = ["cors"] }
 futures    = "0.3"
 
 # Local crates

@@ -181,33 +181,74 @@ that's the doc being stale, not the code.
 
 ---
 
-## 3. solx-js as a direct solx-server client (solx-js / solx-web)
+## 3. solx-js as a direct solx-server client (solx-js / solx-web) — done
 
-**Status: not started, design agreed.** Today solx-web's Bun backend loads
-`solx-js`'s native NAPI binding (`solx.node`, built from `solx-bindings`)
-*and* the README says it expects a running `solx-server` — two hops for
-what's conceptually one call.
+**Status: implemented 2026-08-16.** solx-web's Bun backend (`solx-web/server/`)
+is gone; the React frontend now talks to `solx-server` directly.
 
-**Agreed direction:** implement the `Solx` manager-trait interfaces
-**directly in TypeScript** as an HTTP client against `solx-server` — the
-same interface shape, just a TS-language implementation of the wire
-contract that `solx-client`'s `Remote*` impls already speak in Rust. Keep
-the NAPI/neon binding path as a separate, optional embed mode for a TS tool
-that wants solx-core in-process with no server running at all.
+**As built:**
 
-This directly serves the packaged-single-app goal from point 7: the app can
-choose in-process embed (NAPI) when it's the only consumer, or point at a
-shared `solx-server` when other clients (Pi, CLI, MCP) need the same appdata
-concurrently — same TS-level interface either way, caller doesn't care which
-backend it got. It also removes the double-hop in solx-web specifically,
-since its Bun server can just pick the HTTP-client implementation.
+- **New package `@solx/http`** (`solx-js/packages/http/`) — a pure-`fetch`,
+  zero-runtime-dependency (beyond `@solx/surface`) implementation of
+  `TypeManager`/`FileStore`/`DocManager`/`ActionManager`, mirroring
+  `solx-client`'s Rust `Remote*Manager`s route-for-route (`solx-client/src/
+  {types,files,docs,actions}.rs`): same routes, same snake_case DTOs
+  (`solx-surface::wire`), same base64 file encoding. Wire errors
+  (`{"kind":"not_found",...}`) are reconstructed into `@solx/surface`'s
+  `SolxError` via a small kind-mapping table. `connectHttp(serverUrl,
+  token)` returns `{ types, files, docs, actions }` — no `config`/`scripts`
+  members, since neither has an HTTP surface. Works unmodified in a browser
+  or in Node (global `fetch`, no native code) — the browser-capable
+  counterpart to the Neon-backed managers' `.connect()` mode, which needs a
+  native `.node` binary and is Node-only. The NAPI/embed path
+  (`solx/sdk`'s `createSolx`) is untouched, per the original plan.
+- **`solx-server` CORS** — `tower-http`'s `CorsLayer::permissive()`, layered
+  outermost in `build_router` (`solx-server/src/lib.rs`) so preflight
+  `OPTIONS` is answered before the bearer-auth middleware ever sees it.
+  Deliberate widening of the trust boundary (until now only Rust/Node
+  clients could reach `solx-server`) — judged consistent with the existing
+  posture (127.0.0.1-only bind + shared bearer token, no multi-tenant
+  story anywhere yet), and the Bun backend it replaces already ran CORS
+  `*` in front of the same server.
+- **solx-web/web rewired**: `web/src/api/api.ts` keeps its exact original
+  function names/signatures/snake_case shapes (near-zero churn to
+  components/hooks) but now calls `@solx/http` directly instead of
+  `fetch('/api/...')`; `web/src/api/wire.ts` is the old Bun backend's
+  `server/src/wire.ts` conversion logic, moved client-side unchanged.
+  `@solx/http`/`@solx/surface` aren't npm dependencies of `web/` — bun's
+  `file:`-dependency copy step hit a reproducible EPERM on Windows for
+  this cross-repo layout, so they're aliased straight to TS source instead
+  (`web/vite.config.ts`'s `resolve.alias` + `web/tsconfig.json`'s
+  `compilerOptions.paths`) — both packages are zero-dependency and
+  browser-safe as-is, so there's nothing to build first anyway.
+- **Connection/config split**: the browser now holds `serverUrl`/
+  `serverToken` itself (`web/src/api/connection.ts`, `localStorage`,
+  editable via a slimmed-down `SettingsPanel`). Everything else
+  `solx.config.*` used to expose (`dataDirectory`, `filesDirectory`,
+  package registry) has **no HTTP equivalent and never will** — config is
+  local-only to a running `solx-server`/`solx-cli` process by design, in
+  both the Rust and TS impls — so that functionality is gone, not moved.
+- **File previews**: `solx-server` has no raw-byte-serving route (files are
+  base64 JSON only) and the bearer token can't ride along on a plain
+  `<img src>` URL, so the old `/api/files/raw?relPath=…` route is replaced
+  by a ref-counted `blob:` URL cache (`web/src/api/objectUrlCache.ts` +
+  `useFileObjectUrl`). The rich-text editor's persisted image nodes needed
+  a custom Tiptap NodeView (`web/src/components/richtext/ResolvedImage.tsx`)
+  since a node's `src` attribute is a static value, not something a
+  `Promise` can resolve into — it now stores the bare `relPath` and
+  resolves it to a `blob:` URL at render time (with back-compat for
+  documents that already persisted the old `/api/files/raw?relPath=…`
+  URL shape).
+- Verified end-to-end against a live `solx-server`: CORS preflight,
+  full types/docs/files CRUD + search round-trip, `SolxError` kind/detail
+  reconstruction, builtin-action dispatch, and bearer-token rejection —
+  plus clean `cargo build --workspace`, `bun run typecheck` (both repos),
+  and `vite build`.
 
-**Next action:** define the shared TS interface once (mirroring
-`solx-surface`'s manager traits — `TypeManager`/`FileStore`/`DocManager`/
-`ActionManager`/the `Solx` facade) in `solx-js/packages/surface` or
-equivalent, then add an `Http*` implementation beside whatever the
-NAPI-backed implementation is called today, selected by config exactly like
-`solx-manager` does in Rust (local vs. `server_url`).
+**Next action:** none — done. `solx-web/server/` and
+`solx-web/scripts/vendor-solx.mjs` are deleted; `solx-web`'s root
+`package.json` scripts (`dev`/`build`/`lint`/`typecheck`) now target
+`web/` only.
 
 ---
 
@@ -247,41 +288,164 @@ when the registry grows past comfortable single-list size.
 
 ---
 
-## 6. Finish the solx-web port: Actions / Types / Files(-or-Artifacts) + a new ActionRunner
+## 6. Finish the solx-web port: Actions / Types / Files parity + a new ActionRunner
 
-**Status: Documents tab only; Actions/Types/Files are placeholders.**
+**Status: revised 2026-08-16** after reading all seven old-sol files
+(`sol-browser/src/entityEditors/actionEditorService.ts`;
+`sol-browser/src/components/{TypeEditor,TypeSchemaEditor,TypeSelector,
+ArtifactSelector,DataArtifactDialog,SharedArtifactDialog,TextArtifactDialog}.tsx`)
+plus solx-web's current state in full. The previous "Documents tab only;
+Actions/Types/Files are placeholders" status was stale — all three tabs
+already have working list/browse/search/sort/paginate + create/edit/delete,
+and Actions already has a synchronous run panel. This replaces that status
+with the actual gap list.
 
-Old `sol` precedent to review in depth before porting (located, not yet
-read in full):
+**Already done, no work needed:**
 
-- `sol-browser/src/entityEditors/actionEditorService.ts` — old action editor
-  logic.
-- `sol-browser/src/components/TypeEditor.tsx`, `TypeSchemaEditor.tsx`,
-  `TypeSelector.tsx` — old type-editing UI.
-- `sol-browser/src/components/ArtifactSelector.tsx`,
-  `DataArtifactDialog.tsx`, `SharedArtifactDialog.tsx`,
-  `TextArtifactDialog.tsx` — old file handling. Old sol called files
-  "Artifacts," with an `ArtifactScope` (`Shared`/`Legacy`/etc.,
-  `sol-manager/src/managers/artifact.rs`) and a `promote_to_shared`
-  operation. solx-files' simpler always-shared-if-orphaned convention looks
-  like a direct, simplified descendant of this — worth confirming there's no
-  scenario `promote_to_shared` handled that solx-files' model doesn't cover,
-  before assuming the port is a straight simplification.
+- `ActionList`/`ActionEditor`, `TypeList`/`TypeEditor`, `FileList`/`FileEditor`
+  — full CRUD, all wired through solx-server's generic REST routes.
+  `ChipTagInput`/`JsonSchemaEditor`/`FilesField` are shared components reused
+  across tabs already.
+- The Files tab is a flat rel_path store browser (view/download/upload/delete)
+  — this **is** the right architecture, not a stand-in for one. Old sol's
+  "Artifact" system (`ArtifactScope`, `promote_to_shared`,
+  owner-scoped naming like `actions::name::file`,
+  `sol-manager/src/managers/artifact.rs`) has no equivalent in solx and
+  doesn't need one: solx's `Document`/`Action.files: Vec<FileRef>` field plus
+  the already-built `FilesField.tsx` picker is the simplified descendant of
+  that whole subsystem. **Confirmed — closing the open question the previous
+  version of this doc raised.** `ArtifactSelector`/`DataArtifactDialog`/
+  `SharedArtifactDialog` have no port target.
+- Old-sol concepts that don't exist in solx at all, so are out of scope
+  outright (not deferred — there's no entity to port them onto): Permission
+  entity (`permission_name`/`allowed_permission_names`), Schedule entity,
+  custom-action project scaffolding (superseded by the `solx-quickjs`
+  package's `build-javascript-action`), and the run `trace` array
+  (`ActionExecResult` has no trace field — a backend gap, not a UI one).
 
-**New work, not a port:** an **ActionRunner** view — run an action, show
-request/response, live console output, and cancellation. The backend side
-of all three already exists end-to-end and needs no new solx-core work
-unless the UI surfaces a gap:
+**Real, portable gaps found:**
 
-- Console output → `console_tail`/`console_read` (`solx-actions/src/console`).
-- Cancellation → `action_start`/`action_stop`/`action_poll`
-  (`docs/async-actions-plan.md`), already gated to long-lived hosts
-  (`solx-server`, `solx-mcp` — solx-web's backend talks to `solx-server`, so
-  this is satisfied).
+1. `ActionEditor` — typed Webhook fields (header rows, `timeout_secs`) and a
+   typed Command `cwd` field, overlaid onto `action_config` the way old
+   sol's `buildActionConfig` did — today these are only reachable via the
+   raw-JSON "Advanced" textarea, for the two most common action types.
+2. `ActionEditor` — wire up `files: FileRef[]`. Confirmed present on
+   `Action`/`ActionInput` in `solx-surface/src/entities.rs` and already
+   passed end-to-end by the Bun backend (`server/src/wire.ts`'s
+   `actionToWire`/`actionInputFromWire` both handle it) — it's just never
+   declared in `web/src/api/api.ts`'s `ActionSummary`/`createAction` types
+   or rendered in the component. Reuse the same `FilesField` component
+   `DocumentEditor` already uses. This also gives the current bare-text
+   "Exec Artifact (bin name)" field something real to point at — a
+   Wasm/Script/Widget action's `bin_name` names one of its own attached
+   files.
+3. `TypeSelector`-style combobox. Old sol's param/result type pickers were a
+   searchable combobox with inline "Edit"/"+ New" buttons that opened a
+   `TypeEditor` without leaving the form; `ActionEditor` currently uses a
+   plain `<select>`. No backend changes needed to port it.
+4. `FileEditor`/`FileList` — add an inline "New Text File" mode (Monaco +
+   language picker, mirroring old sol's `TextArtifactDialog`) alongside
+   today's disk-upload-only flow. Useful for quick `.solx` scripts, notes,
+   JSON fixtures.
+5. `TypeEditor` — lower priority: old sol's `TypeSchemaEditor` had a visual
+   Fields-table ⇄ raw-JSON toggle for building a schema without hand-writing
+   it. Current `TypeEditor` is JSON-only via `JsonSchemaEditor`. Nice-to-have.
+6. Explicitly excluded: AI-assisted schema/description generation (old
+   sol's `AiFieldHelper`) — solx-web has no LLM-helper wiring today and
+   nobody's asked for one.
 
-**Next action:** read the seven old-sol files above in full plus solx-web's
-current `ActionEditor.tsx`/`FileEditor.tsx`/`TypeEditor.tsx` stubs, then
-propose a per-tab port plan and a design sketch for ActionRunner.
+**ActionRunner — new dialog, design confirmed, no backend work needed.**
+`action_start`/`action_stop`/`action_poll` and `console_read`/`console_tail`
+are ordinary seeded Internal actions under `/builtin/action/*` and
+`/builtin/console/*` (`solx-actions/src/seed.rs`), dispatched through the
+exact same generic `POST /api/actions/:path/:name/exec` route every other
+action already uses — and `solx-server/src/main.rs` already calls
+`set_long_lived_host(true)` at startup, so the gate that would otherwise
+block `action_start` is already satisfied. This is a frontend-only build.
+
+Confirmed shapes (`solx-actions/src/invocations.rs` +
+`internal/{invocation,console}.rs`):
+
+- start: `execAction("/builtin/action", "start", { name, path, params })` →
+  `Invocation` JSON (`invocation_id`, `status`, `result`, `error`,
+  `console_seq_start`, …).
+- poll: `execAction("/builtin/action", "poll", { invocation_id, wait_secs? })`
+  → same shape; long-polls when `wait_secs` is given.
+- stop: `execAction("/builtin/action", "stop", { invocation_id, force?,
+  grace_secs? })` → same shape, moves to `cancelling`/terminal.
+- console tail: `execAction("/builtin/console", "tail", { action_ref,
+  cursor?, limit?, wait_secs? })` → `{ entries[], next_cursor, first_seq,
+  dropped }`; long-polls when nothing new is buffered yet.
+
+Component plan (new `web/src/components/ActionRunner.tsx`, opened from a
+"Run" affordance on `ActionEditor`/`ActionList`):
+
+- Params editor (JSON) + Run → calls `action/start`, stores `invocation_id`.
+- Status line, driven by a long-poll loop against `action/poll` (not a
+  fixed-interval timer — matches the primitive's own long-poll design).
+- Console pane, driven by a parallel long-poll loop against `console/tail`,
+  seeded from the `console_seq_start` the start call returned so it never
+  replays a previous run's output.
+- Cancel button (enabled while `running`) calling `action/stop`.
+- Result/error panel once a terminal status arrives.
+- Both poll loops stop on dialog close or terminal status — plain
+  `useEffect` cleanup, no new infra.
+
+**Progress (solx-web repo):**
+
+1. **Done.** `ActionEditor` — typed Webhook headers/timeout + Command `cwd`
+   fields overlaid onto `action_config`; `files: FileRef[]` wired through
+   (`api.ts`'s `createAction` input type + the shared `FilesField`
+   component); `bin_name` now has a datalist sourced from attached files.
+2. **Done.** `ActionRunner` dialog (`web/src/components/ActionRunner.tsx`),
+   opened from a new "Run with console…" button next to the existing
+   synchronous "Run Action" in `ActionEditor`'s edit-mode Run panel. Calls
+   `action/start`, then runs two independent long-poll loops (`action/poll`
+   for status, `console/tail` for output, both `AbortController`-cancelled
+   on dialog close/unmount) and a Cancel/Force-stop button wired to
+   `action/stop`. New `api.ts` section (`startInvocation`/`pollInvocation`/
+   `stopInvocation`/`tailConsole`/`isTerminalInvocationStatus`) added below
+   `execAction`, calling the `/builtin/action/*` and `/builtin/console/*`
+   routes directly (bypassing `execAction`'s fixed signature only to thread
+   an `AbortSignal` through). Confirmed no backend changes were needed, as
+   predicted above. Closing the dialog stops watching, not the invocation
+   itself — it's detached, so it keeps running server-side regardless.
+
+3. **Done.** `TypeSelector` combobox (`web/src/components/TypeSelector.tsx`)
+   — searchable, keyboard-navigable, with inline "Edit"/"+ New" reusing the
+   existing `TypeEditor` dialog. Wired into `ActionEditor`'s Parameter/Result
+   Type fields in place of the old plain `<select>`. One deliberate behavior
+   change from old sol's version: since a value here is a `path`+`name`
+   pair rather than sol's bare name, typing only filters the dropdown —
+   committing happens by picking an existing type or via "+ New" — rather
+   than letting free-typed text commit directly (which old sol allowed,
+   having no path to resolve).
+
+   **Fixed in passing, applies beyond this port:** nesting `TypeEditor`
+   inside `TypeSelector` inside `ActionEditor`'s own modal exposed a real
+   CSS bug — `.dialog` centers itself via `transform: translate(-50%,
+   -50%)`, and per the CSS Transforms spec a `transform` on an ancestor
+   becomes the *containing block* for `position: fixed` descendants. A
+   `TypeEditor` opened from inside another modal was therefore centering
+   itself inside the parent dialog's box instead of the viewport. Fixed by
+   portalling `TypeEditor` to `document.body` via `ReactDOM.createPortal`
+   (`solx-web` had no portal usage anywhere before this). Only `TypeEditor`
+   was changed — it's the only dialog currently nested inside another
+   transformed dialog; apply the same fix to any other dialog component if
+   it's ever nested the same way.
+
+4. **Done.** `FileEditor` create mode now offers a "From disk" / "New text
+   file" toggle. The new path (`web/src/components/FileEditor.tsx`) is a
+   relPath field + language picker + Monaco editor (mirroring old sol's
+   `TextArtifactDialog`), UTF‑8-encoded and sent through the same
+   `uploadFile` call the disk-upload path already used — no API changes
+   needed, since `solx-files` has no per-file content-type field to set;
+   the language picker only drives Monaco's syntax highlighting while
+   authoring.
+
+**Remaining:** (5) `TypeSchemaEditor` visual mode — a Fields-table ⇄
+raw-JSON toggle for `TypeEditor`'s schema, if still wanted; nice-to-have,
+not blocking anything.
 
 ---
 
