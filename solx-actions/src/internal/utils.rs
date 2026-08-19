@@ -1,15 +1,11 @@
 //! Small stateless utilities and the in-process environment store.
 //!
-//! * `now` / `uuid` / `random_int` / `random_string` — process-local
-//!   generators with no I/O, no caller-scoping, and no trust model beyond
-//!   "an action called this".
+//! * `random_string` — a process-local generator with no I/O, no
+//!   caller-scoping, and no trust model beyond "an action called this".
 //! * `get_env` / `set_env` read and write a namespaced `RwLock<HashMap>`,
 //!   seeded at startup from `SolxConfig.env_mappings` via
 //!   [`init_env_mappings`] and from `SolxConfig.env_vars` via
 //!   [`init_persisted_env`].
-//!
-//! `now` returns RFC 3339 UTC, matching the `created_at`/`updated_at`
-//! representation used everywhere else in the actions and docs tables.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -141,28 +137,7 @@ pub(super) fn set_env(params: &Value, config: &Arc<ConfigService>) -> Result<Val
     Ok(json!({ "set": true, "namespace": namespace, "persisted": persist }))
 }
 
-// ── now / uuid / random_int / random_string ─────────────────────────────────
-
-pub(super) fn now_value() -> Value {
-    json!({ "now": chrono::Utc::now().to_rfc3339() })
-}
-
-pub(super) fn uuid_value() -> Value {
-    json!({ "uuid": uuid::Uuid::new_v4().to_string() })
-}
-
-pub(super) fn random_int_value(params: &Value) -> Result<Value, String> {
-    use rand::Rng;
-    let lo = params.get("lo").and_then(Value::as_i64).unwrap_or(0);
-    let hi = params.get("hi").and_then(Value::as_i64).unwrap_or(i64::MAX);
-    if lo > hi {
-        return Err(format!("random_int: lo ({lo}) must be <= hi ({hi})"));
-    }
-    // `gen_range` on i64 is inclusive on both ends; we want the same
-    // semantics for a uniform integer in [lo, hi].
-    let n = rand::thread_rng().gen_range(lo..=hi);
-    Ok(json!({ "value": n }))
-}
+// ── random_string ─────────────────────────────────────────────────────────
 
 const RANDOM_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 

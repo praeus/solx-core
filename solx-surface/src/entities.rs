@@ -154,30 +154,27 @@ pub enum ActionType {
     /// A `solx-scripts` script (`bin_name` = the `.solx` artifact). The
     /// caller's params are available inside the script as `$params`.
     Script,
-    /// A client-side UI widget (`bin_name` = the JS/ESM bundle artifact,
-    /// `fn_name` = the custom-element tag name). Not executed server-side:
-    /// `exec` returns a [`WidgetDescriptor`] the host frontend uses to load
-    /// and mount the widget in a dialog.
-    Widget,
 }
 
-/// Descriptor returned by `exec` on a [`ActionType::Widget`] action. It tells
-/// a host frontend how to load and mount the widget: which custom-element tag
-/// to create, where to fetch the bundle from, and any initial context.
+/// Descriptor returned by `widget_open` / `loopback::widget::open`. Tells the
+/// host frontend how to load and mount the widget: which custom-element tag
+/// to create, where to fetch the bundle from, and how to connect its
+/// websocket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WidgetDescriptor {
-    /// The custom-element tag name the bundle registers (e.g. `my-widget`).
+    /// Loopback-minted id; the handle every other widget op addresses.
+    pub widget_id: String,
+    /// Custom-element tag name the bundle registers.
     pub tag_name: String,
-    /// URL the host should fetch the widget's JS/ESM bundle from.
+    /// URL the frontend fetches the JS bundle from (the loopback's /bundle).
     pub entry_url: String,
-    /// Initial context handed to the widget on mount (as a `hostContext`
-    /// property). May be `null`.
+    /// WebSocket URL the frontend connects to (the loopback's /ws, token baked in).
+    pub ws_url: String,
+    /// One-shot loopback token (also embedded in entry_url/ws_url).
+    pub token: String,
+    /// Initial fields handed to the widget on mount.
     #[serde(default)]
-    pub initial_data: Value,
-    /// Capabilities the widget declares it needs (informational — the host
-    /// decides what to grant). Defaults to empty.
-    #[serde(default)]
-    pub capabilities: Vec<String>,
+    pub fields: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,19 +201,22 @@ pub struct Action {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fn_name: Option<String>,
     /// Wasm: the artifact file name. Script: the `.solx` script artifact
-    /// file name. Widget: the JS/ESM bundle artifact file name. Unused by
-    /// Command/Webhook/Internal.
+    /// file name. Unused by Command/Webhook/Internal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bin_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_config: Option<Value>,
     #[serde(default)]
     pub files: Vec<FileRef>,
-    /// Whether this action's WASM component runs in the full `backend-action`
-    /// world (trusted — full entity/file/secret access) or the restricted
-    /// `custom-action` world (untrusted — only action-exec/artifact-read).
-    /// Only meaningful for `ActionType::Wasm`. Defaults to `false`; built-in
-    /// seeded actions are the exception.
+    /// Inert legacy field — has no effect on execution.
+    ///
+    /// This once selected between the trusted `backend-action` world (direct
+    /// entity/file/secret host access) and the restricted `custom-action`
+    /// world. That trusted world was retired: everything it provided is now a
+    /// native `Internal` action, so every WASM guest is equally sandboxed by
+    /// construction and reaches built-ins the same way anyone else does — via
+    /// `action-exec`. See `solx-actions/src/wasm/mod.rs`. Kept on the entity
+    /// only to avoid a DB migration.
     #[serde(default)]
     pub trusted: bool,
     #[serde(default = "default_now")]
@@ -252,8 +252,8 @@ pub struct ActionInput {
     pub action_config: Option<Value>,
     #[serde(default)]
     pub files: Vec<FileRef>,
-    /// `None` means "leave unchanged" on update / defaults to `false` on
-    /// create — see [`Action::trusted`].
+    /// Inert legacy field — see [`Action::trusted`]. `None` means "leave
+    /// unchanged" on update / defaults to `false` on create.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted: Option<bool>,
 }

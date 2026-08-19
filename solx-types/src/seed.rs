@@ -194,7 +194,7 @@ fn builtin_action_param_types() -> Vec<SeedType> {
                     "category": { "type": "string" },
                     "param_type_ref": { "type": "string" },
                     "result_type_ref": { "type": "string" },
-                    "action_type": { "type": "string", "enum": ["wasm", "webhook", "command", "internal", "script", "widget"], "description": "Required on create." },
+                    "action_type": { "type": "string", "enum": ["wasm", "webhook", "command", "internal", "script"], "description": "Required on create." },
                     "fn_name": { "type": "string", "description": "Command string / URL / internal op name / WASM export, depending on action_type." },
                     "bin_name": { "type": "string", "description": "Artifact file name (wasm: component; script: .solx source)." },
                     "action_config": {},
@@ -398,19 +398,6 @@ fn builtin_action_param_types() -> Vec<SeedType> {
             name: "EmptyParams",
             description: "No parameters.",
             schema: json!({ "type": "object" }),
-            groups: vec!["builtin-params"],
-        },
-        SeedType {
-            path: BUILTIN_TYPES_PATH,
-            name: "RandomIntParams",
-            description: "Random integer in the inclusive [lo, hi] range. Defaults to [0, i64::MAX].",
-            schema: json!({
-                "type": "object",
-                "properties": {
-                    "lo": { "type": "integer" },
-                    "hi": { "type": "integer" },
-                }
-            }),
             groups: vec!["builtin-params"],
         },
         SeedType {
@@ -670,6 +657,80 @@ fn builtin_action_param_types() -> Vec<SeedType> {
             }),
             groups: vec!["builtin-params"],
         },
+        // Widgets — see `solx-actions::loopback::widget` and
+        // `docs/widget-actions.md`.
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "WidgetOpenParams",
+            description: "Open a widget: serves its JS bundle and a websocket for the frontend to connect to.",
+            schema: json!({
+                "type": "object",
+                "required": ["bin_name", "tag_name"],
+                "properties": {
+                    "bin_name": { "type": "string", "description": "The widget's JS/ESM bundle artifact file name." },
+                    "tag_name": { "type": "string", "description": "The custom-element tag name the bundle registers." },
+                    "fields": { "description": "Initial fields handed to the widget on mount, any JSON object." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "WidgetRefParams",
+            description: "Address a widget by its widget_id (returned by widget/open).",
+            schema: json!({
+                "type": "object",
+                "required": ["widget_id"],
+                "properties": {
+                    "widget_id": { "type": "string" },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "WidgetGetParams",
+            description: "Read one field (or, if field is omitted, the whole fields object) from a widget.",
+            schema: json!({
+                "type": "object",
+                "required": ["widget_id"],
+                "properties": {
+                    "widget_id": { "type": "string" },
+                    "field": { "type": "string", "description": "Omit (or leave empty) to read the whole fields object." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "WidgetSetParams",
+            description: "Write one field on a widget, pushed to its frontend if connected.",
+            schema: json!({
+                "type": "object",
+                "required": ["widget_id", "field"],
+                "properties": {
+                    "widget_id": { "type": "string" },
+                    "field": { "type": "string" },
+                    "value": { "description": "Any JSON value." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "WidgetExecParams",
+            description: "Dispatch an event to a widget's frontend code.",
+            schema: json!({
+                "type": "object",
+                "required": ["widget_id", "event"],
+                "properties": {
+                    "widget_id": { "type": "string" },
+                    "event": { "type": "string" },
+                    "payload": { "description": "Any JSON value." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
     ]
 }
 
@@ -737,13 +798,32 @@ fn blog_post_with_comments_schema() -> Value {
         "type": "object",
         "required": ["content", "text"],
         "properties": {
-            "icon": { "$ref": "#/$defs/ArtifactRef" },
-            "content": { "$ref": "#/$defs/RichTextDoc" },
-            "text": { "type": "string" },
-            "paragraphs": { "type": "array", "items": { "type": "string" } },
+            "icon": {
+                "$ref": "#/$defs/ArtifactRef",
+                "title": "Icon",
+                "description": "Optional preview image (resolved via the files store)."
+            },
+            "content": {
+                "$ref": "#/$defs/RichTextDoc",
+                "title": "Rich Content",
+                "description": "Full Tiptap rich-text document."
+            },
+            "text": {
+                "type": "string",
+                "title": "Plain Text",
+                "description": "Plain-text version of the post body."
+            },
+            "paragraphs": {
+                "type": "array",
+                "items": { "type": "string" },
+                "title": "Paragraphs",
+                "description": "Body split into paragraphs (preview renders these)."
+            },
             "comments": {
                 "type": "array",
-                "items": { "$ref": "#/$defs/BlogComment" }
+                "items": { "$ref": "#/$defs/BlogComment" },
+                "title": "Comments",
+                "description": "Top-level comments; each comment may carry nested replies."
             }
         },
         "x-sol-template": BLOG_POST_WITH_COMMENTS_TEMPLATE,
@@ -752,12 +832,25 @@ fn blog_post_with_comments_schema() -> Value {
                 "type": "object",
                 "required": ["text"],
                 "properties": {
-                    "author": { "type": ["string", "null"] },
-                    "text": { "type": "string" },
-                    "date": { "type": ["string", "null"] },
+                    "author": {
+                        "type": ["string", "null"],
+                        "title": "Author",
+                        "description": "Display name; null for anonymous."
+                    },
+                    "text": {
+                        "type": "string",
+                        "title": "Comment Text"
+                    },
+                    "date": {
+                        "type": ["string", "null"],
+                        "title": "Date",
+                        "description": "ISO-8601 date; null when unknown."
+                    },
                     "replies": {
                         "type": "array",
-                        "items": { "$ref": "#/$defs/BlogComment" }
+                        "items": { "$ref": "#/$defs/BlogComment" },
+                        "title": "Replies",
+                        "description": "Nested replies to this comment (recursive)."
                     }
                 }
             }
@@ -779,6 +872,7 @@ fn media_document_schema() -> Value {
         "properties": {
             "kind": {
                 "type": "string",
+                "title": "Kind",
                 "enum": [
                     "image-text",
                     "audio-transcript",
@@ -789,41 +883,61 @@ fn media_document_schema() -> Value {
             },
             "document_name": {
                 "type": "string",
+                "title": "Document Name",
                 "description": "Suggested document name (used as the basename under the persisted path)."
             },
-            "title": { "type": ["string", "null"] },
-            "summary": { "type": ["string", "null"] },
-            "author": { "type": ["string", "null"] },
+            "title": {
+                "type": ["string", "null"],
+                "title": "Title",
+                "description": "Display title; null when not provided."
+            },
+            "summary": {
+                "type": ["string", "null"],
+                "title": "Summary",
+                "description": "Short summary; null when not provided."
+            },
+            "author": {
+                "type": ["string", "null"],
+                "title": "Author",
+                "description": "Attributed author; null when not provided."
+            },
             "contents": {
                 "type": "object",
+                "title": "Contents",
                 "description": "Free-form JSON contents of the document. Specific shape depends on `kind`."
             },
             "artifacts": {
                 "type": "array",
                 "items": { "$ref": "#/$defs/EmbeddedArtifact" },
+                "title": "Artifacts",
                 "description": "Embedded artifacts (e.g. images materialized from HTML)."
             },
             "transcript": {
                 "type": "string",
+                "title": "Transcript",
                 "description": "For audio/video: full transcript text concatenated."
             },
             "segments": {
                 "type": "array",
                 "items": { "$ref": "#/$defs/TimecodedSegment" },
+                "title": "Segments",
                 "description": "For audio/video: timecoded transcript segments from whisper."
             },
             "scene_captions": {
                 "type": "array",
                 "items": { "$ref": "#/$defs/TimecodedSegment" },
+                "title": "Scene Captions",
                 "description": "For video: per-frame vision captions (text only, no speaker)."
             },
             "description": {
                 "type": "string",
+                "title": "Description",
                 "description": "Synthesized description (audio/video) or extracted description (image)."
             },
             "notes": {
                 "type": "array",
                 "items": { "type": "string" },
+                "title": "Notes",
                 "description": "Free-form notes (e.g. transcription availability warnings)."
             }
         },
@@ -832,10 +946,11 @@ fn media_document_schema() -> Value {
                 "type": "object",
                 "required": ["name", "content_type", "data"],
                 "properties": {
-                    "name": { "type": "string" },
-                    "content_type": { "type": "string" },
+                    "name": { "type": "string", "title": "Name" },
+                    "content_type": { "type": "string", "title": "Content Type" },
                     "data": {
                         "type": "string",
+                        "title": "Data",
                         "description": "Base64-encoded artifact bytes."
                     }
                 }

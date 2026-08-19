@@ -16,6 +16,10 @@ solx-config = { workspace = true }
 # Only for `set_long_lived_host` — everything else about action execution
 # stays behind `solx-manager`'s `App`/`Solx` facade.
 solx-actions = { workspace = true }
+# `streamable_http_service()` — mounts the same `SolxMcpServer` the stdio
+# `solx-mcp` binary uses, as an MCP-over-HTTP route sharing this process's
+# `Arc<App>`. See routes/mcp.rs.
+solx-mcp = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
 tokio = { workspace = true }
@@ -30,3 +34,10 @@ base64 = { workspace = true }
 reqwest = { workspace = true }
 solx-client = { workspace = true }
 tempfile = "3"
+# MCP client, for the /mcp Streamable HTTP integration test only — not part
+# of the shipped `solx-server` binary (which only needs `solx-mcp`'s server
+# side, pulled in as a normal dependency above).
+rmcp = { version = "3.0.0", features = ["client", "transport-streamable-http-client-reqwest"] }
+# Test-only, to register a Script action's artifact directly for the
+# progress-notification test — same use as `solx-mcp`'s own dev-dependency.
+solx-files = { workspace = true }

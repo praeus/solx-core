@@ -323,6 +323,25 @@ impl ConfigService {
         }
     }
 
+    /// Connect window (in seconds) before an opened-but-never-connected
+    /// widget is reaped. Defaults to 60 when unset or non-positive.
+    pub fn widget_connect_ttl_secs(&self) -> u64 {
+        match self.snapshot().widget_connect_ttl_secs {
+            Some(n) if n > 0 => n,
+            _ => 60,
+        }
+    }
+
+    /// Grace period (in seconds) a widget survives after its websocket
+    /// disconnects, before being reaped. Defaults to 15 when unset or
+    /// non-positive.
+    pub fn widget_reconnect_grace_secs(&self) -> u64 {
+        match self.snapshot().widget_reconnect_grace_secs {
+            Some(n) if n > 0 => n,
+            _ => 15,
+        }
+    }
+
     // ── Package registry ──────────────────────────────────────────────────────
 
     pub fn list_packages(&self) -> Vec<InstalledPackage> {

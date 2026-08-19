@@ -194,6 +194,13 @@ impl LocalActionManager {
         &self.invocations
     }
 
+    /// Shared handle to this manager's config service — used by `wasm::host`
+    /// to read the widget connect-TTL/reconnect-grace settings without
+    /// threading `ConfigService` through `HostState::new`.
+    pub fn config(&self) -> &Arc<ConfigService> {
+        &self.config
+    }
+
     /// Provide this manager's own handle for recursive WASM `action-exec`
     /// calls. Must be called exactly once, right after the manager is
     /// wrapped in an `Arc` (e.g.
@@ -283,7 +290,6 @@ fn action_type_to_str(t: Option<ActionType>) -> String {
         Some(ActionType::Command) => "command",
         Some(ActionType::Internal) => "internal",
         Some(ActionType::Script) => "script",
-        Some(ActionType::Widget) => "widget",
         None => "",
     }
     .to_string()
@@ -296,7 +302,6 @@ fn action_type_from_str(s: &str) -> Option<ActionType> {
         "command" => Some(ActionType::Command),
         "internal" => Some(ActionType::Internal),
         "script" => Some(ActionType::Script),
-        "widget" => Some(ActionType::Widget),
         _ => None,
     }
 }
@@ -773,28 +778,6 @@ impl LocalActionManager {
                 tokio::time::timeout(budget, run).await.map_err(|_| {
                     SolxError::Exec(format!("script action {action_ref} timed out"))
                 })??
-            }
-            Some(ActionType::Widget) => {
-                // Not executed server-side (see the ActionType::Widget doc
-                // comment): `exec` just describes the widget so a host
-                // frontend can load and mount it. Minimal stopgap — full
-                // wiring (a real fetchable `entry_url`, initial_data) belongs
-                // to whatever finishes hooking up `solx-widgets`/
-                // `docs/widget-actions.md`; this only needs to keep the
-                // dispatch exhaustive.
-                let bin_name = action.bin_name.as_deref().ok_or_else(|| {
-                    SolxError::Exec("widget action has no bin_name (bundle artifact)".into())
-                })?;
-                let tag_name = action.fn_name.clone().ok_or_else(|| {
-                    SolxError::Exec("widget action has no fn_name (custom-element tag name)".into())
-                })?;
-                let descriptor = solx_surface::entities::WidgetDescriptor {
-                    tag_name,
-                    entry_url: solx_files::shared_action_file_path(bin_name),
-                    initial_data: Value::Null,
-                    capabilities: action.capabilities.clone(),
-                };
-                serde_json::to_value(descriptor)?
             }
             None => {
                 return Err(SolxError::Exec(format!(
@@ -1456,13 +1439,16 @@ mod tests {
 
     // ── entity_save_action: no self-granting shell ───────────────────────
     //
-    // These go through `exec` on `/builtin/entity_save_action`, which is the
+    // These go through `exec` on `/builtin/action/entity_save_action`, which is the
     // exact path an MCP tool call, a WASM guest's `action-exec`, and a
     // `.solx` script all take. A direct `m.save(...)` is the CLI's path and
     // stays allowed — that's the whole distinction being enforced.
 
+    // Only ever used for `entity_save_action`/`entity_delete_action`, which
+    // live under `ACTION_PATH` (action-entity CRUD, alongside the async
+    // start/stop/poll/cancelled actions), not the flat `/builtin` root.
     async fn exec_builtin(m: &Arc<LocalActionManager>, fn_name: &str, params: Value) -> Result<Value> {
-        m.exec(BUILTIN_PATH, fn_name, params).await.map(|r| r.result)
+        m.exec(seed::ACTION_PATH, fn_name, params).await.map(|r| r.result)
     }
 
     #[tokio::test]
@@ -1641,9 +1627,9 @@ mod tests {
     #[tokio::test]
     async fn exec_script_reads_params_and_calls_nested_action() {
         let (_d, m, files) = setup_script().await;
-        // The bare `exec /builtin/uuid` (no `json` wrapping needed) becomes
-        // the script's result directly: the callee's whole ActionExecResult,
-        // JSON-encoded — same as `handle_exec` in the CLI.
+        // The bare `exec /builtin/random_string` (no `json` wrapping needed)
+        // becomes the script's result directly: the callee's whole
+        // ActionExecResult, JSON-encoded — same as `handle_exec` in the CLI.
         // `json`'s argument is parsed as JSON, and `tokenize_stage` strips
         // one layer of quoting to form the token — so a JSON string literal
         // needs the outer '...' shell-style quoting plus inner \"...\" JSON
@@ -1652,7 +1638,7 @@ mod tests {
         post_script_artifact(
             &files,
             "hello.solx",
-            "if $params.go == true; exec /builtin/uuid; else; json '\"skipped\"'; endif",
+            "if $params.go == true; exec /builtin/random_string; else; json '\"skipped\"'; endif",
         )
         .await;
         m.save(
@@ -1670,7 +1656,7 @@ mod tests {
         let ran = m.exec("/tools", "hello", serde_json::json!({"go": true})).await.unwrap();
         assert_eq!(ran.result["success"], serde_json::json!(true));
         assert!(
-            ran.result["result"]["uuid"].as_str().is_some_and(|s| !s.is_empty()),
+            ran.result["result"]["value"].as_str().is_some_and(|s| !s.is_empty()),
             "{:?}",
             ran.result
         );
@@ -1685,7 +1671,7 @@ mod tests {
         post_script_artifact(
             &files,
             "count.solx",
-            "exec /builtin/now; exec /builtin/uuid",
+            "exec /builtin/random_string; exec /builtin/action/entity_list_actions",
         )
         .await;
         m.save(
@@ -1705,8 +1691,8 @@ mod tests {
         let entries = m.console().read("/tools/count", None, 10).await.unwrap().entries;
         assert_eq!(entries.len(), 2, "{entries:?}");
         assert_eq!(entries[0].source, "script");
-        assert_eq!(entries[0].message.as_deref(), Some("exec /builtin/now"));
-        assert_eq!(entries[1].message.as_deref(), Some("exec /builtin/uuid"));
+        assert_eq!(entries[0].message.as_deref(), Some("exec /builtin/random_string"));
+        assert_eq!(entries[1].message.as_deref(), Some("exec /builtin/action/entity_list_actions"));
         // Both stages share the one script invocation's identity.
         assert_eq!(entries[0].invocation_id, entries[1].invocation_id);
     }

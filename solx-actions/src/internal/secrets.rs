@@ -1,7 +1,7 @@
 //! Per-caller secrets: `get_secret` / `set_secret`.
 //!
 //! Scoped to the action that *invoked* these built-ins (`ctx.caller`), not
-//! to the `/builtin/get_secret` row that dispatched here — that row's own
+//! to the `/builtin/secrets/get_secret` row that dispatched here — that row's own
 //! `action_config` is always `null` (see `seed.rs`), so scoping to it, as
 //! an earlier version did, meant no key ever resolved and both built-ins
 //! were silently inert.

@@ -36,18 +36,27 @@ const TAIL_WAIT_SECS: i64 = 2;
 
 pub struct SolxMcpServer {
     app: Arc<App>,
+    /// Restrict the exposed tool catalogue to this path (and everything
+    /// under it), e.g. `/builtin` or `/packages/solx-google`. `None`
+    /// exposes every registered action, the pre-existing behavior.
+    path_prefix: Option<String>,
 }
 
 impl SolxMcpServer {
-    pub fn new(app: Arc<App>) -> Self {
-        SolxMcpServer { app }
+    pub fn new(app: Arc<App>, path_prefix: Option<String>) -> Self {
+        SolxMcpServer { app, path_prefix }
     }
 
     async fn list_action_tools(&self, offset: usize) -> Result<(Vec<Tool>, Option<usize>), ErrorData> {
         let actions = self.app.actions();
         let types = self.app.types();
         let page = actions
-            .list(ListOptions { limit: Some(PAGE_SIZE), offset: Some(offset), ..Default::default() })
+            .list(ListOptions {
+                path_prefix: self.path_prefix.clone(),
+                limit: Some(PAGE_SIZE),
+                offset: Some(offset),
+                ..Default::default()
+            })
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 

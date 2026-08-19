@@ -4,6 +4,14 @@
 //! their own exclusive local storage (in particular, the Tantivy docs
 //! index, which only tolerates one writer per process — see
 //! `solx-docs/src/search.rs`).
+//!
+//! Also mounts `/mcp` (`routes::mcp`), the MCP Streamable HTTP transport —
+//! sharing this same in-process `Arc<App>` and bearer-auth gate, so an MCP
+//! client can reach solx over HTTP instead of spawning `solx-mcp` as a
+//! stdio subprocess (which otherwise keeps the exe locked for the session's
+//! lifetime). `solx-mcp` still exists and works over stdio for clients that
+//! need a subprocess transport; this is an additional way in, not a
+//! replacement.
 
 pub mod auth;
 pub mod error;
@@ -30,7 +38,7 @@ use state::AppState;
 /// Layered outermost (after `.merge`) so a preflight `OPTIONS` is answered
 /// before it ever reaches `require_bearer`.
 pub fn build_router(state: AppState) -> Router {
-    let protected = routes::router()
+    let protected = routes::router(&state)
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_bearer));
 
     Router::new()

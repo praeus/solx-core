@@ -55,6 +55,7 @@ pub mod oauth;
 pub mod open_url;
 pub mod secrets;
 pub mod utils;
+pub mod widget;
 
 // Re-export `init_env_mappings` so the existing call site
 // `solx_actions::internal::init_env_mappings` (used by `solx-manager`
@@ -162,9 +163,6 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
         "http_stream_close" => http_stream::close(params).await,
 
         // ── small stateless utilities ────────────────────────────────────
-        "now" => Ok(utils::now_value()),
-        "uuid" => Ok(utils::uuid_value()),
-        "random_int" => utils::random_int_value(params),
         "random_string" => utils::random_string_value(params),
 
         // ── system integration ────────────────────────────────────────────
@@ -186,6 +184,15 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
         "action_stop" => invocation::stop(params, ctx).await,
         "action_poll" => invocation::poll(params, ctx).await,
         "action_cancelled" => invocation::cancelled(ctx.caller.as_ref(), &ctx.invocations).await,
+
+        // ── widgets ──────────────────────────────────────────────────────
+        "widget_open" => widget::open(params, &ctx.files, &ctx.config, ctx.caller.as_ref()).await,
+        "widget_close" => widget::close(params).await,
+        "widget_show" => widget::show(params).await,
+        "widget_hide" => widget::hide(params).await,
+        "widget_get" => widget::get(params).await,
+        "widget_set" => widget::set(params).await,
+        "widget_exec" => widget::exec(params).await,
 
         other => Err(format!("unknown internal fn_name '{other}'")),
     }
@@ -718,7 +725,7 @@ mod tests {
     /// The CLI, MCP, and the HTTP route all reach these built-ins with no
     /// action caller, so neither can resolve a key — this is the denial that
     /// keeps a model from reading an action's secrets by calling
-    /// `/builtin/get_secret` directly.
+    /// `/builtin/secrets/get_secret` directly.
     #[tokio::test]
     async fn secrets_are_refused_without_an_action_caller() {
         let (_d, ctx) = test_ctx(None).await;
@@ -823,52 +830,7 @@ mod tests {
         drop(blocker);
     }
 
-    // ── now / uuid / random_int / random_string ──────────────────────────
-
-    #[tokio::test]
-    async fn now_returns_rfc3339_utc() {
-        let (_d, ctx) = test_ctx(None).await;
-        let v = run_internal("now", &json!({}), &ctx).await.unwrap();
-        let s = v.get("now").and_then(Value::as_str).expect("now field");
-        // chrono::DateTime::parse_from_rfc3339 succeeds on the round-trip
-        // form `Utc::now().to_rfc3339()` produces.
-        let parsed = chrono::DateTime::parse_from_rfc3339(s)
-            .expect("now() output must be a valid RFC 3339 string");
-        assert_eq!(parsed.timezone(), chrono::FixedOffset::east_opt(0).unwrap());
-    }
-
-    #[tokio::test]
-    async fn uuid_is_a_v4_string() {
-        let (_d, ctx) = test_ctx(None).await;
-        let a = run_internal("uuid", &json!({}), &ctx).await.unwrap();
-        let b = run_internal("uuid", &json!({}), &ctx).await.unwrap();
-        let a = a.get("uuid").and_then(Value::as_str).expect("uuid field");
-        let b = b.get("uuid").and_then(Value::as_str).expect("uuid field");
-        assert_ne!(a, b, "two uuids in a row must differ");
-        let parsed = uuid::Uuid::parse_str(a).expect("uuid must parse");
-        assert_eq!(parsed.get_version(), Some(uuid::Version::Random));
-    }
-
-    #[tokio::test]
-    async fn random_int_is_in_range() {
-        let (_d, ctx) = test_ctx(None).await;
-        for _ in 0..32 {
-            let v = run_internal("random_int", &json!({"lo": 5, "hi": 7}), &ctx)
-                .await
-                .unwrap();
-            let n = v.get("value").and_then(Value::as_i64).expect("value field");
-            assert!((5..=7).contains(&n), "{n} out of [5,7]");
-        }
-    }
-
-    #[tokio::test]
-    async fn random_int_rejects_inverted_range() {
-        let (_d, ctx) = test_ctx(None).await;
-        let err = run_internal("random_int", &json!({"lo": 10, "hi": 1}), &ctx)
-            .await
-            .unwrap_err();
-        assert!(err.contains("lo"), "{err}");
-    }
+    // ── random_string ─────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn random_string_is_alphanumeric_and_requested_length() {

@@ -5,14 +5,16 @@
 //! written to it. All logging goes to stderr, and the subscriber is
 //! installed before anything else runs (including `App::build()`), so even
 //! startup wiring errors are safely off stdout.
-
-mod error;
-mod schema;
-mod server;
-mod tools;
+//!
+//! `SOLX_MCP_PATH_PREFIX`, if set, restricts the exposed tool catalogue to
+//! that path (and everything under it) — e.g. `/builtin` or
+//! `/packages/solx-google` — so a client can run several scoped instances
+//! instead of always seeing the full action catalogue. Unset (the default)
+//! exposes every registered action, unchanged from before this existed.
 
 use rmcp::transport::stdio;
 use rmcp::ServiceExt;
+use solx_mcp::SolxMcpServer;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -27,8 +29,12 @@ async fn main() -> anyhow::Result<()> {
     // solx-mcp is a long-lived stdio server, unlike solx-cli.
     solx_actions::set_long_lived_host(true);
 
+    let path_prefix = std::env::var("SOLX_MCP_PATH_PREFIX")
+        .ok()
+        .filter(|s| !s.is_empty());
+
     let app = solx_manager::App::build().await?;
-    let service = server::SolxMcpServer::new(app)
+    let service = SolxMcpServer::new(app, path_prefix)
         .serve(stdio())
         .await
         .inspect_err(|e| tracing::error!("serve error: {e:?}"))?;

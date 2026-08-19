@@ -19,5 +19,5 @@ pub use entities::{
     Action, ActionExecResult, ActionInput, ActionType, DocLink, Document, DocumentInput, FileRef,
     LinkKind, TypeEntity, TypeInput, WidgetDescriptor,
 };
-pub use managers::{ActionManager, DocManager, FileStore, Solx, TypeManager, WidgetHost};
+pub use managers::{ActionManager, DocManager, FileStore, Solx, TypeManager};
 pub use query::{ListOptions, Page, SearchHit, SearchQuery, SearchResults, SortOrder};

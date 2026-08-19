@@ -61,30 +61,6 @@ pub trait ActionManager: Send + Sync {
     async fn exec(&self, path: &str, name: &str, params: Value) -> Result<ActionExecResult>;
 }
 
-/// Widget host: resolves a [`ActionType::Widget`] action into a
-/// [`WidgetDescriptor`] and serves its JS/ESM bundle bytes.
-///
-/// This is the loose-coupling seam for widgets. `solx-actions` depends only
-/// on this trait (defined here, in `solx-surface`); the concrete
-/// implementation lives in `solx-widgets`, which `solx-actions` never
-/// references directly. `solx-server` constructs the concrete host and hands
-/// it to the action manager, exactly like `TypeManager`/`DocManager`/
-/// `FileStore`.
-///
-/// The host receives the full [`Action`] (already loaded by the caller) so it
-/// can read `bin_name` (the bundle artifact) and `fn_name` (the tag name)
-/// without depending on `ActionManager` itself — which would otherwise form
-/// an `actions → widgets → actions` cycle.
-#[async_trait]
-pub trait WidgetHost: Send + Sync {
-    /// Build the descriptor a host frontend uses to load and mount the
-    /// widget. `params` is the caller's exec params, which may seed
-    /// `initial_data`.
-    async fn describe(&self, action: &Action, params: Value) -> Result<WidgetDescriptor>;
-    /// Return the widget's JS/ESM bundle bytes.
-    async fn bundle(&self, action: &Action) -> Result<Vec<u8>>;
-}
-
 /// Optional aggregate facade composing the four managers. A future
 /// `solx-server` can expose one of these; a `solx-client` can implement it by
 /// returning proxy managers. Phase 1's CLI can either use this or hold the four

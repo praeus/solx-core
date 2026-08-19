@@ -8,8 +8,8 @@
 # `solx exec ...` CLI invocation is its own fresh process, so the three
 # steps must run inside one `solx script` invocation (which shares one App
 # across all its stages) rather than as three separate CLI calls. The
-# "browser" hit is simulated via the seeded /builtin/fetch_html internal
-# action (a real HTTP GET) so it runs in-process too, alongside the
+# "browser" hit is simulated via the seeded /builtin/web/http_request
+# internal action (a real HTTP GET) so it runs in-process too, alongside the
 # loopback calls.
 set -uo pipefail
 source "$(dirname "$0")/lib.sh"
@@ -23,7 +23,7 @@ solx save action /demo/oauth/stop  --json '{"action_type":"internal","fn_name":"
 SCRIPT_FILE="$(mktemp)"
 cat > "$SCRIPT_FILE" <<'SOLX'
 $start = exec /demo/oauth/start --json '{"port":18766}';
-exec /builtin/fetch_html --json '{"url":"$start.result.redirect_uri?code=demo-auth-code&state=$start.result.state_value"}';
+exec /builtin/web/http_request --json '{"url":"$start.result.redirect_uri?code=demo-auth-code&state=$start.result.state_value"}';
 $await = exec /demo/oauth/await --json '{"state_value":"$start.result.state_value","timeout_secs":5}';
 $stop = exec /demo/oauth/stop --json '{"state_value":"$start.result.state_value"}';
 json '{"await":$await,"stop":$stop}'

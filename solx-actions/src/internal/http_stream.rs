@@ -1,4 +1,4 @@
-//! `/builtin/http_stream/*` — host-side streaming HTTP, for callers (chiefly
+//! `/builtin/web/stream/*` — host-side streaming HTTP, for callers (chiefly
 //! WASM guests) that have no sockets of their own and no state across
 //! invocations. See `solx-packages/solx-ollama/docs/streaming-design.md` for
 //! the motivating design — this module is that design's "three new internal

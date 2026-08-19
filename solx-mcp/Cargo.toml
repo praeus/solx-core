@@ -3,7 +3,11 @@ name = "solx-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "MCP (Model Context Protocol) server exposing solx documents, types, files, and actions as tools to LLM clients over stdio."
+description = "MCP (Model Context Protocol) server exposing solx documents, types, files, and actions as tools to LLM clients over stdio or Streamable HTTP."
+
+[lib]
+name = "solx_mcp"
+path = "src/lib.rs"
 
 [[bin]]
 name = "solx-mcp"
@@ -21,7 +25,10 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rmcp = { version = "3.0.0", features = ["server", "transport-io"] }
+# "transport-io" backs the stdio binary; "transport-streamable-http-server"
+# backs `streamable_http_service()`, which `solx-server` mounts as an HTTP
+# route sharing the same `SolxMcpServer`/`Arc<App>` — see solx-server/Cargo.toml.
+rmcp = { version = "3.0.0", features = ["server", "transport-io", "transport-streamable-http-server"] }
 
 [dev-dependencies]
 tempfile = "3"

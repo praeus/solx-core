@@ -262,29 +262,35 @@ context-attachment model (point 7) and for the path-scoping idea in point 5
 
 ---
 
-## 5. Do paths mitigate the "too many MCP tools" risk?
+## 5. Do paths mitigate the "too many MCP tools" risk? — done
 
-Partially, not fully, as things stand today:
+**Status: implemented.** Both halves this section used to flag as missing
+now exist:
 
-- **Helps:** paths give a real, already-existing grouping axis. A client
-  that only cares about `/builtin/*` plus its own team's `/research/ai/*`
-  actions *could* filter the tool list by path prefix before presenting it
-  to a model. That lever doesn't exist in a flat-namespace tool design.
-- **Doesn't help yet:** `solx-mcp/src/tools.rs` flattens every `(path,
-  name)` into one opaque tool name unconditionally — there's no MCP-level
-  mechanism today to expose only a path subtree as a toolset, or for a
-  client to request a prefix-scoped `tools/list`. The full catalogue is
-  always the full catalogue, regardless of how the actions are namespaced
-  underneath.
+- **MCP-level scoping:** `solx-mcp` reads an optional `SOLX_MCP_PATH_PREFIX`
+  env var at startup and threads it into `ListOptions.path_prefix` for every
+  `tools/list` call (`solx-mcp/src/server.rs`, `SolxMcpServer::path_prefix`).
+  Unset behaves exactly as before (full catalogue); set, a client sees only
+  that path and everything under it. Since the MCP `tools/list` request
+  itself has no filter param (`rmcp`'s `PaginatedRequestParams` is
+  cursor-only), scoping is a launch-time server config — run several
+  `solx-mcp` instances, each with a different prefix, to present narrower
+  toolsets to different clients/teams (e.g. one for `/builtin`, one for
+  `/packages/solx-google`).
+- **A real grouping to scope by:** the flat `/builtin` catalogue has been
+  split into `/builtin/<area>/*` subpaths (`document`, `type`, `file`,
+  `env`, `secrets`, `oauth`, `web` (+ `web/stream`), and the existing
+  `console`/`action`) — see `solx-actions/src/seed.rs`. Only `random_string`
+  stays flat, too small a group on its own to warrant a subpath. This was a
+  breaking path rename for anything hardcoding an old flat `/builtin/<name>`
+  reference; `db/solx-actions.db` needs deleting once after upgrading past
+  it, same as the earlier `console`/`action` subdivision required (see
+  `seed.rs`'s header comment).
 
-So: the data model supports the fix, the MCP surface doesn't use it yet.
-This is a cheaper lever than a permissions system for the tool-bloat problem
-specifically, and worth building once the catalogue is large enough to
-matter — likely bundled with point 4, since Resources could be path-scoped
-the same way.
-
-**Next action:** none yet — flagged as a concrete, low-effort feature for
-when the registry grows past comfortable single-list size.
+**Next action:** none — revisit only if a client actually wants multiple
+concurrently-running scoped `solx-mcp` instances wired up (today it's just
+the mechanism + a grouping to use it with, not a deployed multi-instance
+setup).
 
 ---
 

@@ -44,7 +44,7 @@ reqwest    = { version = "0.12", features = ["json", "rustls-tls", "stream"] }
 url        = "2"
 rand       = "0.8"
 tracing    = "0.1"
-axum       = "0.7"
+axum       = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["cors"] }
 futures    = "0.3"
 
@@ -59,3 +59,4 @@ solx-scripts  = { path = "solx-scripts" }
 solx-packages = { path = "solx-packages" }
 solx-manager  = { path = "solx-manager" }
 solx-client   = { path = "solx-client" }
+solx-mcp      = { path = "solx-mcp" }

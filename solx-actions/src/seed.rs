@@ -15,7 +15,11 @@
 //!
 //! NOTE: seeding is `INSERT OR IGNORE`, so an actions DB seeded before this
 //! change keeps its old `action_type='wasm'` rows for these names forever —
-//! delete `db/solx-actions.db` once after upgrading to pick them up.
+//! delete `db/solx-actions.db` once after upgrading to pick them up. The
+//! same applies to the `/builtin/<area>/*` reorg below: it moves several
+//! actions to a new `path`, which `INSERT OR IGNORE` cannot retarget for an
+//! existing row — delete `db/solx-actions.db` once after upgrading past that
+//! change too.
 
 use chrono::Utc;
 use libsql::Connection;
@@ -25,24 +29,54 @@ use uuid::Uuid;
 use crate::db::map_db;
 
 /// Path all built-in actions are seeded under, out of the way of
-/// user-created actions.
+/// user-created actions. Holds only `random_string` directly — everything
+/// else with a natural grouping lives under a `/builtin/<area>` subpath
+/// below.
 pub const BUILTIN_PATH: &str = "/builtin";
 
-/// Subdivision of the builtin namespace for console operations — the first
-/// of what's meant to become several (`/builtin/<area>/*`) as the flat
-/// `/builtin` catalogue grows.
+/// Subdivision of the builtin namespace for console operations.
 pub const CONSOLE_PATH: &str = "/builtin/console";
 
-/// Subdivision of the builtin namespace for asynchronous actions
-/// (`start`/`stop`/`poll`) — the second `/builtin/<area>/*`, after
-/// `CONSOLE_PATH`. See `docs/async-actions-plan.md`.
+/// Subdivision of the builtin namespace for action operations: the
+/// asynchronous `start`/`stop`/`poll`/`cancelled` alternative to `exec` (see
+/// `docs/async-actions-plan.md`), plus action-entity CRUD and search.
 pub const ACTION_PATH: &str = "/builtin/action";
 
-/// Subdivision of the builtin namespace for host-side streaming HTTP
-/// (`start`/`poll`/`close`) — for callers with no sockets or cross-call
-/// state of their own (chiefly WASM guests). See
+/// Subdivision of the builtin namespace for document-entity CRUD, field
+/// ops, and search.
+pub const DOCUMENT_PATH: &str = "/builtin/document";
+
+/// Subdivision of the builtin namespace for type-entity CRUD.
+pub const TYPE_PATH: &str = "/builtin/type";
+
+/// Subdivision of the builtin namespace for the general-purpose file store.
+pub const FILE_PATH: &str = "/builtin/file";
+
+/// Subdivision of the builtin namespace for the environment scratch store.
+pub const ENV_PATH: &str = "/builtin/env";
+
+/// Subdivision of the builtin namespace for per-caller-scoped secrets.
+pub const SECRETS_PATH: &str = "/builtin/secrets";
+
+/// Subdivision of the builtin namespace for the OAuth 2.0 loopback listener.
+pub const OAUTH_PATH: &str = "/builtin/oauth";
+
+/// Subdivision of the builtin namespace for everything that deals in URLs:
+/// a one-shot HTTP request, opening a URL in the system browser, and (under
+/// `WEB_STREAM_PATH`) host-side streaming HTTP.
+pub const WEB_PATH: &str = "/builtin/web";
+
+/// Subdivision of `WEB_PATH` for host-side streaming HTTP (`start`/`poll`/
+/// `close`) — for callers with no sockets or cross-call state of their own
+/// (chiefly WASM guests). See
 /// `solx-packages/solx-ollama/docs/streaming-design.md`.
-pub const HTTP_STREAM_PATH: &str = "/builtin/http_stream";
+pub const WEB_STREAM_PATH: &str = "/builtin/web/stream";
+
+/// Subdivision of the builtin namespace for widget operations — mirrors the
+/// `widget` WIT interface (`open`/`close`/`show`/`hide`/`get`/`set`/`exec`)
+/// as internal actions, so a `.solx` script or any other action can drive a
+/// widget without being a WASM guest. See `docs/widget-actions.md` §6.
+pub const WIDGET_PATH: &str = "/builtin/widget";
 
 /// Namespace for the hand-written JSON-schema types backing built-in
 /// actions' `param_type_ref` (see `solx-types/src/seed.rs`). Shared by every
@@ -87,58 +121,59 @@ const fn a_at(
 pub fn builtin_actions() -> Vec<SeedAction> {
     vec![
         // Document CRUD
-        a("entity_save_document", "Create or update (upsert) a document.", Some("DocumentCrudParams")),
-        a("entity_get_document", "Fetch a document by path+name.", Some("EntityRefParams")),
-        a("entity_delete_document", "Delete a document.", Some("EntityRefParams")),
-        a("entity_list_documents", "List documents, optionally filtered by path prefix.", Some("ListParams")),
+        a_at(DOCUMENT_PATH, "entity_save_document", "entity_save_document", "Create or update (upsert) a document.", Some("DocumentCrudParams")),
+        a_at(DOCUMENT_PATH, "entity_get_document", "entity_get_document", "Fetch a document by path+name.", Some("EntityRefParams")),
+        a_at(DOCUMENT_PATH, "entity_delete_document", "entity_delete_document", "Delete a document.", Some("EntityRefParams")),
+        a_at(DOCUMENT_PATH, "entity_list_documents", "entity_list_documents", "List documents, optionally filtered by path prefix.", Some("ListParams")),
         // Document legacy field ops (one field at a time)
-        a("get_field", "Read one field from a document's contents.", Some("GetFieldParams")),
-        a("set_field", "Write one field on a document's contents.", Some("SetFieldParams")),
+        a_at(DOCUMENT_PATH, "get_field", "get_field", "Read one field from a document's contents.", Some("GetFieldParams")),
+        a_at(DOCUMENT_PATH, "set_field", "set_field", "Write one field on a document's contents.", Some("SetFieldParams")),
         // Document path-style field ops (nested reads/writes via dotted path)
-        a("get_field_at_path", "Read a field at a slash-separated path inside a document's contents.", Some("GetFieldAtPathParams")),
-        a("set_field_at_path", "Write a field at a slash-separated path inside a document's contents (optionally creating missing parents).", Some("SetFieldAtPathParams")),
-        // Action CRUD
-        a("entity_save_action", "Create or update (upsert) an action.", Some("ActionCrudParams")),
-        a("entity_get_action", "Fetch an action by path+name.", Some("EntityRefParams")),
-        a("entity_delete_action", "Delete an action.", Some("EntityRefParams")),
-        a("entity_list_actions", "List actions, optionally filtered by path prefix.", Some("ListParams")),
+        a_at(DOCUMENT_PATH, "get_field_at_path", "get_field_at_path", "Read a field at a slash-separated path inside a document's contents.", Some("GetFieldAtPathParams")),
+        a_at(DOCUMENT_PATH, "set_field_at_path", "set_field_at_path", "Write a field at a slash-separated path inside a document's contents (optionally creating missing parents).", Some("SetFieldAtPathParams")),
+        // Document search (a real Tantivy full-text index)
+        a_at(DOCUMENT_PATH, "search_documents", "search_documents", "Full-text + faceted search over documents.", Some("SearchDocumentsParams")),
+        // Action CRUD (alongside the async start/stop/poll/cancelled below)
+        a_at(ACTION_PATH, "entity_save_action", "entity_save_action", "Create or update (upsert) an action.", Some("ActionCrudParams")),
+        a_at(ACTION_PATH, "entity_get_action", "entity_get_action", "Fetch an action by path+name.", Some("EntityRefParams")),
+        a_at(ACTION_PATH, "entity_delete_action", "entity_delete_action", "Delete an action.", Some("EntityRefParams")),
+        a_at(ACTION_PATH, "entity_list_actions", "entity_list_actions", "List actions, optionally filtered by path prefix.", Some("ListParams")),
+        // Action search (actions have no full-text index, so this is a
+        // structured filter, not fuzzy relevance ranking)
+        a_at(ACTION_PATH, "search_actions", "search_actions", "List/filter actions by path prefix and other fields (structured filter, no full-text index for actions).", Some("ListParams")),
         // Type CRUD
-        a("entity_save_type", "Create or update (upsert) a type.", Some("TypeCrudParams")),
-        a("entity_get_type", "Fetch a type by path+name.", Some("EntityRefParams")),
-        a("entity_delete_type", "Delete a type.", Some("EntityRefParams")),
-        a("entity_list_types", "List types, optionally filtered by path prefix.", Some("ListParams")),
-        // Search (documents have a real Tantivy full-text index; actions
-        // have no index, so search_actions is a structured filter, not
-        // fuzzy relevance ranking)
-        a("search_documents", "Full-text + faceted search over documents.", Some("SearchDocumentsParams")),
-        a("search_actions", "List/filter actions by path prefix and other fields (structured filter, no full-text index for actions).", Some("ListParams")),
+        a_at(TYPE_PATH, "entity_save_type", "entity_save_type", "Create or update (upsert) a type.", Some("TypeCrudParams")),
+        a_at(TYPE_PATH, "entity_get_type", "entity_get_type", "Fetch a type by path+name.", Some("EntityRefParams")),
+        a_at(TYPE_PATH, "entity_delete_type", "entity_delete_type", "Delete a type.", Some("EntityRefParams")),
+        a_at(TYPE_PATH, "entity_list_types", "entity_list_types", "List types, optionally filtered by path prefix.", Some("ListParams")),
         // General-purpose file store (unrestricted rel_path access)
-        a("file_put", "Write bytes to a rel-path under the files root.", Some("FilePutParams")),
-        a("file_get", "Read bytes from a rel-path under the files root.", Some("FileGetParams")),
-        a("file_delete", "Delete a file at a rel-path under the files root.", Some("FileGetParams")),
-        a("file_list", "List stored rel-paths under a prefix.", Some("FileListParams")),
-        a("file_copy", "Copy a file within the files root.", Some("FileCopyParams")),
-        a("dir_copy", "Recursively copy a directory within the files root.", Some("FileCopyParams")),
-        a("dir_delete", "Recursively delete a directory (and every file under it) within the files root.", Some("DirDeleteParams")),
+        a_at(FILE_PATH, "file_put", "file_put", "Write bytes to a rel-path under the files root.", Some("FilePutParams")),
+        a_at(FILE_PATH, "file_get", "file_get", "Read bytes from a rel-path under the files root.", Some("FileGetParams")),
+        a_at(FILE_PATH, "file_delete", "file_delete", "Delete a file at a rel-path under the files root.", Some("FileGetParams")),
+        a_at(FILE_PATH, "file_list", "file_list", "List stored rel-paths under a prefix.", Some("FileListParams")),
+        a_at(FILE_PATH, "file_copy", "file_copy", "Copy a file within the files root.", Some("FileCopyParams")),
+        a_at(FILE_PATH, "dir_copy", "dir_copy", "Recursively copy a directory within the files root.", Some("FileCopyParams")),
+        a_at(FILE_PATH, "dir_delete", "dir_delete", "Recursively delete a directory (and every file under it) within the files root.", Some("DirDeleteParams")),
         // Environment scratch store
-        a("get_env", "Read a variable from the environment store, optionally from a named namespace.", Some("GetEnvParams")),
-        a("set_env", "Write a variable to the environment store. In-memory by default; pass persist to also store it in solx-config.json so it survives a restart.", Some("SetEnvParams")),
-        // Web
-        a("http_request", "Issue an HTTP request with optional method, headers, body, and timeout.", Some("HttpRequestParams")),
-        // Small utility built-ins
-        a("now", "Return the current UTC time as an RFC 3339 string.", Some("EmptyParams")),
-        a("uuid", "Return a fresh v4 UUID as a string.", Some("EmptyParams")),
-        a("random_int", "Return a random integer in the inclusive [lo, hi] range.", Some("RandomIntParams")),
+        a_at(ENV_PATH, "get_env", "get_env", "Read a variable from the environment store, optionally from a named namespace.", Some("GetEnvParams")),
+        a_at(ENV_PATH, "set_env", "set_env", "Write a variable to the environment store. In-memory by default; pass persist to also store it in solx-config.json so it survives a restart.", Some("SetEnvParams")),
+        // Small utility built-ins. `now`/`uuid`/`random_int` were removed as
+        // not model/user-facing and unused by any package script;
+        // `random_string` stays — it's load-bearing for `solx-google`'s
+        // install script (per-install secret-encryption key generation). Too
+        // small a group to justify its own subpath, so it stays flat.
         a("random_string", "Return a random alphanumeric string of the given length.", Some("RandomStringParams")),
-        // System integration (launch external handlers)
-        a("open_url", "Open a URL in the system browser via the platform-native handler (xdg-open / open / cmd /C start).", Some("OpenUrlParams")),
         // Secrets, scoped to whichever action is currently executing
-        a("get_secret", "Read a secret scoped to the calling action.", Some("GetSecretParams")),
-        a("set_secret", "Write a secret scoped to the calling action.", Some("SetSecretParams")),
+        a_at(SECRETS_PATH, "get_secret", "get_secret", "Read a secret scoped to the calling action.", Some("GetSecretParams")),
+        a_at(SECRETS_PATH, "set_secret", "set_secret", "Write a secret scoped to the calling action.", Some("SetSecretParams")),
         // OAuth loopback
-        a("oauth_start", "Start a local OAuth 2.0 authorization-code loopback listener.", Some("OauthStartParams")),
-        a("oauth_await", "Block until the OAuth loopback for a state_value receives its callback.", Some("OauthAwaitParams")),
-        a("oauth_stop", "Stop an OAuth loopback listener.", Some("OauthStopParams")),
+        a_at(OAUTH_PATH, "oauth_start", "oauth_start", "Start a local OAuth 2.0 authorization-code loopback listener.", Some("OauthStartParams")),
+        a_at(OAUTH_PATH, "oauth_await", "oauth_await", "Block until the OAuth loopback for a state_value receives its callback.", Some("OauthAwaitParams")),
+        a_at(OAUTH_PATH, "oauth_stop", "oauth_stop", "Stop an OAuth loopback listener.", Some("OauthStopParams")),
+        // Web — a one-shot HTTP request and opening a URL in the system
+        // browser; host-side streaming HTTP lives under WEB_STREAM_PATH below.
+        a_at(WEB_PATH, "http_request", "http_request", "Issue an HTTP request with optional method, headers, body, and timeout.", Some("HttpRequestParams")),
+        a_at(WEB_PATH, "open_url", "open_url", "Open a URL in the system browser via the platform-native handler (xdg-open / open / cmd /C start).", Some("OpenUrlParams")),
         // Action consoles — one per action ref, written to by every layer of
         // that action's execution. See `crate::console` and
         // `docs/console-implementation-plan.md`.
@@ -157,9 +192,18 @@ pub fn builtin_actions() -> Vec<SeedAction> {
         // cross-call state of their own. Unrestricted by caller, like the
         // OAuth loopback and the action consoles: access is a bearer
         // capability on the unguessable stream_id.
-        a_at(HTTP_STREAM_PATH, "start", "http_stream_start", "Issue a streaming HTTP request. Returns stream_id and status as soon as response headers arrive, without waiting for the body.", Some("HttpStreamStartParams")),
-        a_at(HTTP_STREAM_PATH, "poll", "http_stream_poll", "Drain newline-delimited JSON chunks buffered for a stream since cursor, optionally long-polling up to wait_secs for more.", Some("HttpStreamPollParams")),
-        a_at(HTTP_STREAM_PATH, "close", "http_stream_close", "Stop a stream's reader task and drop its buffer.", Some("HttpStreamCloseParams")),
+        a_at(WEB_STREAM_PATH, "start", "http_stream_start", "Issue a streaming HTTP request. Returns stream_id and status as soon as response headers arrive, without waiting for the body.", Some("HttpStreamStartParams")),
+        a_at(WEB_STREAM_PATH, "poll", "http_stream_poll", "Drain newline-delimited JSON chunks buffered for a stream since cursor, optionally long-polling up to wait_secs for more.", Some("HttpStreamPollParams")),
+        a_at(WEB_STREAM_PATH, "close", "http_stream_close", "Stop a stream's reader task and drop its buffer.", Some("HttpStreamCloseParams")),
+        // Widgets — open/drive a client-side UI widget's loopback. See
+        // `crate::loopback::widget` and `docs/widget-actions.md`.
+        a_at(WIDGET_PATH, "open", "widget_open", "Open a widget: serves its JS bundle and a websocket for the frontend to connect to. Returns a descriptor.", Some("WidgetOpenParams")),
+        a_at(WIDGET_PATH, "close", "widget_close", "Close a widget and tear down its loopback registration and websocket.", Some("WidgetRefParams")),
+        a_at(WIDGET_PATH, "show", "widget_show", "Show a widget (pushed to its frontend if connected).", Some("WidgetRefParams")),
+        a_at(WIDGET_PATH, "hide", "widget_hide", "Hide a widget (pushed to its frontend if connected).", Some("WidgetRefParams")),
+        a_at(WIDGET_PATH, "get", "widget_get", "Read one field (or, if field is omitted, the whole fields object) from a widget.", Some("WidgetGetParams")),
+        a_at(WIDGET_PATH, "set", "widget_set", "Write one field on a widget, pushed to its frontend if connected.", Some("WidgetSetParams")),
+        a_at(WIDGET_PATH, "exec", "widget_exec", "Dispatch an event to a widget's frontend code.", Some("WidgetExecParams")),
     ]
 }
 
