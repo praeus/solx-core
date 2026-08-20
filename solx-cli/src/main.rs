@@ -113,6 +113,12 @@ enum Commands {
     ListPackages,
     /// Emit a JSON value (handy as a pipeline source in scripts).
     Json { value: String },
+    /// Emit a raw string literal (no JSON parsing) — the multi-line string
+    /// primitive the language otherwise lacks.
+    Str { value: String },
+    /// JSON-encode a string value (surrounding quotes + escapes) so it can
+    /// be substituted into a JSON payload.
+    Escape { value: String },
     /// Generate a base64-encoded random key (for secrets encryption).
     Random {
         /// Number of random bytes (default 32, for AES-256).
@@ -195,6 +201,10 @@ async fn run_command(app: &Arc<App>, command: Commands, piped: Option<Value>) ->
             &app.config,
         ))?),
         Commands::Json { value } => serde_json::from_str(&value).context("parse json value"),
+        Commands::Str { value } => Ok(Value::String(value)),
+        Commands::Escape { value } => Ok(Value::String(
+            serde_json::to_string(&Value::String(value)).context("encode string")?,
+        )),
         Commands::Random { bytes } => {
             use rand::RngCore;
             let mut buf = vec![0u8; bytes];

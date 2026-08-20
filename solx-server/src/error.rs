@@ -6,6 +6,7 @@ use solx_surface::error::SolxError;
 /// HTTP response — the JSON body is always the tagged `SolxError` itself
 /// (`{"kind":"...","message":"..."}`), so `solx-client` can reconstruct the
 /// exact variant regardless of which status code came back.
+#[derive(Debug)]
 pub struct ApiError(pub SolxError);
 
 impl From<SolxError> for ApiError {

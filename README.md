@@ -1,9 +1,10 @@
 # solx
 
-**solx turns a database of actions into a live MCP server.** Register a WASM
+**solx turns a database of actions into a live MCP server.** One searchable catalogue of tools — for you and your AI agents. Add a tool (WASM, CLI, REST) and it's live everywhere, no redeployment.
+
+Register a WASM
 component, a shell command, a REST endpoint, or a script — it becomes a tool
-your LLM client can call immediately. No code changes, no recompile, no
-restart.
+your LLM client can call immediately.
 
 ```sh
 # Register an action. It's a row in a database, not a line of code.
@@ -79,7 +80,7 @@ here, so the boundaries are explicit:
   the inverse merge, so a fetch → edit → save round trip can't silently
   destroy a key.
 - **WASM guests are sandboxed by construction.** The `custom-action` world
-  imports only action dispatch, artifact reads, logging, and widget control.
+  imports only action dispatch, artifact reads, and logging.
   No direct database, filesystem, or system access.
 
 **What is not enforced yet:** anything saved to the actions database is
@@ -119,7 +120,7 @@ Every surface is built on the same four traits in `solx-surface`
 | `solx-types`    | Type registry: JSON-schema types by path, type groups, validation. |
 | `solx-files`    | On-disk byte store for files attached to docs and actions. |
 | `solx-docs`     | Document store: links, file refs, type validation, Tantivy full-text + path-faceted search. |
-| `solx-actions`  | Action store and execution: all five dispatch kinds, plus consoles, detached invocations, streaming HTTP, OAuth loopback, scoped secrets, and widgets. |
+| `solx-actions`  | Action store and execution: all five dispatch kinds, plus consoles, detached invocations, streaming HTTP, OAuth loopback and scoped secrets. |
 | `solx-scripts`  | The solx shell pipeline language (`;`, `\|`, `$var`), decoupled from the CLI via a `CommandRunner` trait. |
 | `solx-packages` | Install/uninstall packages by running their `install.solx` and recording their allowlist grants. |
 | `solx-manager`  | Wires the local implementations into the `Solx` facade. |

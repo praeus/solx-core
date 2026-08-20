@@ -3,10 +3,11 @@ use serde_json::Value;
 use solx_surface::entities::{TypeEntity, TypeInput};
 use solx_surface::error::Result;
 use solx_surface::managers::TypeManager;
+use solx_surface::path::split_ref;
 use solx_surface::query::{ListOptions, Page};
-use solx_surface::wire::{RefRequest, ResolveRequest, SaveRequest, ValidateRequest};
+use solx_surface::wire::ValidateRequest;
 
-use crate::http::post_json;
+use crate::http::{collection_url, delete, entity_url, get_json, get_json_query, post_json, put_json};
 
 /// HTTP-proxy [`TypeManager`] talking to a `solx-server`.
 pub struct RemoteTypeManager {
@@ -28,31 +29,36 @@ impl RemoteTypeManager {
 #[async_trait]
 impl TypeManager for RemoteTypeManager {
     async fn save(&self, path: &str, name: &str, input: TypeInput) -> Result<TypeEntity> {
-        let req = SaveRequest { path: path.to_string(), name: name.to_string(), input };
-        post_json(&self.http, &self.base_url, &self.token, "/types/save", &req).await
+        let url = entity_url(&self.base_url, "types", path, name)?;
+        put_json(&self.http, &self.token, url, &input).await
     }
 
     async fn get(&self, path: &str, name: &str) -> Result<TypeEntity> {
-        let req = RefRequest { path: path.to_string(), name: name.to_string() };
-        post_json(&self.http, &self.base_url, &self.token, "/types/get", &req).await
+        let url = entity_url(&self.base_url, "types", path, name)?;
+        get_json(&self.http, &self.token, url).await
     }
 
     async fn delete(&self, path: &str, name: &str) -> Result<()> {
-        let req = RefRequest { path: path.to_string(), name: name.to_string() };
-        post_json(&self.http, &self.base_url, &self.token, "/types/delete", &req).await
+        let url = entity_url(&self.base_url, "types", path, name)?;
+        delete(&self.http, &self.token, url).await
     }
 
     async fn list(&self, opts: ListOptions) -> Result<Page<TypeEntity>> {
-        post_json(&self.http, &self.base_url, &self.token, "/types/list", &opts).await
+        let url = collection_url(&self.base_url, "types")?;
+        get_json_query(&self.http, &self.token, url, &opts).await
     }
 
+    /// Resolved client-side: `resolve` is defined as `split_ref` + `get`
+    /// (see `LocalTypeManager`), which `GET /types/{*ref}` already is — so
+    /// there's no separate route for it.
     async fn resolve(&self, type_ref: &str) -> Result<TypeEntity> {
-        let req = ResolveRequest { type_ref: type_ref.to_string() };
-        post_json(&self.http, &self.base_url, &self.token, "/types/resolve", &req).await
+        let (path, name) = split_ref(type_ref)?;
+        self.get(&path, &name).await
     }
 
     async fn validate(&self, value: &Value, type_ref: &str) -> Result<()> {
+        let url = collection_url(&self.base_url, "validate")?;
         let req = ValidateRequest { value: value.clone(), type_ref: type_ref.to_string() };
-        post_json(&self.http, &self.base_url, &self.token, "/types/validate", &req).await
+        post_json(&self.http, &self.token, url, &req).await
     }
 }

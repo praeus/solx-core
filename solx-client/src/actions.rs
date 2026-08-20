@@ -4,9 +4,8 @@ use solx_surface::entities::{Action, ActionExecResult, ActionInput};
 use solx_surface::error::Result;
 use solx_surface::managers::ActionManager;
 use solx_surface::query::{ListOptions, Page};
-use solx_surface::wire::{ExecRequest, RefRequest, SaveRequest};
 
-use crate::http::post_json;
+use crate::http::{collection_url, delete, entity_url, get_json, get_json_query, post_json, put_json};
 
 /// HTTP-proxy [`ActionManager`] talking to a `solx-server`. `exec()` runs
 /// entirely server-side — including WASM execution and every `Internal`
@@ -31,26 +30,28 @@ impl RemoteActionManager {
 #[async_trait]
 impl ActionManager for RemoteActionManager {
     async fn save(&self, path: &str, name: &str, input: ActionInput) -> Result<Action> {
-        let req = SaveRequest { path: path.to_string(), name: name.to_string(), input };
-        post_json(&self.http, &self.base_url, &self.token, "/actions/save", &req).await
+        let url = entity_url(&self.base_url, "actions", path, name)?;
+        put_json(&self.http, &self.token, url, &input).await
     }
 
     async fn get(&self, path: &str, name: &str) -> Result<Action> {
-        let req = RefRequest { path: path.to_string(), name: name.to_string() };
-        post_json(&self.http, &self.base_url, &self.token, "/actions/get", &req).await
+        let url = entity_url(&self.base_url, "actions", path, name)?;
+        get_json(&self.http, &self.token, url).await
     }
 
     async fn delete(&self, path: &str, name: &str) -> Result<()> {
-        let req = RefRequest { path: path.to_string(), name: name.to_string() };
-        post_json(&self.http, &self.base_url, &self.token, "/actions/delete", &req).await
+        let url = entity_url(&self.base_url, "actions", path, name)?;
+        delete(&self.http, &self.token, url).await
     }
 
     async fn list(&self, opts: ListOptions) -> Result<Page<Action>> {
-        post_json(&self.http, &self.base_url, &self.token, "/actions/list", &opts).await
+        let url = collection_url(&self.base_url, "actions")?;
+        get_json_query(&self.http, &self.token, url, &opts).await
     }
 
+    /// `POST` on the action's own URL, with the params as the body.
     async fn exec(&self, path: &str, name: &str, params: Value) -> Result<ActionExecResult> {
-        let req = ExecRequest { path: path.to_string(), name: name.to_string(), params };
-        post_json(&self.http, &self.base_url, &self.token, "/actions/exec", &req).await
+        let url = entity_url(&self.base_url, "actions", path, name)?;
+        post_json(&self.http, &self.token, url, &params).await
     }
 }

@@ -4,7 +4,7 @@
 
 use axum::extract::Json;
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::routing::get;
 use axum::Router;
 use solx_client::RemoteTypeManager;
 use solx_surface::error::SolxError;
@@ -12,8 +12,8 @@ use solx_surface::managers::TypeManager;
 
 async fn spawn_test_server(status: StatusCode, error: SolxError) -> String {
     let router = Router::new().route(
-        "/types/get",
-        post(move || {
+        "/types/*ref",
+        get(move || {
             let error = error.clone();
             async move { (status, Json(error)) }
         }),

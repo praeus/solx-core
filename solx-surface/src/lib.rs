@@ -17,7 +17,7 @@ pub use error::{Result, SolxError};
 
 pub use entities::{
     Action, ActionExecResult, ActionInput, ActionType, DocLink, Document, DocumentInput, FileRef,
-    LinkKind, TypeEntity, TypeInput, WidgetDescriptor,
+    LinkKind, TypeEntity, TypeInput,
 };
 pub use managers::{ActionManager, DocManager, FileStore, Solx, TypeManager};
 pub use query::{ListOptions, Page, SearchHit, SearchQuery, SearchResults, SortOrder};

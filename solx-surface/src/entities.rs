@@ -156,27 +156,6 @@ pub enum ActionType {
     Script,
 }
 
-/// Descriptor returned by `widget_open` / `loopback::widget::open`. Tells the
-/// host frontend how to load and mount the widget: which custom-element tag
-/// to create, where to fetch the bundle from, and how to connect its
-/// websocket.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WidgetDescriptor {
-    /// Loopback-minted id; the handle every other widget op addresses.
-    pub widget_id: String,
-    /// Custom-element tag name the bundle registers.
-    pub tag_name: String,
-    /// URL the frontend fetches the JS bundle from (the loopback's /bundle).
-    pub entry_url: String,
-    /// WebSocket URL the frontend connects to (the loopback's /ws, token baked in).
-    pub ws_url: String,
-    /// One-shot loopback token (also embedded in entry_url/ws_url).
-    pub token: String,
-    /// Initial fields handed to the widget on mount.
-    #[serde(default)]
-    pub fields: Value,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Action {
     pub id: Uuid,

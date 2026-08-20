@@ -657,76 +657,22 @@ fn builtin_action_param_types() -> Vec<SeedType> {
             }),
             groups: vec!["builtin-params"],
         },
-        // Widgets — see `solx-actions::loopback::widget` and
-        // `docs/widget-actions.md`.
+        // Widgets — an action that renders a UI declares this as its
+        // `result_type_ref` and returns a value of this shape. There is no
+        // widget runtime on the backend: the frontend fetches the bundle from
+        // `GET /files/{bin_name}` and the widget calls back in via
+        // `POST /actions/{ref}`. See `docs/widget-actions.md`.
         SeedType {
             path: BUILTIN_TYPES_PATH,
-            name: "WidgetOpenParams",
-            description: "Open a widget: serves its JS bundle and a websocket for the frontend to connect to.",
+            name: "WidgetDescriptor",
+            description: "Result shape of an action that renders a UI. Set an action's result_type_ref to this to mark it as a widget.",
             schema: json!({
                 "type": "object",
-                "required": ["bin_name", "tag_name"],
+                "required": ["tag_name", "bin_name"],
                 "properties": {
-                    "bin_name": { "type": "string", "description": "The widget's JS/ESM bundle artifact file name." },
                     "tag_name": { "type": "string", "description": "The custom-element tag name the bundle registers." },
-                    "fields": { "description": "Initial fields handed to the widget on mount, any JSON object." },
-                }
-            }),
-            groups: vec!["builtin-params"],
-        },
-        SeedType {
-            path: BUILTIN_TYPES_PATH,
-            name: "WidgetRefParams",
-            description: "Address a widget by its widget_id (returned by widget/open).",
-            schema: json!({
-                "type": "object",
-                "required": ["widget_id"],
-                "properties": {
-                    "widget_id": { "type": "string" },
-                }
-            }),
-            groups: vec!["builtin-params"],
-        },
-        SeedType {
-            path: BUILTIN_TYPES_PATH,
-            name: "WidgetGetParams",
-            description: "Read one field (or, if field is omitted, the whole fields object) from a widget.",
-            schema: json!({
-                "type": "object",
-                "required": ["widget_id"],
-                "properties": {
-                    "widget_id": { "type": "string" },
-                    "field": { "type": "string", "description": "Omit (or leave empty) to read the whole fields object." },
-                }
-            }),
-            groups: vec!["builtin-params"],
-        },
-        SeedType {
-            path: BUILTIN_TYPES_PATH,
-            name: "WidgetSetParams",
-            description: "Write one field on a widget, pushed to its frontend if connected.",
-            schema: json!({
-                "type": "object",
-                "required": ["widget_id", "field"],
-                "properties": {
-                    "widget_id": { "type": "string" },
-                    "field": { "type": "string" },
-                    "value": { "description": "Any JSON value." },
-                }
-            }),
-            groups: vec!["builtin-params"],
-        },
-        SeedType {
-            path: BUILTIN_TYPES_PATH,
-            name: "WidgetExecParams",
-            description: "Dispatch an event to a widget's frontend code.",
-            schema: json!({
-                "type": "object",
-                "required": ["widget_id", "event"],
-                "properties": {
-                    "widget_id": { "type": "string" },
-                    "event": { "type": "string" },
-                    "payload": { "description": "Any JSON value." },
+                    "bin_name": { "type": "string", "description": "File-store path of the widget's JS/ESM bundle." },
+                    "fields": { "description": "Initial data handed to the element on mount, any JSON value." },
                 }
             }),
             groups: vec!["builtin-params"],

@@ -3,9 +3,8 @@ use solx_surface::entities::{Document, DocumentInput};
 use solx_surface::error::Result;
 use solx_surface::managers::DocManager;
 use solx_surface::query::{ListOptions, Page, SearchQuery, SearchResults};
-use solx_surface::wire::{RefRequest, SaveRequest};
 
-use crate::http::post_json;
+use crate::http::{collection_url, delete, entity_url, get_json, get_json_query, put_json};
 
 /// HTTP-proxy [`DocManager`] talking to a `solx-server`.
 pub struct RemoteDocManager {
@@ -27,25 +26,30 @@ impl RemoteDocManager {
 #[async_trait]
 impl DocManager for RemoteDocManager {
     async fn save(&self, path: &str, name: &str, input: DocumentInput) -> Result<Document> {
-        let req = SaveRequest { path: path.to_string(), name: name.to_string(), input };
-        post_json(&self.http, &self.base_url, &self.token, "/docs/save", &req).await
+        let url = entity_url(&self.base_url, "docs", path, name)?;
+        put_json(&self.http, &self.token, url, &input).await
     }
 
     async fn get(&self, path: &str, name: &str) -> Result<Document> {
-        let req = RefRequest { path: path.to_string(), name: name.to_string() };
-        post_json(&self.http, &self.base_url, &self.token, "/docs/get", &req).await
+        let url = entity_url(&self.base_url, "docs", path, name)?;
+        get_json(&self.http, &self.token, url).await
     }
 
     async fn delete(&self, path: &str, name: &str) -> Result<()> {
-        let req = RefRequest { path: path.to_string(), name: name.to_string() };
-        post_json(&self.http, &self.base_url, &self.token, "/docs/delete", &req).await
+        let url = entity_url(&self.base_url, "docs", path, name)?;
+        delete(&self.http, &self.token, url).await
     }
 
     async fn list(&self, opts: ListOptions) -> Result<Page<Document>> {
-        post_json(&self.http, &self.base_url, &self.token, "/docs/list", &opts).await
+        let url = collection_url(&self.base_url, "docs")?;
+        get_json_query(&self.http, &self.token, url, &opts).await
     }
 
+    /// `GET /search` — a top-level route rather than `/docs/search`, which
+    /// as a static sibling of the `/docs/{*ref}` catch-all would shadow any
+    /// document named `search` at the root.
     async fn search(&self, query: SearchQuery) -> Result<SearchResults> {
-        post_json(&self.http, &self.base_url, &self.token, "/docs/search", &query).await
+        let url = collection_url(&self.base_url, "search")?;
+        get_json_query(&self.http, &self.token, url, &query).await
     }
 }

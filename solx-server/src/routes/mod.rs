@@ -2,6 +2,7 @@ pub mod actions;
 pub mod docs;
 pub mod files;
 pub mod mcp;
+pub mod refs;
 pub mod types;
 
 use axum::Router;

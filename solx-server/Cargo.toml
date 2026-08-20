@@ -28,7 +28,10 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { workspace = true }
-base64 = { workspace = true }
+serde = { workspace = true }
+# Content-Type for `GET /files/{*rel_path}`, guessed from the extension —
+# the `FileStore` trait doesn't persist one.
+mime_guess = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }

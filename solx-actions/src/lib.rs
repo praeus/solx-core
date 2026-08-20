@@ -194,13 +194,6 @@ impl LocalActionManager {
         &self.invocations
     }
 
-    /// Shared handle to this manager's config service — used by `wasm::host`
-    /// to read the widget connect-TTL/reconnect-grace settings without
-    /// threading `ConfigService` through `HostState::new`.
-    pub fn config(&self) -> &Arc<ConfigService> {
-        &self.config
-    }
-
     /// Provide this manager's own handle for recursive WASM `action-exec`
     /// calls. Must be called exactly once, right after the manager is
     /// wrapped in an `Arc` (e.g.

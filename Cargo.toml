@@ -37,6 +37,7 @@ libsql     = "0.6"
 tantivy    = "0.22"
 jsonschema = { version = "0.28", default-features = false }
 base64     = "0.22"
+mime_guess = "2"
 anyhow     = "1"
 clap       = { version = "4.5", features = ["derive"] }
 fs2        = "0.4"
@@ -44,7 +45,7 @@ reqwest    = { version = "0.12", features = ["json", "rustls-tls", "stream"] }
 url        = "2"
 rand       = "0.8"
 tracing    = "0.1"
-axum       = { version = "0.7", features = ["ws"] }
+axum       = "0.7"
 tower-http = { version = "0.5", features = ["cors"] }
 futures    = "0.3"
 

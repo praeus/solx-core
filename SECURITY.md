@@ -77,7 +77,7 @@ anything echoed back as `"***"` from the stored row — so a fetch → edit →
 save round trip cannot silently destroy a key.
 
 **WASM guests are sandboxed by construction.** The `custom-action` world
-imports only action dispatch, artifact reads, logging, and widget control.
+imports only action dispatch, artifact reads, and logging.
 There is no direct database, filesystem, network, or system access; every
 sensitive operation must go through a named action, where the restrictions
 above apply.
@@ -105,7 +105,7 @@ everything running through solx today is trusted by construction.
 - **Artifact reads are unrestricted.** A WASM guest can read any path in the
   file store; there is no per-artifact permission check.
 - **Loopback capabilities are bearer-style.** OAuth loopbacks, action
-  consoles, HTTP streams, and widgets are reachable by anyone who knows the
+  consoles, and HTTP streams are reachable by anyone who knows the
   unguessable id, without a further caller check.
 - **`solx-server` has no rate limiting, audit log, or token rotation.**
 

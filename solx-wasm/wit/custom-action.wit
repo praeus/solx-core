@@ -40,39 +40,6 @@ interface logger {
   log: func(message: string);
 }
 
-/// Host interface for driving a client-side widget from a WASM guest.
-///
-/// A widget is a WASM action that also has a UI. The guest opens a widget
-/// (standing up a loopback the frontend connects to), then drives it —
-/// show/hide, read/write its fields, dispatch events — through this
-/// interface. The widget's own frontend code talks back over the same
-/// loopback (a websocket) and, separately, makes its own solx API calls
-/// through a host-injected adapter (out of scope; the widget is a black box).
-interface widget {
-  /// Open a widget. `spec` is a JSON object:
-  ///   { "bin_name": "<bundle artifact>", "tag_name": "<custom-element tag>",
-  ///     "fields": { ... } }
-  /// Returns a JSON-encoded widget descriptor the caller surfaces to the
-  /// frontend so it can load the bundle and connect the websocket.
-  open: func(spec: string) -> result<string, string>;
-
-  /// Close a widget and tear down its loopback registration + websocket.
-  close: func(widget-id: string) -> result<_, string>;
-
-  show: func(widget-id: string) -> result<_, string>;
-  hide: func(widget-id: string) -> result<_, string>;
-
-  /// Read one field (JSON-encoded) or, if `field` is empty, the whole
-  /// fields object.
-  get: func(widget-id: string, field: string) -> result<string, string>;
-
-  /// Set one field to a JSON-encoded value.
-  set: func(widget-id: string, field: string, value: string) -> result<_, string>;
-
-  /// Dispatch an event to the widget's frontend code.
-  exec: func(widget-id: string, event: string, payload: string) -> result<_, string>;
-}
-
 /// The interface every sol custom action component must export.
 interface runner {
   use types.{action-result};
@@ -91,6 +58,5 @@ world custom-action {
   import action-exec;
   import artifact-read;
   import logger;
-  import widget;
   export runner;
 }

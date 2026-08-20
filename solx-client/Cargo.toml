@@ -12,7 +12,8 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
-base64 = { workspace = true }
+# Percent-encoding entity references into request URLs, per path segment.
+url = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

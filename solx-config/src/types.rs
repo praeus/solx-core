@@ -152,16 +152,6 @@ pub struct SolxConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http_stream_max_buffer_bytes: Option<u64>,
 
-    /// A widget that is opened but never has its frontend connect within
-    /// this many seconds is reaped. Defaults to 60.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub widget_connect_ttl_secs: Option<u64>,
-    /// A widget whose websocket disconnects is kept alive this many seconds
-    /// to allow the frontend to reconnect (e.g. a page reload) before being
-    /// reaped. Defaults to 15.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub widget_reconnect_grace_secs: Option<u64>,
-
     /// Allowlist of shell commands `Command`-type actions may run, keyed by
     /// an opaque name. A Command action's `fn_name` is that key, resolved
     /// against this map — never a literal command string. **Deny-by-default**:

@@ -152,6 +152,149 @@ async fn types_docs_actions_files_round_trip_over_http() {
     assert!(files.get("notes/a.txt").await.is_err());
 }
 
+/// Exercises the REST surface directly, covering what a typed
+/// `Remote*Manager` call can't express: how a reference is laid out in the
+/// URL, query-string list options, `204` on delete, and the `Content-Type`
+/// on a raw file download. This is the contract a hand-written client sees.
+#[tokio::test]
+async fn rest_surface_over_raw_http() {
+    /// Seeded permissive document type — `type_ref` is required on create.
+    const DOC_TYPE: &str = "/types/docs/Document";
+
+    let (_dir, _cfg, base_url, token) = spawn_server().await;
+    let http = reqwest::Client::new();
+    let auth = |rb: reqwest::RequestBuilder| rb.bearer_auth(&token);
+
+    // PUT to a nested reference, then GET the same URL back.
+    let created = auth(http.put(format!("{base_url}/docs/research/ai/note")))
+        .json(&json!({ "type_ref": DOC_TYPE, "contents": { "k": "v" }, "title": "Nested" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 200);
+    let body: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(body["path"], "/research/ai");
+    assert_eq!(body["name"], "note");
+
+    let fetched = auth(http.get(format!("{base_url}/docs/research/ai/note"))).send().await.unwrap();
+    assert_eq!(fetched.status(), 200);
+    assert_eq!(fetched.json::<serde_json::Value>().await.unwrap()["title"], "Nested");
+
+    // A root-level entity is just one segment: `/docs/{name}`.
+    auth(http.put(format!("{base_url}/docs/rootnote")))
+        .json(&json!({ "type_ref": DOC_TYPE, "contents": {} }))
+        .send()
+        .await
+        .unwrap();
+    let root: serde_json::Value =
+        auth(http.get(format!("{base_url}/docs/rootnote"))).send().await.unwrap().json().await.unwrap();
+    assert_eq!(root["path"], "/", "a single segment means the root path");
+    assert_eq!(root["name"], "rootnote");
+
+    // A name needing percent-encoding survives the round trip intact.
+    auth(http.put(format!("{base_url}/docs/notes/100%25%20%231")))
+        .json(&json!({ "type_ref": DOC_TYPE, "contents": {} }))
+        .send()
+        .await
+        .unwrap();
+    let encoded: serde_json::Value = auth(http.get(format!("{base_url}/docs/notes/100%25%20%231")))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(encoded["name"], "100% #1");
+
+    // List options ride in the query string.
+    let listed: serde_json::Value = auth(http.get(format!("{base_url}/docs")))
+        .query(&[("path_prefix", "/research"), ("limit", "10")])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["total"], 1, "path_prefix should exclude the root-level docs");
+
+    // Search is top-level, so a doc named `search` at the root stays reachable.
+    auth(http.put(format!("{base_url}/docs/search")))
+        .json(&json!({ "type_ref": DOC_TYPE, "contents": {}, "title": "Not the search route" }))
+        .send()
+        .await
+        .unwrap();
+    let shadowed = auth(http.get(format!("{base_url}/docs/search"))).send().await.unwrap();
+    assert_eq!(shadowed.status(), 200);
+    assert_eq!(
+        shadowed.json::<serde_json::Value>().await.unwrap()["title"],
+        "Not the search route"
+    );
+    let hits: serde_json::Value = auth(http.get(format!("{base_url}/search")))
+        .query(&[("q", "Nested")])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(hits["total"].as_u64().unwrap() >= 1);
+
+    // Delete answers 204 with an empty body.
+    let deleted = auth(http.delete(format!("{base_url}/docs/rootnote"))).send().await.unwrap();
+    assert_eq!(deleted.status(), 204);
+    assert!(deleted.bytes().await.unwrap().is_empty());
+
+    // A missing entity still returns a body that deserializes as SolxError.
+    let missing = auth(http.get(format!("{base_url}/docs/research/ai/gone"))).send().await.unwrap();
+    assert_eq!(missing.status(), 404);
+    assert!(matches!(missing.json::<SolxError>().await.unwrap(), SolxError::NotFound(_)));
+
+    // A malformed reference is a 400, not a 500. `:` is one of the characters
+    // `solx_surface::path` forbids in a segment. (Traversal is not testable
+    // from here — any conformant URL parser strips `..` segments, encoded or
+    // not, long before the request is sent; `refs::tests` covers the server
+    // side of that directly.)
+    let bad = auth(http.get(format!("{base_url}/docs/a%3Ab"))).send().await.unwrap();
+    assert_eq!(bad.status(), 400);
+    assert!(matches!(bad.json::<SolxError>().await.unwrap(), SolxError::Invalid(_)));
+
+    // Files: raw bytes in, raw bytes out, with a guessed Content-Type.
+    let png = b"\x89PNG\r\n\x1a\nnot-really".to_vec();
+    let put = auth(http.put(format!("{base_url}/files/media/pic.png"))).body(png.clone()).send().await.unwrap();
+    assert_eq!(put.status(), 200);
+    let got = auth(http.get(format!("{base_url}/files/media/pic.png"))).send().await.unwrap();
+    assert_eq!(got.headers()["content-type"], "image/png");
+    assert_eq!(got.bytes().await.unwrap().to_vec(), png, "bytes must survive unencoded");
+
+    let files_listed: serde_json::Value = auth(http.get(format!("{base_url}/files")))
+        .query(&[("prefix", "media")])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(files_listed["paths"][0], "media/pic.png");
+
+    // A parameterless action can be POSTed with no body at all — no
+    // `Content-Type`, no literal `{}`.
+    _cfg.register_command(
+        "echo-42",
+        solx_config::CommandDef { command: "echo 42".into(), description: None, cwd: None },
+    )
+    .unwrap();
+    auth(http.put(format!("{base_url}/actions/tools/echo")))
+        .json(&json!({ "action_type": "command", "fn_name": "echo-42" }))
+        .send()
+        .await
+        .unwrap();
+    let execed = auth(http.post(format!("{base_url}/actions/tools/echo"))).send().await.unwrap();
+    assert_eq!(execed.status(), 200);
+    let exec_body: serde_json::Value = execed.json().await.unwrap();
+    assert_eq!(exec_body["success"], true);
+    assert_eq!(exec_body["result"], 42);
+}
+
 #[tokio::test]
 async fn wrong_token_is_rejected() {
     let (_dir, _cfg, base_url, _token) = spawn_server().await;

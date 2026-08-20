@@ -5,6 +5,13 @@
 //! index, which only tolerates one writer per process — see
 //! `solx-docs/src/search.rs`).
 //!
+//! The surface is REST: an entity's `path`/`name` are the URL
+//! (`GET /docs/research/ai/note`), `list`/`search` options are the query
+//! string, and the method carries the verb. `docs/http-api.md` documents it
+//! for anyone writing a client; `routes/refs.rs` explains how a URL is read
+//! back into a `(path, name)` pair, and each route module's `router()`
+//! records why its non-CRUD operations sit where they do.
+//!
 //! Also mounts `/mcp` (`routes::mcp`), the MCP Streamable HTTP transport —
 //! sharing this same in-process `Arc<App>` and bearer-auth gate, so an MCP
 //! client can reach solx over HTTP instead of spawning `solx-mcp` as a
@@ -36,7 +43,8 @@ use state::AppState;
 /// `main.rs`) and the bearer token is the only real gate, same posture
 /// `solx-web`'s Bun backend already used (CORS `*`) for its own callers.
 /// Layered outermost (after `.merge`) so a preflight `OPTIONS` is answered
-/// before it ever reaches `require_bearer`.
+/// before it ever reaches `require_bearer` — which now matters for ordinary
+/// calls too, since `PUT`/`DELETE` are always preflighted by browsers.
 pub fn build_router(state: AppState) -> Router {
     let protected = routes::router(&state)
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_bearer));

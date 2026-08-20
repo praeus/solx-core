@@ -72,12 +72,6 @@ pub const WEB_PATH: &str = "/builtin/web";
 /// `solx-packages/solx-ollama/docs/streaming-design.md`.
 pub const WEB_STREAM_PATH: &str = "/builtin/web/stream";
 
-/// Subdivision of the builtin namespace for widget operations — mirrors the
-/// `widget` WIT interface (`open`/`close`/`show`/`hide`/`get`/`set`/`exec`)
-/// as internal actions, so a `.solx` script or any other action can drive a
-/// widget without being a WASM guest. See `docs/widget-actions.md` §6.
-pub const WIDGET_PATH: &str = "/builtin/widget";
-
 /// Namespace for the hand-written JSON-schema types backing built-in
 /// actions' `param_type_ref` (see `solx-types/src/seed.rs`). Shared by every
 /// `/builtin/*` subpath — `param_type_ref` doesn't need to mirror the
@@ -195,15 +189,6 @@ pub fn builtin_actions() -> Vec<SeedAction> {
         a_at(WEB_STREAM_PATH, "start", "http_stream_start", "Issue a streaming HTTP request. Returns stream_id and status as soon as response headers arrive, without waiting for the body.", Some("HttpStreamStartParams")),
         a_at(WEB_STREAM_PATH, "poll", "http_stream_poll", "Drain newline-delimited JSON chunks buffered for a stream since cursor, optionally long-polling up to wait_secs for more.", Some("HttpStreamPollParams")),
         a_at(WEB_STREAM_PATH, "close", "http_stream_close", "Stop a stream's reader task and drop its buffer.", Some("HttpStreamCloseParams")),
-        // Widgets — open/drive a client-side UI widget's loopback. See
-        // `crate::loopback::widget` and `docs/widget-actions.md`.
-        a_at(WIDGET_PATH, "open", "widget_open", "Open a widget: serves its JS bundle and a websocket for the frontend to connect to. Returns a descriptor.", Some("WidgetOpenParams")),
-        a_at(WIDGET_PATH, "close", "widget_close", "Close a widget and tear down its loopback registration and websocket.", Some("WidgetRefParams")),
-        a_at(WIDGET_PATH, "show", "widget_show", "Show a widget (pushed to its frontend if connected).", Some("WidgetRefParams")),
-        a_at(WIDGET_PATH, "hide", "widget_hide", "Hide a widget (pushed to its frontend if connected).", Some("WidgetRefParams")),
-        a_at(WIDGET_PATH, "get", "widget_get", "Read one field (or, if field is omitted, the whole fields object) from a widget.", Some("WidgetGetParams")),
-        a_at(WIDGET_PATH, "set", "widget_set", "Write one field on a widget, pushed to its frontend if connected.", Some("WidgetSetParams")),
-        a_at(WIDGET_PATH, "exec", "widget_exec", "Dispatch an event to a widget's frontend code.", Some("WidgetExecParams")),
     ]
 }
 

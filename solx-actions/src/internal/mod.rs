@@ -55,7 +55,6 @@ pub mod oauth;
 pub mod open_url;
 pub mod secrets;
 pub mod utils;
-pub mod widget;
 
 // Re-export `init_env_mappings` so the existing call site
 // `solx_actions::internal::init_env_mappings` (used by `solx-manager`
@@ -184,15 +183,6 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
         "action_stop" => invocation::stop(params, ctx).await,
         "action_poll" => invocation::poll(params, ctx).await,
         "action_cancelled" => invocation::cancelled(ctx.caller.as_ref(), &ctx.invocations).await,
-
-        // ── widgets ──────────────────────────────────────────────────────
-        "widget_open" => widget::open(params, &ctx.files, &ctx.config, ctx.caller.as_ref()).await,
-        "widget_close" => widget::close(params).await,
-        "widget_show" => widget::show(params).await,
-        "widget_hide" => widget::hide(params).await,
-        "widget_get" => widget::get(params).await,
-        "widget_set" => widget::set(params).await,
-        "widget_exec" => widget::exec(params).await,
 
         other => Err(format!("unknown internal fn_name '{other}'")),
     }

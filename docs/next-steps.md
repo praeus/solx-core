@@ -343,7 +343,7 @@ with the actual gap list.
    or rendered in the component. Reuse the same `FilesField` component
    `DocumentEditor` already uses. This also gives the current bare-text
    "Exec Artifact (bin name)" field something real to point at — a
-   Wasm/Script/Widget action's `bin_name` names one of its own attached
+   Wasm/Script action's `bin_name` names one of its own attached
    files.
 3. `TypeSelector`-style combobox. Old sol's param/result type pickers were a
    searchable combobox with inline "Edit"/"+ New" buttons that opened a
