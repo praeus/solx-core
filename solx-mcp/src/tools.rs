@@ -11,9 +11,33 @@
 const PREFIX: &str = "act__";
 const OPAQUE_MARKER: &str = "b32_";
 
+/// MCP clients commonly re-prefix a server's tool names with something like
+/// `mcp__<server-name>__` before handing them to the model, and Claude's
+/// tool-use API hard-rejects any resulting name over 64 chars — for this
+/// server's usual alias, `mcp__solx__` (11 chars), that leaves 53 for what
+/// this module produces. As of writing, the longest name across every
+/// registered action is 53 (the rest top out at 52), so 55 leaves that
+/// real-world ceiling a couple of chars of slack without accepting names so
+/// long they'd only fit a server aliased as `solx` specifically.
+///
+/// This constant exists because of an actual incident: a handful of verbose
+/// `solx-media`/`solx-omniparse` action names encoded to well past 64 once
+/// prefixed, and — worse than just those tools being unusable — at least
+/// one MCP client dropped this *entire server's* tool list rather than
+/// skipping just the offending entries. Those action names got shortened at
+/// the source; this cap is the backstop for the next one.
+///
+/// It isn't a general fix for long names — the opaque fallback below
+/// re-encodes the full reference in base32, which *expands* it (~1.6x), so
+/// it only helps when the pretty form is merely a little over budget. A
+/// genuinely long action name still needs shortening at the source; treat a
+/// tool tripping this fallback as a signal to rename it, not as "handled".
+const MAX_PRETTY_LEN: usize = 55;
+
 /// Encode `(path, name)` into an MCP tool name. Readable for the common case
-/// (no segment contains a literal `__`); falls back to an unambiguous opaque
-/// form for the rare case where one does, rather than risking a collision.
+/// (no segment contains a literal `__` and the result isn't oversized);
+/// falls back to an unambiguous opaque form otherwise, rather than risking a
+/// collision or an over-length name.
 pub fn encode_tool_name(path: &str, name: &str) -> String {
     let segments: Vec<&str> = if path == "/" {
         Vec::new()
@@ -22,13 +46,20 @@ pub fn encode_tool_name(path: &str, name: &str) -> String {
     };
 
     let all_pretty = !name.contains("__") && segments.iter().all(|s| !s.contains("__"));
-    if all_pretty {
-        let mut parts: Vec<&str> = segments;
+    let pretty = if all_pretty {
+        let mut parts: Vec<&str> = segments.clone();
         parts.push(name);
-        format!("{PREFIX}{}", parts.join("__"))
+        Some(format!("{PREFIX}{}", parts.join("__")))
     } else {
-        let full = solx_surface::path::full_ref(path, name).unwrap_or_else(|_| format!("{path}/{name}"));
-        format!("{PREFIX}{OPAQUE_MARKER}{}", base32_encode(full.as_bytes()))
+        None
+    };
+
+    match pretty {
+        Some(encoded) if encoded.len() <= MAX_PRETTY_LEN => encoded,
+        _ => {
+            let full = solx_surface::path::full_ref(path, name).unwrap_or_else(|_| format!("{path}/{name}"));
+            format!("{PREFIX}{OPAQUE_MARKER}{}", base32_encode(full.as_bytes()))
+        }
     }
 }
 
@@ -140,6 +171,30 @@ mod tests {
         // "act__a__b__c".
         let other = encode_tool_name("/a", "b__c");
         assert_ne!(name, other);
+    }
+
+    #[test]
+    fn oversized_pretty_name_falls_back_to_opaque_and_still_round_trips() {
+        let path = "/packages/solx-media";
+        let name = "install-a-very-long-and-verbose-whisper-model-name";
+        assert!(format!("{PREFIX}packages__solx-media__{name}").len() > MAX_PRETTY_LEN);
+
+        let encoded = encode_tool_name(path, name);
+        assert!(
+            encoded.starts_with("act__b32_"),
+            "expected opaque fallback, got {encoded:?}"
+        );
+        assert_eq!(decode_tool_name(&encoded), Some((path.to_string(), name.to_string())));
+    }
+
+    #[test]
+    fn pretty_name_at_the_limit_stays_pretty() {
+        // Exactly MAX_PRETTY_LEN chars: the boundary is inclusive.
+        let name = "n".repeat(MAX_PRETTY_LEN - "act__builtin__".len());
+        let encoded = encode_tool_name("/builtin", &name);
+        assert_eq!(encoded.len(), MAX_PRETTY_LEN);
+        assert!(!encoded.contains(OPAQUE_MARKER));
+        assert_eq!(decode_tool_name(&encoded), Some(("/builtin".to_string(), name)));
     }
 
     #[test]

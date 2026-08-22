@@ -4,8 +4,9 @@
       "type": "http",
       "url": "http://127.0.0.1:8766/mcp",
       "headers": {
-        "Authorization": "Bearer ${SOLX_SERVER_TOKEN}"
-      }
+        "Authorization": "Bearer placeholder-overridden-by-headersHelper"
+      },
+      "headersHelper": "node scripts/mcp-auth-headers.js"
     }
   }
 }

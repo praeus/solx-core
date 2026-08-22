@@ -684,10 +684,11 @@ fn builtin_action_param_types() -> Vec<SeedType> {
 /// `DocumentPreview.tsx` in solx-web via `x-sol-template`). Renders the
 /// extracted `paragraphs` as `<p>` tags — the rich-text `content` field is
 /// intentionally not rendered here, since it duplicates `paragraphs`/`text`
-/// and is far less readable as a preview. Also renders the `icon` (as an
-/// `<img>` resolved through the files store) and the `comments` tree
+/// and is far less readable as a preview. Also renders the post-level `icon`
+/// (as an `<img>` resolved through the files store) and the `comments` tree
 /// (recursively, via a self-referencing helper declared inline in the EJS
-/// scriptlet).
+/// scriptlet) — each comment's own `icon`, if present, renders directly as
+/// a hotlinked `<img src>` since it's a plain URL, not an ArtifactRef.
 const BLOG_POST_WITH_COMMENTS_TEMPLATE: &str = r#"<div class="doc-preview blog-preview">
   <% function iconRelPath(icon) {
     if (typeof icon === "string") return icon;
@@ -720,6 +721,7 @@ const BLOG_POST_WITH_COMMENTS_TEMPLATE: &str = r#"<div class="doc-preview blog-p
       <% function renderComment(c) { %>
         <li class="blog-preview__comment">
           <div class="blog-preview__comment-meta">
+            <% if (c.icon) { %><img class="blog-preview__comment-icon" src="<%- c.icon %>" alt="" /><% } %>
             <strong><%= c.author || "Anonymous" %></strong>
             <% if (c.date) { %><span class="blog-preview__comment-date"><%= c.date %></span><% } %>
           </div>
@@ -782,6 +784,11 @@ fn blog_post_with_comments_schema() -> Value {
                         "type": ["string", "null"],
                         "title": "Author",
                         "description": "Display name; null for anonymous."
+                    },
+                    "icon": {
+                        "type": ["string", "null"],
+                        "title": "Icon",
+                        "description": "URL of the commenter's userpic/avatar, if any. Unlike the post-level `icon` (an ArtifactRef into the files store), this is a direct hotlinked URL — extractors don't download per-commenter avatars."
                     },
                     "text": {
                         "type": "string",
