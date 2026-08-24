@@ -26,15 +26,15 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::Value;
+use base64::Engine as _;
+use serde_json::{json, Value};
 use solx_config::ConfigService;
 use solx_surface::error::{Result, SolxError};
 use solx_surface::managers::ActionManager;
 use tokio::io::AsyncWriteExt;
 
-use crate::console::ConsoleStore;
-use crate::invocations::InvocationStore;
-use crate::loopback::console as console_loopback;
+use solx_console::loopback as console_loopback;
+use solx_console::{ConsoleStore, InvocationStore};
 
 /// Wall-clock ceiling on a command, overridable per action via
 /// `action_config.timeout_secs`. Also reused by `crate::script` as the
@@ -122,7 +122,7 @@ pub async fn run_command(
     let log_dir = cfg.logs_dir().join(log_dir_slug(action_ref));
 
     // A one-shot credential letting this specific invocation POST to its
-    // own console over loopback HTTP — see `crate::loopback::console` for
+    // own console over loopback HTTP — see `solx_console::loopback` for
     // why this replaced reading the child's stderr. Best-effort: if the
     // loopback can't start, the command still runs, it just has no console
     // (or cancellation-check) access for this run. `registration` must stay
@@ -248,6 +248,16 @@ pub async fn run_webhook(
     action_config: &Option<Value>,
     params: &Value,
 ) -> Result<Value> {
+    // `action_config.path_params` names params that should be substituted
+    // into `{name}` placeholders in the URL template rather than sent in
+    // the JSON body — e.g. `fn_name: ".../documents/{documentId}"` with
+    // `path_params: {"documentId": ""}` and a call-time
+    // `params.documentId`. Substitution must happen before the allowlist
+    // check below so a substituted URL can't be used to evade the gate.
+    let (url, params_owned) = substitute_path_params(url, action_config, params);
+    let url = url.as_str();
+    let params = &params_owned;
+
     // Deny-by-default, checked before anything else — including the console
     // log line below, so a denied webhook leaves no trace of the attempt
     // beyond the returned error. The URL must start with one of the
@@ -293,6 +303,34 @@ pub async fn run_webhook(
     result
 }
 
+/// Substitutes `{key}` placeholders in `url` with the matching string
+/// value from `params`, for every key named in
+/// `action_config.path_params`. The substituted keys are removed from the
+/// returned params so they aren't also sent in the JSON/multipart body.
+/// No URL-encoding is applied — the action author chose the template and
+/// owns how it's encoded (path vs. query vs. header differ).
+fn substitute_path_params(url: &str, action_config: &Option<Value>, params: &Value) -> (String, Value) {
+    let Some(path_params) = action_config
+        .as_ref()
+        .and_then(|c| c.get("path_params"))
+        .and_then(|v| v.as_object())
+    else {
+        return (url.to_string(), params.clone());
+    };
+
+    let mut substituted = url.to_string();
+    let mut remaining = params.clone();
+    for key in path_params.keys() {
+        if let Some(val) = params.get(key).and_then(Value::as_str) {
+            substituted = substituted.replace(&format!("{{{key}}}"), val);
+        }
+        if let Value::Object(map) = &mut remaining {
+            map.remove(key);
+        }
+    }
+    (substituted, remaining)
+}
+
 async fn log_webhook(console: &ConsoleStore, action_ref: &str, invocation_id: &str, level: &str, message: String) {
     let _ = console
         .print(action_ref, invocation_id, None, level, "webhook", Some(message), None)
@@ -318,7 +356,21 @@ async fn run_webhook_inner(
         }
     }
 
-    let mut req = client.post(url).json(params);
+    let is_multipart_related = action_config
+        .as_ref()
+        .and_then(|c| c.get("body_mode"))
+        .and_then(Value::as_str)
+        == Some("multipart_related");
+
+    let mut req = if is_multipart_related {
+        let body = build_multipart_related_body(params)?;
+        client
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, body.content_type)
+            .body(body.bytes)
+    } else {
+        client.post(url).json(params)
+    };
 
     if let Some(cfg) = action_config {
         // Resolve auth via the full pipeline (bearer/oauth_refresh/oauth_service_account).
@@ -353,6 +405,56 @@ async fn run_webhook_inner(
         )));
     }
     Ok(serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)))
+}
+
+#[derive(Debug)]
+struct MultipartRelatedBody {
+    content_type: String,
+    bytes: Vec<u8>,
+}
+
+/// Builds a raw `multipart/related` body (Google's upload-with-metadata
+/// convention, e.g. Drive `files.create?uploadType=multipart`) from
+/// `params.metadata` (a JSON object) + `params.media_base64` +
+/// `params.media_content_type`. `reqwest::multipart::Form` only produces
+/// `multipart/form-data`, which Drive's upload endpoint doesn't accept —
+/// this constructs the two-part `multipart/related` body by hand instead.
+fn build_multipart_related_body(params: &Value) -> Result<MultipartRelatedBody> {
+    let metadata = params.get("metadata").cloned().unwrap_or_else(|| json!({}));
+    let media_b64 = params
+        .get("media_base64")
+        .and_then(Value::as_str)
+        .ok_or_else(|| SolxError::Exec("body_mode 'multipart_related' requires params.media_base64".into()))?;
+    let media_bytes = base64::engine::general_purpose::STANDARD
+        .decode(media_b64)
+        .map_err(|e| SolxError::Exec(format!("invalid media_base64: {e}")))?;
+    let media_content_type = params
+        .get("media_content_type")
+        .and_then(Value::as_str)
+        .unwrap_or("application/octet-stream");
+
+    let boundary = format!(
+        "solxmpb{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{metadata}\r\n--{boundary}\r\nContent-Type: {media_content_type}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    bytes.extend_from_slice(&media_bytes);
+    bytes.extend_from_slice(format!("\r\n--{boundary}--").as_bytes());
+
+    Ok(MultipartRelatedBody {
+        content_type: format!("multipart/related; boundary={boundary}"),
+        bytes,
+    })
 }
 
 /// RFC 6749 §4.1.3 token exchange: POST `code` + credentials as
@@ -395,9 +497,17 @@ async fn dispatch_oauth_token_exchange(
     )
     .await
     .map_err(SolxError::Exec)?;
-    let redirect_uri = auth
+    // Unlike `client_id`/`client_secret` (static per action, so they belong
+    // in config), `redirect_uri` varies per call — it's the loopback's
+    // actual bound address, which callers only know at request time (see
+    // the doc comment on this fn: "it needs an already-obtained code +
+    // redirect_uri"). So `params` takes priority here, the same way `code`
+    // is read from `params` above; `auth.redirect_uri` remains as a
+    // fallback for integrations that always redirect to one fixed URI.
+    let redirect_uri = params
         .get("redirect_uri")
         .and_then(Value::as_str)
+        .or_else(|| auth.get("redirect_uri").and_then(Value::as_str))
         .unwrap_or("");
 
     let mut form = vec![
@@ -430,4 +540,158 @@ async fn dispatch_oauth_token_exchange(
         )));
     }
     Ok(serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn substitute_path_params_replaces_placeholder_and_strips_body_key() {
+        let action_config = Some(json!({ "path_params": { "fileId": "" } }));
+        let params = json!({ "fileId": "abc123", "type": "anyone", "role": "reader" });
+
+        let (url, remaining) = substitute_path_params(
+            "https://www.googleapis.com/drive/v3/files/{fileId}/permissions",
+            &action_config,
+            &params,
+        );
+
+        assert_eq!(url, "https://www.googleapis.com/drive/v3/files/abc123/permissions");
+        assert_eq!(remaining, json!({ "type": "anyone", "role": "reader" }));
+    }
+
+    #[test]
+    fn substitute_path_params_is_a_no_op_without_config() {
+        let params = json!({ "documentId": "xyz" });
+        let (url, remaining) = substitute_path_params("https://docs.googleapis.com/v1/documents/{documentId}", &None, &params);
+        assert_eq!(url, "https://docs.googleapis.com/v1/documents/{documentId}");
+        assert_eq!(remaining, params);
+    }
+
+    #[test]
+    fn substitute_path_params_leaves_placeholder_when_param_missing() {
+        let action_config = Some(json!({ "path_params": { "documentId": "" } }));
+        let params = json!({});
+        let (url, remaining) = substitute_path_params(
+            "https://docs.googleapis.com/v1/documents/{documentId}",
+            &action_config,
+            &params,
+        );
+        assert_eq!(url, "https://docs.googleapis.com/v1/documents/{documentId}");
+        assert_eq!(remaining, json!({}));
+    }
+
+    #[test]
+    fn multipart_related_body_contains_metadata_and_media_parts() {
+        let params = json!({
+            "metadata": { "name": "icon.png" },
+            "media_base64": base64::engine::general_purpose::STANDARD.encode(b"fake-png-bytes"),
+            "media_content_type": "image/png",
+        });
+
+        let body = build_multipart_related_body(&params).expect("body should build");
+        assert!(body.content_type.starts_with("multipart/related; boundary=solxmpb"));
+
+        let text = String::from_utf8_lossy(&body.bytes);
+        assert!(text.contains("Content-Type: application/json; charset=UTF-8"));
+        assert!(text.contains("\"name\":\"icon.png\""));
+        assert!(text.contains("Content-Type: image/png"));
+        assert!(body.bytes.windows(b"fake-png-bytes".len()).any(|w| w == b"fake-png-bytes"));
+        assert!(text.trim_end().ends_with("--"));
+    }
+
+    #[test]
+    fn multipart_related_body_requires_media_base64() {
+        let params = json!({ "metadata": {} });
+        let err = build_multipart_related_body(&params).unwrap_err();
+        assert!(err.to_string().contains("media_base64"));
+    }
+
+    // ── dispatch_oauth_token_exchange: redirect_uri resolution ─────────────
+
+    /// Binds a one-shot HTTP server that captures the request body of the
+    /// single request it receives and replies with `response_body`. Returns
+    /// the base URL plus a `JoinHandle` yielding the captured body.
+    async fn start_token_endpoint(response_body: String) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}/token");
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = stream.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.shutdown().await;
+            body
+        });
+        (base, handle)
+    }
+
+    /// A per-call `redirect_uri` (the loopback's actual bound address) must
+    /// win over a static `auth.redirect_uri` — regression test for the bug
+    /// where the token exchange always used the (usually absent) static
+    /// config value and Google's endpoint rejected the request with
+    /// "Missing parameter: redirect_uri".
+    #[tokio::test]
+    async fn oauth_authorization_code_prefers_params_redirect_uri_over_auth() {
+        let (url, handle) = start_token_endpoint(r#"{"access_token":"at","expires_in":3600}"#.into()).await;
+        let client = reqwest::Client::new();
+        let action_config = json!({});
+        let auth = json!({
+            "type": "oauth_authorization_code",
+            "client_id": "cid",
+            "redirect_uri": "http://static-fallback/callback"
+        });
+        let params = json!({
+            "code": "the-code",
+            "redirect_uri": "http://127.0.0.1:8765/callback"
+        });
+
+        let result = dispatch_oauth_token_exchange(&client, &url, &action_config, &auth, &params).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+
+        let body = handle.await.unwrap();
+        assert!(
+            body.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A8765%2Fcallback"),
+            "expected the params redirect_uri in the POST body, got: {body}"
+        );
+        assert!(
+            !body.contains("static-fallback"),
+            "params.redirect_uri should win over auth.redirect_uri, got: {body}"
+        );
+    }
+
+    /// When the caller doesn't supply `redirect_uri` in params, the static
+    /// `auth.redirect_uri` (for integrations that always use one fixed
+    /// callback) is still honored.
+    #[tokio::test]
+    async fn oauth_authorization_code_falls_back_to_auth_redirect_uri() {
+        let (url, handle) = start_token_endpoint(r#"{"access_token":"at","expires_in":3600}"#.into()).await;
+        let client = reqwest::Client::new();
+        let action_config = json!({});
+        let auth = json!({
+            "type": "oauth_authorization_code",
+            "client_id": "cid",
+            "redirect_uri": "http://static-fallback/callback"
+        });
+        let params = json!({ "code": "the-code" });
+
+        let result = dispatch_oauth_token_exchange(&client, &url, &action_config, &auth, &params).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+
+        let body = handle.await.unwrap();
+        assert!(
+            body.contains("redirect_uri=http%3A%2F%2Fstatic-fallback%2Fcallback"),
+            "expected the auth.redirect_uri fallback in the POST body, got: {body}"
+        );
+    }
 }

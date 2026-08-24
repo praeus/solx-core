@@ -5,9 +5,10 @@
 //! every entry it stores, but has nowhere to hang a *status* or a *cancel
 //! flag*: `consoles` is keyed by `action_ref`, and `invocation_id` is only a
 //! column on `console_entries`. This module is that missing state, modeled
-//! directly on `crate::console`'s store: same `Db` handle (the same file as
-//! `actions` and `consoles`), same `ensure_schema`/`sweep_expired` shape,
-//! same `''`-sentinel-plus-[`crate::opt`] convention for nullable text.
+//! directly on `crate::console`'s store: same `Db` handle (this crate's own
+//! file, separate from `solx-actions`' `actions` table), same
+//! `ensure_schema`/`sweep_expired` shape, same `''`-sentinel-plus-`opt`
+//! convention for nullable text.
 //!
 //! Status values are free-form strings, matching the console's own
 //! `level`/`source` convention, rather than a Rust enum — see the
@@ -20,8 +21,7 @@ use serde_json::Value;
 use solx_config::ConfigService;
 use solx_surface::error::Result;
 
-use crate::db::{map_db, Db};
-use crate::opt;
+use crate::db::{map_db, opt, Db};
 
 pub const DDL: &str = "\
 CREATE TABLE IF NOT EXISTS invocations (\
@@ -111,8 +111,8 @@ impl InvocationStore {
 
     /// Create a new `running` row. `console_seq_start` should be the
     /// console's `next_seq` at the moment of creation (see
-    /// `ConsoleStore::list`), captured by the caller before this call so a
-    /// client can jump straight to this run's own output.
+    /// `ConsoleStore::current_next_seq`), captured by the caller before this
+    /// call so a client can jump straight to this run's own output.
     pub async fn create(&self, invocation_id: &str, action_ref: &str, console_seq_start: i64) -> Result<()> {
         let conn = self.db.connect().await?;
         let now = Utc::now().to_rfc3339();

@@ -2,8 +2,8 @@
 //!
 //! Console identity **is** the action ref — `/packages/solx-ollama/ollama-chat`
 //! has exactly one console, and every layer of that action's execution
-//! (a WASM guest's `logger.log`, in phase 1; Command stderr, webhook
-//! request/response, and script stages in a later phase) writes to it. See
+//! (a WASM guest's `logger.log`, Command stderr via the loopback, webhook
+//! request/response, and script stages) writes to it. See
 //! `docs/console-implementation-plan.md` in the workspace root for the full
 //! design rationale.
 //!
@@ -11,29 +11,27 @@
 //! trouble:
 //!
 //! * `invocation_id` — minted once per `exec_as` dispatch to a `Wasm`/
-//!   `Script` action (see [`crate::caller::Caller::invocation_id`]) and
+//!   `Script` action (see `solx_actions::caller::Caller::invocation_id`) and
 //!   stamped on every entry that invocation writes. Without this, two
 //!   concurrent runs of the same action would interleave into one
 //!   indistinguishable stream — fine for status lines, actively wrong for
-//!   streamed chunks. Reads in phase 1 do not filter by it (by design —
-//!   the default read is "everything, in order"), but it is there for a
-//!   client that wants to separate runs itself, and for a future
-//!   `invocation_id` filter to be added without a schema change.
-//! * `run_id` — reserved, always `None` in phase 1. Would let a whole nested
-//!   call tree (an orchestrator and everything it invokes) be queried
-//!   together. Adding the column now and wiring it later is free; adding it
-//!   later would be a migration.
+//!   streamed chunks. Reads do not filter by it by default (the default read
+//!   is "everything, in order"), but it is there for a client that wants to
+//!   separate runs itself, and for a future `invocation_id` filter to be
+//!   added without a schema change.
+//! * `run_id` — reserved, always `None` today. Would let a whole nested call
+//!   tree (an orchestrator and everything it invokes) be queried together.
+//!   Adding the column now and wiring it later is free; adding it later
+//!   would be a migration.
 //!
 //! `seq` is the read cursor: monotonic per console, never reused even
 //! across eviction, which is what makes `tail` cheap, replayable, and safe
 //! for more than one concurrent reader.
 //!
-//! Storage lives in the **same database file** as the `actions` table
-//! (`LocalActionManager`'s `Db`) rather than a separate one. [`ConsoleStore`]
-//! only ever touches its own `Db` handle, so retargeting it to a different
-//! file later is a one-line change at construction — the cost of that
-//! move is copying existing rows across (or accepting the retention policy
-//! discarding old history), not a code change.
+//! Storage lives in this crate's own database file, separate from
+//! `solx-actions`' `actions` table — there are no DB-level foreign keys
+//! linking them, only the `action_ref` string shared at the application
+//! layer.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,8 +42,7 @@ use serde_json::Value;
 use solx_config::ConfigService;
 use solx_surface::error::{Result, SolxError};
 
-use crate::db::{map_db, Db};
-use crate::opt;
+use crate::db::{map_db, opt, Db};
 
 pub const DDL: &str = "\
 CREATE TABLE IF NOT EXISTS consoles (\
@@ -73,12 +70,13 @@ CREATE INDEX IF NOT EXISTS idx_console_entries_invocation \
 ";
 
 /// Long-poll granularity for [`ConsoleStore::tail`]. `pub(crate)` so
-/// `crate::lib`'s `poll_invocation` can reuse the same cadence rather than
-/// defining a second set of long-poll constants.
-pub(crate) const TAIL_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// `solx-actions`' `poll_invocation` can reuse the same cadence via
+/// [`TAIL_POLL_INTERVAL`]/[`MAX_TAIL_WAIT_SECS`] rather than defining a
+/// second set of long-poll constants.
+pub const TAIL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Ceiling on `tail`'s `wait_secs`, mirroring `oauth_await`'s timeout clamp —
 /// an internal action call should never block indefinitely.
-pub(crate) const MAX_TAIL_WAIT_SECS: u64 = 60;
+pub const MAX_TAIL_WAIT_SECS: u64 = 60;
 /// Evict at least this fraction of the cap at once, so a console pinned at
 /// its limit isn't paying for a `DELETE` on every single insert.
 const EVICT_BATCH_FRACTION: f64 = 0.1;
@@ -358,7 +356,7 @@ impl ConsoleStore {
 
     /// Drop every console (and its entries) whose most recent write is
     /// older than the configured TTL. Intended to run once at startup;
-    /// there is no background scheduler in phase 1.
+    /// there is no background scheduler.
     pub async fn sweep_expired(&self) -> Result<i64> {
         let conn = self.db.connect().await?;
         let cutoff = (Utc::now() - chrono::Duration::days(self.config.console_ttl_days())).to_rfc3339();
@@ -396,7 +394,7 @@ impl ConsoleStore {
     /// assigned to the *next* entry written, or `1` if nothing has been
     /// written yet (no row exists in `consoles` before the first `print`).
     ///
-    /// Used by `LocalActionManager::start_invocation` to capture a detached
+    /// Used by `solx-actions`' `start_invocation` to capture a detached
     /// run's starting cursor. Deliberately an exact lookup through
     /// [`Self::meta`] rather than [`Self::list`]'s prefix `LIKE` match,
     /// which could return a *different* console's summary if another

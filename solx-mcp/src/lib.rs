@@ -7,12 +7,11 @@
 //! serves the same type over Streamable HTTP via [`streamable_http_service`]
 //! below, mounted alongside its other routes and sharing its own in-process
 //! `Arc<App>` — no subprocess, no per-client exe lock, one shared bearer-auth
-//! gate. Both paths go through the identical `server`/`tools`/`schema`/`error`
+//! gate. Both paths go through the identical `server`/`tools`/`error`
 //! logic, so there's one source of truth for the tool catalogue regardless of
 //! how a client reaches it.
 
 pub mod error;
-pub mod schema;
 pub mod server;
 pub mod tools;
 

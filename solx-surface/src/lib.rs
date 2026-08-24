@@ -8,6 +8,7 @@
 
 pub mod entities;
 pub mod error;
+pub mod internal_actions;
 pub mod managers;
 pub mod path;
 pub mod query;
@@ -18,6 +19,9 @@ pub use error::{Result, SolxError};
 pub use entities::{
     Action, ActionExecResult, ActionInput, ActionType, DocLink, Document, DocumentInput, FileRef,
     LinkKind, TypeEntity, TypeInput,
+};
+pub use internal_actions::{
+    ActionExecutor, Caller, InternalActionHandler, InternalActionRegistry, InternalCallCtx, SeedAction,
 };
 pub use managers::{ActionManager, DocManager, FileStore, Solx, TypeManager};
 pub use query::{ListOptions, Page, SearchHit, SearchQuery, SearchResults, SortOrder};

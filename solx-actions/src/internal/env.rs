@@ -1,11 +1,9 @@
-//! Small stateless utilities and the in-process environment store.
+//! The in-process environment store.
 //!
-//! * `random_string` — a process-local generator with no I/O, no
-//!   caller-scoping, and no trust model beyond "an action called this".
-//! * `get_env` / `set_env` read and write a namespaced `RwLock<HashMap>`,
-//!   seeded at startup from `SolxConfig.env_mappings` via
-//!   [`init_env_mappings`] and from `SolxConfig.env_vars` via
-//!   [`init_persisted_env`].
+//! `get_env` / `set_env` read and write a namespaced `RwLock<HashMap>`,
+//! seeded at startup from `SolxConfig.env_mappings` via
+//! [`init_env_mappings`] and from `SolxConfig.env_vars` via
+//! [`init_persisted_env`].
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -135,28 +133,4 @@ pub(super) fn set_env(params: &Value, config: &Arc<ConfigService>) -> Result<Val
         store.entry(namespace.clone()).or_default().insert(key, value);
     }
     Ok(json!({ "set": true, "namespace": namespace, "persisted": persist }))
-}
-
-// ── random_string ─────────────────────────────────────────────────────────
-
-const RANDOM_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-
-pub(super) fn random_string_value(params: &Value) -> Result<Value, String> {
-    use rand::seq::SliceRandom;
-    let length = params
-        .get("length")
-        .and_then(Value::as_u64)
-        .unwrap_or(16) as usize;
-    if length == 0 {
-        return Ok(json!({ "value": "" }));
-    }
-    let mut rng = rand::thread_rng();
-    let mut buf = String::with_capacity(length);
-    for _ in 0..length {
-        // `unwrap` is safe: the alphabet is non-empty and we draw one byte
-        // per iteration, so `choose` cannot return `None`.
-        let b = RANDOM_ALPHABET.choose(&mut rng).copied().unwrap();
-        buf.push(b as char);
-    }
-    Ok(json!({ "value": buf }))
 }

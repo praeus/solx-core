@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use solx_surface::entities::{ActionInput, TypeInput};
 use solx_surface::error::SolxError;
 use solx_surface::managers::{ActionManager, DocManager, TypeManager};
-use solx_surface::query::{ListOptions, SearchQuery};
+use solx_surface::query::{ActionSearchQuery, ListOptions, SearchQuery};
 
 use solx_surface::entities::DocumentInput;
 
@@ -136,11 +136,12 @@ pub(super) async fn search_documents(params: &Value, docs: &Arc<dyn DocManager>)
     to_value(&results)
 }
 
-/// Structured filtering over the action catalogue — actions have no
-/// full-text index (only documents do, via Tantivy), so this is `list` with
-/// `ListOptions`' filters, not fuzzy relevance ranking.
+/// Full-text (FTS5) + structured filter search over the action catalogue —
+/// `q` matches `path`/`name`/`caption`/`description`/`category`/`phrases`,
+/// ranked by relevance, and composes with the same `path_prefix`/
+/// `filter_field`/date filters as `entity_list_actions`.
 pub(super) async fn search_actions(params: &Value, actions: &Arc<dyn ActionManager>) -> Result<Value, String> {
-    let opts: ListOptions = parse_input(params)?;
-    let page = actions.list(opts).await.map_err(|e| e.to_string())?;
+    let query: ActionSearchQuery = parse_input(params)?;
+    let page = actions.search(query).await.map_err(|e| e.to_string())?;
     to_value(&page)
 }

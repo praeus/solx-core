@@ -122,7 +122,7 @@ async fn call_tool_streams_console_entries_as_progress_notifications_over_http()
     app.files()
         .put(
             &solx_files::shared_action_file_path("count.solx"),
-            b"exec /builtin/random_string; exec /builtin/action/entity_list_actions".to_vec(),
+            b"exec /builtin/action/entity_list_actions; exec /builtin/action/entity_list_documents".to_vec(),
         )
         .await?;
     app.actions()
@@ -149,7 +149,7 @@ async fn call_tool_streams_console_entries_as_progress_notifications_over_http()
     assert!(!received.is_empty(), "expected at least one progress notification over HTTP/SSE");
     let messages: Vec<String> = received.iter().filter_map(|p| p.message.clone()).collect();
     assert!(
-        messages.iter().any(|m| m.contains("exec /builtin/random_string")),
+        messages.iter().any(|m| m.contains("exec /builtin/action/entity_list_actions")),
         "expected a progress message naming the first stage, got: {messages:?}"
     );
 

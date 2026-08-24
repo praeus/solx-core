@@ -141,7 +141,7 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let app = App::build().await?;
+    let app = build_app().await?;
     let result = run_command(&app, cli.command, None).await?;
     match result {
         Value::String(s) => println!("{s}"),
@@ -152,6 +152,74 @@ async fn main() -> Result<()> {
 
 fn to_anyhow(e: SolxError) -> anyhow::Error {
     anyhow!(e.to_string())
+}
+
+/// Build the `App`, auto-detecting a locally-reachable `solx-server` before
+/// falling back to opening local storage directly.
+///
+/// Without this, every CLI invocation opens the local Tantivy docs index
+/// itself (`App::build()`'s default when no `server_url` is configured),
+/// which collides with `LockBusy` if a `solx-server` is already running
+/// against the same appdata dir (only one `IndexWriter` per directory is
+/// allowed). And with no server running at all, any spawned Command action
+/// that talks to `solx-server` over HTTP for the file store (e.g.
+/// `solx-quickjs`'s `build-javascript-action`, via
+/// `solx-package-lib::ServerConfig`) has nothing to reach.
+///
+/// So: an explicit `server_url` (env or config) is honored unchanged. With
+/// none set, probe the default local port — if something's already
+/// listening there, wire remote against it instead of touching local
+/// storage. If nothing's listening, build local as today and additionally
+/// serve this same `App` over HTTP for the rest of this process's
+/// lifetime, so a spawned child still has a server to reach.
+async fn build_app() -> Result<Arc<App>> {
+    let config = solx_config::ConfigService::open().context("open config")?;
+    let snap = config.snapshot();
+
+    let explicit = std::env::var("SOLX_SERVER_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| snap.server_url.clone().filter(|s| !s.trim().is_empty()));
+    if explicit.is_some() {
+        return App::build().await;
+    }
+
+    let port = snap.server_port.unwrap_or(solx_config::DEFAULT_SERVER_PORT);
+
+    if health_check(port).await {
+        let token = config.ensure_server_token().context("ensure server token")?;
+        std::env::set_var("SOLX_SERVER_URL", format!("http://127.0.0.1:{port}"));
+        std::env::set_var("SOLX_SERVER_TOKEN", &token);
+        return App::build().await;
+    }
+
+    let app = App::build_local().await?;
+    match app.config.ensure_server_token() {
+        Ok(token) => {
+            let state = solx_server::state::AppState {
+                app: app.clone(),
+                token: Arc::from(token.as_str()),
+            };
+            if let Err(e) = solx_server::spawn_embedded(state, port).await {
+                tracing::warn!(
+                    "could not start embedded solx-server on 127.0.0.1:{port} ({e}); \
+                     actions that call back into solx-server over HTTP may fail"
+                );
+            }
+        }
+        Err(e) => tracing::warn!("could not prepare embedded solx-server token: {e}"),
+    }
+    Ok(app)
+}
+
+async fn health_check(port: u16) -> bool {
+    reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/health"))
+        .timeout(std::time::Duration::from_millis(300))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
 }
 
 async fn run_command(app: &Arc<App>, command: Commands, piped: Option<Value>) -> Result<Value> {

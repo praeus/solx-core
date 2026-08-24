@@ -3794,6 +3794,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "solx-config",
+ "solx-console",
  "solx-docs",
  "solx-files",
  "solx-scripts",
@@ -3816,12 +3817,14 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "rand 0.8.7",
+ "reqwest 0.12.28",
  "serde_json",
  "solx-actions",
  "solx-config",
  "solx-manager",
  "solx-packages",
  "solx-scripts",
+ "solx-server",
  "solx-surface",
  "tokio",
  "tracing",
@@ -3855,6 +3858,26 @@ dependencies = [
  "serde_json",
  "solx-surface",
  "tempfile",
+]
+
+[[package]]
+name = "solx-console"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.7.9",
+ "chrono",
+ "libsql",
+ "rand 0.8.7",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "solx-config",
+ "solx-surface",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

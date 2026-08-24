@@ -179,4 +179,130 @@ pub struct SolxConfig {
     /// ```
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_webhook_base_urls: Option<Vec<String>>,
+
+    /// Denylist of action paths (and optionally specific action names at
+    /// those paths) that the MCP server hides from its tool catalogue. A
+    /// rule's `path` is a glob pattern matched against the action's full
+    /// path (leading slash); `*` matches any characters including `/`, `?`
+    /// matches a single character. When `actions` is unset or empty, every
+    /// action under the matched path is excluded; otherwise only the named
+    /// actions are.
+    ///
+    /// ```json
+    /// "mcp_exclude": [
+    ///   { "path": "*/_internal/*" },
+    ///   { "path": "/packages/solx-google", "actions": ["search"] }
+    /// ]
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_exclude: Option<Vec<McpExcludeRule>>,
+}
+
+/// A single MCP tool-catalogue exclusion rule. See
+/// [`SolxConfig::mcp_exclude`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpExcludeRule {
+    /// Glob pattern matched against the action's full path (leading slash).
+    pub path: String,
+    /// When set and non-empty, only these action names at the matched path
+    /// are excluded; otherwise every action under the path is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<Vec<String>>,
+}
+
+impl McpExcludeRule {
+    /// Whether this rule excludes the action at `path`/`name`.
+    pub fn matches(&self, path: &str, name: &str) -> bool {
+        if !glob_matches(&self.path, path) {
+            return false;
+        }
+        match &self.actions {
+            Some(names) if !names.is_empty() => names.iter().any(|n| n == name),
+            _ => true,
+        }
+    }
+}
+
+/// Match a glob pattern against a path. `*` matches any sequence of
+/// characters (including `/`), `?` matches any single character; every other
+/// character matches literally. No external glob/regex dependency — this is
+/// the classic two-pointer glob algorithm.
+pub fn glob_matches(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star_p, mut star_t) = (usize::MAX, 0usize);
+
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star_p = pi;
+            star_t = ti;
+            pi += 1;
+        } else if star_p != usize::MAX {
+            pi = star_p + 1;
+            star_t += 1;
+            ti = star_t;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn glob_star_matches_across_slashes() {
+        assert!(glob_matches("*/_internal/*", "/a/_internal/b"));
+        assert!(glob_matches("*/_internal/*", "/_internal/b"));
+        assert!(glob_matches("*/_internal/*", "/x/y/_internal/z"));
+        assert!(!glob_matches("*/_internal/*", "/a/internal/b"));
+        assert!(!glob_matches("*/_internal/*", "/a/_internal"));
+    }
+
+    #[test]
+    fn glob_question_matches_single_char() {
+        assert!(glob_matches("/packages/solx-?oogle", "/packages/solx-google"));
+        assert!(!glob_matches("/packages/solx-?oogle", "/packages/solx-gooogle"));
+    }
+
+    #[test]
+    fn glob_literal_and_anchoring() {
+        assert!(glob_matches("/builtin", "/builtin"));
+        assert!(!glob_matches("/builtin", "/builtin/console"));
+        assert!(glob_matches("/builtin/*", "/builtin/console"));
+        assert!(glob_matches("*", "/anything/at/all"));
+    }
+
+    #[test]
+    fn rule_path_only_excludes_everything_under_path() {
+        let rule = McpExcludeRule { path: "*/_internal/*".into(), actions: None };
+        assert!(rule.matches("/a/_internal/b", "anything"));
+        assert!(!rule.matches("/a/public/b", "anything"));
+    }
+
+    #[test]
+    fn rule_with_actions_excludes_only_named() {
+        let rule = McpExcludeRule {
+            path: "/packages/solx-google".into(),
+            actions: Some(vec!["search".into()]),
+        };
+        assert!(rule.matches("/packages/solx-google", "search"));
+        assert!(!rule.matches("/packages/solx-google", "list"));
+        assert!(!rule.matches("/packages/solx-other", "search"));
+    }
+
+    #[test]
+    fn rule_with_empty_actions_behaves_like_path_only() {
+        let rule = McpExcludeRule { path: "/x".into(), actions: Some(vec![]) };
+        assert!(rule.matches("/x", "anything"));
+    }
 }

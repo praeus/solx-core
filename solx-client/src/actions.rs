@@ -3,7 +3,7 @@ use serde_json::Value;
 use solx_surface::entities::{Action, ActionExecResult, ActionInput};
 use solx_surface::error::Result;
 use solx_surface::managers::ActionManager;
-use solx_surface::query::{ListOptions, Page};
+use solx_surface::query::{ActionSearchQuery, ListOptions, Page};
 
 use crate::http::{collection_url, delete, entity_url, get_json, get_json_query, post_json, put_json};
 
@@ -47,6 +47,14 @@ impl ActionManager for RemoteActionManager {
     async fn list(&self, opts: ListOptions) -> Result<Page<Action>> {
         let url = collection_url(&self.base_url, "actions")?;
         get_json_query(&self.http, &self.token, url, &opts).await
+    }
+
+    /// `GET /actions-search` — a top-level route rather than
+    /// `/actions/search`, for the same reason document search lives at
+    /// `/search` rather than `/docs/search`; see `solx_client::docs`.
+    async fn search(&self, query: ActionSearchQuery) -> Result<Page<Action>> {
+        let url = collection_url(&self.base_url, "actions-search")?;
+        get_json_query(&self.http, &self.token, url, &query).await
     }
 
     /// `POST` on the action's own URL, with the params as the body.

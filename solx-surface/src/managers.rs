@@ -58,6 +58,7 @@ pub trait ActionManager: Send + Sync {
     async fn get(&self, path: &str, name: &str) -> Result<Action>;
     async fn delete(&self, path: &str, name: &str) -> Result<()>;
     async fn list(&self, opts: ListOptions) -> Result<Page<Action>>;
+    async fn search(&self, query: ActionSearchQuery) -> Result<Page<Action>>;
     async fn exec(&self, path: &str, name: &str, params: Value) -> Result<ActionExecResult>;
 }
 

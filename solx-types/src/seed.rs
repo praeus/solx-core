@@ -32,7 +32,7 @@ pub struct SeedType {
 }
 
 /// The minimal built-in type set. Primitives + a permissive document base +
-/// `BlogPostWithComments` (the one extraction type we keep).
+/// two rich-text document types (`RichTextDocument`, `BlogPostWithComments`).
 pub fn builtin_types() -> Vec<SeedType> {
     let mut out = Vec::new();
 
@@ -65,18 +65,18 @@ pub fn builtin_types() -> Vec<SeedType> {
 
     out.push(SeedType {
         path: DOCS_PATH,
-        name: "BlogPostWithComments",
-        description: "A blog post with rich-text content and a recursive comment tree.",
-        schema: blog_post_with_comments_schema(),
+        name: "RichTextDocument",
+        description: "A plain rich-text document: Tiptap content and nothing else.",
+        schema: rich_text_document_schema(),
         groups: vec!["document-type"],
     });
 
     out.push(SeedType {
-        path: BUILTIN_TYPES_PATH,
-        name: "MediaDocument",
-        description: "Result of a solx-media extraction. Persisted to solx-server via entity_save_document by the solx-media actions.",
-        schema: media_document_schema(),
-        groups: vec!["media", "document-type"],
+        path: DOCS_PATH,
+        name: "BlogPostWithComments",
+        description: "A blog post with rich-text content and a recursive comment tree.",
+        schema: blog_post_with_comments_schema(),
+        groups: vec!["document-type"],
     });
 
     out.extend(builtin_action_param_types());
@@ -216,6 +216,27 @@ fn builtin_action_param_types() -> Vec<SeedType> {
                     "linked_to": { "type": "string", "description": "Full reference of a document this search's hits must link to." },
                     "limit": { "type": "integer" },
                     "offset": { "type": "integer" },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "SearchActionsParams",
+            description: "Full-text + faceted search over actions.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "q": { "type": "string", "description": "Free-text query over path/name/caption/description/category/phrases." },
+                    "path_prefix": { "type": "string" },
+                    "limit": { "type": "integer" },
+                    "offset": { "type": "integer" },
+                    "filter_field": { "type": "string" },
+                    "filter_value": { "type": "string" },
+                    "sort_by": { "type": "string" },
+                    "sort_order": { "type": "string", "enum": ["asc", "desc"] },
+                    "date_after": { "type": "string" },
+                    "date_before": { "type": "string" },
                 }
             }),
             groups: vec!["builtin-params"],
@@ -398,16 +419,6 @@ fn builtin_action_param_types() -> Vec<SeedType> {
             name: "EmptyParams",
             description: "No parameters.",
             schema: json!({ "type": "object" }),
-            groups: vec!["builtin-params"],
-        },
-        SeedType {
-            path: BUILTIN_TYPES_PATH,
-            name: "RandomStringParams",
-            description: "Random alphanumeric string. `length` defaults to 16.",
-            schema: json!({
-                "type": "object",
-                "properties": { "length": { "type": "integer", "minimum": 0 } }
-            }),
             groups: vec!["builtin-params"],
         },
         SeedType {
@@ -685,10 +696,17 @@ fn builtin_action_param_types() -> Vec<SeedType> {
 /// extracted `paragraphs` as `<p>` tags — the rich-text `content` field is
 /// intentionally not rendered here, since it duplicates `paragraphs`/`text`
 /// and is far less readable as a preview. Also renders the post-level `icon`
-/// (as an `<img>` resolved through the files store) and the `comments` tree
-/// (recursively, via a self-referencing helper declared inline in the EJS
-/// scriptlet) — each comment's own `icon`, if present, renders directly as
-/// a hotlinked `<img src>` since it's a plain URL, not an ArtifactRef.
+/// and the `comments` tree (recursively, via a self-referencing helper
+/// declared inline in the EJS scriptlet) — each comment's own `icon`, if
+/// present, renders directly as a hotlinked `<img src>` since it's a plain
+/// URL, not an ArtifactRef.
+///
+/// The post-level `icon` resolves through the files store (auth-gated, so a
+/// bare `src` URL can't load it — `solx-server` requires a bearer token on
+/// every route, `/files/*rel_path` included). Instead of `src`, the `<img>`
+/// carries `data-relpath`, and `DocumentPreview.tsx` resolves it to a
+/// `blob:` URL client-side after render, the same `objectUrlCache` mechanism
+/// `ResolvedImage.tsx` uses for rich-text images.
 const BLOG_POST_WITH_COMMENTS_TEMPLATE: &str = r#"<div class="doc-preview blog-preview">
   <% function iconRelPath(icon) {
     if (typeof icon === "string") return icon;
@@ -700,7 +718,7 @@ const BLOG_POST_WITH_COMMENTS_TEMPLATE: &str = r#"<div class="doc-preview blog-p
   } %>
   <% const iconPath = iconRelPath(contents.icon); %>
   <% if (iconPath) { %>
-    <img class="blog-preview__icon" src="/api/files/raw?relPath=<%- encodeURIComponent(iconPath) %>" alt="" />
+    <img class="blog-preview__icon" data-relpath="<%- encodeURIComponent(iconPath) %>" alt="" />
   <% } %>
   <h1><%= document.title || document.name %></h1>
   <p class="doc-preview__meta">
@@ -738,6 +756,54 @@ const BLOG_POST_WITH_COMMENTS_TEMPLATE: &str = r#"<div class="doc-preview blog-p
   <% } %>
 </div>"#;
 
+/// Client-side preview template for `RichTextDocument` (see
+/// `BLOG_POST_WITH_COMMENTS_TEMPLATE` above for the `data-relpath` /
+/// `blob:` image-resolution convention). No icon or comment tree here —
+/// just the document's title/summary plus its paragraphs.
+const RICH_TEXT_DOCUMENT_TEMPLATE: &str = r#"<div class="doc-preview richtext-preview">
+  <h1><%= document.title || document.name %></h1>
+  <p class="doc-preview__meta">
+    <code><%= document.path %>/<%= document.name %></code>
+  </p>
+  <% if (document.summary) { %><p class="doc-preview__summary"><%= document.summary %></p><% } %>
+
+  <% const paragraphs = (contents.paragraphs && contents.paragraphs.length)
+       ? contents.paragraphs
+       : (contents.text ? contents.text.split(/\n\s*\n/).filter(Boolean) : []); %>
+  <% paragraphs.forEach(function (para) { %>
+    <p><%= para %></p>
+  <% }); %>
+</div>"#;
+
+/// Schema for `RichTextDocument`: a `BlogPostWithComments` stripped down to
+/// just its rich-text fields (no `icon`, no `comments`) — for content that's
+/// a document, not a post with a comment thread.
+fn rich_text_document_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["content", "text"],
+        "properties": {
+            "content": {
+                "$ref": "#/$defs/RichTextDoc",
+                "title": "Rich Content",
+                "description": "Full Tiptap rich-text document."
+            },
+            "text": {
+                "type": "string",
+                "title": "Plain Text",
+                "description": "Plain-text version of the document body."
+            },
+            "paragraphs": {
+                "type": "array",
+                "items": { "type": "string" },
+                "title": "Paragraphs",
+                "description": "Body split into paragraphs (preview renders these)."
+            }
+        },
+        "x-sol-template": RICH_TEXT_DOCUMENT_TEMPLATE
+    })
+}
+
 /// Hand-written schema for `BlogPostWithComments`, mirroring the shape of the
 /// old `sol-core` extraction type (icon/content/comments/text/paragraphs with a
 /// recursive `BlogComment`).
@@ -747,9 +813,10 @@ fn blog_post_with_comments_schema() -> Value {
         "required": ["content", "text"],
         "properties": {
             "icon": {
-                "$ref": "#/$defs/ArtifactRef",
+                "type": "string",
+                "x-sol-editor": "image",
                 "title": "Icon",
-                "description": "Optional preview image (resolved via the files store)."
+                "description": "Optional preview image: a relPath into the files store (e.g. \"files/docs/shared/<name>\"), resolved by ImageField / the preview's data-relpath convention."
             },
             "content": {
                 "$ref": "#/$defs/RichTextDoc",
@@ -788,7 +855,7 @@ fn blog_post_with_comments_schema() -> Value {
                     "icon": {
                         "type": ["string", "null"],
                         "title": "Icon",
-                        "description": "URL of the commenter's userpic/avatar, if any. Unlike the post-level `icon` (an ArtifactRef into the files store), this is a direct hotlinked URL — extractors don't download per-commenter avatars."
+                        "description": "URL of the commenter's userpic/avatar, if any. Unlike the post-level `icon` (a relPath into the files store), this is a direct hotlinked URL — extractors don't download per-commenter avatars."
                     },
                     "text": {
                         "type": "string",
@@ -805,117 +872,6 @@ fn blog_post_with_comments_schema() -> Value {
                         "title": "Replies",
                         "description": "Nested replies to this comment (recursive)."
                     }
-                }
-            }
-        }
-    })
-}
-
-/// Schema for the `MediaDocument` shape returned by the solx-media package
-/// (`solx-media` action results, registered as `/builtin/types/MediaDocument`).
-///
-/// One flat shape covers all four extraction modes (`image-text`,
-/// `audio-transcript`, `video-transcript`, `materialized-html`). The `kind`
-/// discriminator picks which fields are populated. Future fields can be added
-/// without a schema migration — unknown fields are ignored on read.
-fn media_document_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["kind", "document_name", "contents"],
-        "properties": {
-            "kind": {
-                "type": "string",
-                "title": "Kind",
-                "enum": [
-                    "image-text",
-                    "audio-transcript",
-                    "video-transcript",
-                    "materialized-html"
-                ],
-                "description": "Discriminator for which extraction mode produced this document."
-            },
-            "document_name": {
-                "type": "string",
-                "title": "Document Name",
-                "description": "Suggested document name (used as the basename under the persisted path)."
-            },
-            "title": {
-                "type": ["string", "null"],
-                "title": "Title",
-                "description": "Display title; null when not provided."
-            },
-            "summary": {
-                "type": ["string", "null"],
-                "title": "Summary",
-                "description": "Short summary; null when not provided."
-            },
-            "author": {
-                "type": ["string", "null"],
-                "title": "Author",
-                "description": "Attributed author; null when not provided."
-            },
-            "contents": {
-                "type": "object",
-                "title": "Contents",
-                "description": "Free-form JSON contents of the document. Specific shape depends on `kind`."
-            },
-            "artifacts": {
-                "type": "array",
-                "items": { "$ref": "#/$defs/EmbeddedArtifact" },
-                "title": "Artifacts",
-                "description": "Embedded artifacts (e.g. images materialized from HTML)."
-            },
-            "transcript": {
-                "type": "string",
-                "title": "Transcript",
-                "description": "For audio/video: full transcript text concatenated."
-            },
-            "segments": {
-                "type": "array",
-                "items": { "$ref": "#/$defs/TimecodedSegment" },
-                "title": "Segments",
-                "description": "For audio/video: timecoded transcript segments from whisper."
-            },
-            "scene_captions": {
-                "type": "array",
-                "items": { "$ref": "#/$defs/TimecodedSegment" },
-                "title": "Scene Captions",
-                "description": "For video: per-frame vision captions (text only, no speaker)."
-            },
-            "description": {
-                "type": "string",
-                "title": "Description",
-                "description": "Synthesized description (audio/video) or extracted description (image)."
-            },
-            "notes": {
-                "type": "array",
-                "items": { "type": "string" },
-                "title": "Notes",
-                "description": "Free-form notes (e.g. transcription availability warnings)."
-            }
-        },
-        "$defs": {
-            "EmbeddedArtifact": {
-                "type": "object",
-                "required": ["name", "content_type", "data"],
-                "properties": {
-                    "name": { "type": "string", "title": "Name" },
-                    "content_type": { "type": "string", "title": "Content Type" },
-                    "data": {
-                        "type": "string",
-                        "title": "Data",
-                        "description": "Base64-encoded artifact bytes."
-                    }
-                }
-            },
-            "TimecodedSegment": {
-                "type": "object",
-                "required": ["start_ms", "end_ms", "text"],
-                "properties": {
-                    "start_ms": { "type": "integer", "minimum": 0 },
-                    "end_ms": { "type": "integer", "minimum": 0 },
-                    "speaker": { "type": ["string", "null"] },
-                    "text": { "type": "string" }
                 }
             }
         }

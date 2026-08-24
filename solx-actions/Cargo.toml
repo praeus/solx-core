@@ -8,6 +8,7 @@ description = "Action store for solx: own database, execution (command/webhook/i
 [dependencies]
 solx-surface = { workspace = true }
 solx-config = { workspace = true }
+solx-console = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

@@ -20,10 +20,9 @@
 //! * [`doc_fields`] — flat (`get_field`/`set_field`) and path-style
 //!   (`get_field_at_path`/`set_field_at_path`) document field ops
 //! * [`http`] — generic HTTP request (`http_request`)
-//! * [`utils`] — small stateless helpers (`now`, `uuid`, `random_int`,
-//!   `random_string`, `get_env`/`set_env`)
-//! * [`secrets`] — the per-caller `get_secret`/`set_secret` and the
-//!   `init_env_mappings` startup hook
+//! * [`env`] — the in-process environment store (`get_env`/`set_env`) and
+//!   the `init_env_mappings`/`init_persisted_env` startup hooks
+//! * [`secrets`] — the per-caller `get_secret`/`set_secret`
 //! * [`oauth`] — the OAuth 2.0 authorization-code loopback controllers
 //!   and their registry/inbox state
 //!
@@ -38,29 +37,27 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use solx_surface::entities::{ActionType, Document, DocumentInput};
+use solx_surface::internal_actions::{InternalActionRegistry, InternalCallCtx};
 use solx_surface::managers::{ActionManager, DocManager, FileStore, TypeManager};
 
 use crate::caller::Caller;
-use crate::invocations::InvocationStore;
 use crate::LocalActionManager;
 
-pub mod console;
 pub mod doc_fields;
 pub mod entity;
+pub mod env;
 pub mod file;
 pub mod http;
 pub mod http_stream;
-pub mod invocation;
 pub mod oauth;
 pub mod open_url;
 pub mod secrets;
-pub mod utils;
 
 // Re-export `init_env_mappings` so the existing call site
 // `solx_actions::internal::init_env_mappings` (used by `solx-manager`
 // at startup) keeps working without modification. The function lives
-// in `utils.rs` next to the env store it manages.
-pub use utils::{init_env_mappings, init_persisted_env, DEFAULT_NAMESPACE};
+// in `env.rs` next to the env store it manages.
+pub use env::{init_env_mappings, init_persisted_env, DEFAULT_NAMESPACE};
 
 // ── Context ──────────────────────────────────────────────────────────────────
 
@@ -75,20 +72,18 @@ pub struct InternalCtx {
     pub actions: Arc<dyn ActionManager>,
     pub files: Arc<dyn FileStore>,
     /// Needed by `set_env` to write persisted variables through to
-    /// `SolxConfig.env_vars`. Every other handler reaches its state through
-    /// the managers above.
+    /// `SolxConfig.env_vars`. Every other built-in handler reaches its
+    /// state through the managers above.
     pub config: Arc<solx_config::ConfigService>,
-    /// Shared handle to the action-console store — see `crate::console`.
-    pub console: Arc<crate::console::ConsoleStore>,
-    /// Shared handle to the invocation-state store — see
-    /// `crate::invocations`. Backs `action_start`/`action_stop`/
-    /// `action_poll`/`action_cancelled`.
-    pub invocations: Arc<InvocationStore>,
     /// Concrete manager handle, distinct from `actions` (`Arc<dyn
-    /// ActionManager>`) above — `action_start`/`action_stop` need
-    /// `LocalActionManager`'s own inherent methods (`start_invocation` et
-    /// al.), which aren't on the `ActionManager` trait.
+    /// ActionManager>`) above — needed by the WASM recursive `action-exec`
+    /// hop, which isn't on the `ActionManager` trait.
     pub local: Arc<LocalActionManager>,
+    /// Every internal-action plugin registration (currently `solx-console`'s
+    /// `console_*`/`action_{start,stop,poll,cancelled}`), consulted by
+    /// [`run_internal`]'s catch-all arm after the hard-coded built-ins
+    /// above. See `solx_surface::internal_actions`.
+    pub registry: Arc<InternalActionRegistry>,
     /// The *executing* action's own `action_config` — i.e. the row whose
     /// `fn_name` dispatched to this handler, which for a built-in is the
     /// `/builtin/...` row itself.
@@ -101,6 +96,21 @@ pub struct InternalCtx {
     /// **Invariant:** read-only input to key resolution. No handler may
     /// return it, or any key inside it, in its result value.
     pub caller: Option<Caller>,
+}
+
+impl InternalCtx {
+    /// Narrow this context down to what a pluggable
+    /// [`solx_surface::internal_actions::InternalActionHandler`] can reach —
+    /// see that trait's doc for why it's deliberately smaller than this one.
+    fn as_call_ctx(&self) -> InternalCallCtx {
+        InternalCallCtx {
+            docs: self.docs.clone(),
+            types: self.types.clone(),
+            actions: self.actions.clone(),
+            files: self.files.clone(),
+            caller: self.caller.clone(),
+        }
+    }
 }
 
 // ── Public entry point ───────────────────────────────────────────────────────
@@ -150,8 +160,8 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
         "set_field_at_path" => doc_fields::set_field_at_path(params, &ctx.docs).await,
 
         // ── environment store ────────────────────────────────────────────
-        "get_env" => Ok(utils::get_env(params)),
-        "set_env" => utils::set_env(params, &ctx.config),
+        "get_env" => Ok(env::get_env(params)),
+        "set_env" => env::set_env(params, &ctx.config),
 
         // ── HTTP ─────────────────────────────────────────────────────────
         "http_request" => http::http_request(params).await,
@@ -161,9 +171,6 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
         "http_stream_poll" => http_stream::poll(params).await,
         "http_stream_close" => http_stream::close(params).await,
 
-        // ── small stateless utilities ────────────────────────────────────
-        "random_string" => utils::random_string_value(params),
-
         // ── system integration ────────────────────────────────────────────
         "open_url" => open_url::open_url(params).await,
 
@@ -171,20 +178,15 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
         "get_secret" => secrets::get_secret(params, ctx.caller.as_ref()).await,
         "set_secret" => secrets::set_secret(params, ctx.caller.as_ref()).await,
 
-        // ── action consoles ──────────────────────────────────────────────
-        "console_print" => console::print(params, ctx.caller.as_ref(), &ctx.console).await,
-        "console_read" => console::read(params, &ctx.console).await,
-        "console_tail" => console::tail(params, &ctx.console).await,
-        "console_clear" => console::clear(params, &ctx.console).await,
-        "console_list" => console::list(params, &ctx.console).await,
-
-        // ── asynchronous actions (start/stop/poll) ────────────────────────
-        "action_start" => invocation::start(params, ctx).await,
-        "action_stop" => invocation::stop(params, ctx).await,
-        "action_poll" => invocation::poll(params, ctx).await,
-        "action_cancelled" => invocation::cancelled(ctx.caller.as_ref(), &ctx.invocations).await,
-
-        other => Err(format!("unknown internal fn_name '{other}'")),
+        // ── everything else: consult the plugin registry ──────────────────
+        // Action consoles (`console_*`) and asynchronous actions
+        // (`action_{start,stop,poll,cancelled}`) are registered here by
+        // `solx-console` rather than hard-coded above — see
+        // `solx_console::actions::plugin` and `LocalActionManager::set_self_ref`.
+        other => match ctx.registry.get(other) {
+            Some(handler) => handler.call(params, &ctx.as_call_ctx()).await,
+            None => Err(format!("unknown internal fn_name '{other}'")),
+        },
     }
 }
 
@@ -362,9 +364,8 @@ mod tests {
             .unwrap(),
         );
         actions_concrete.set_self_ref(Arc::downgrade(&actions_concrete));
-        let console = actions_concrete.console().clone();
-        let invocations = actions_concrete.invocations().clone();
         let local = actions_concrete.clone();
+        let registry = actions_concrete.plugin_registry();
         let actions: Arc<dyn ActionManager> = actions_concrete;
         (
             dir,
@@ -374,9 +375,8 @@ mod tests {
                 actions,
                 files,
                 config: cfg,
-                console,
-                invocations,
                 local,
+                registry,
                 action_config,
                 caller: None,
             },
@@ -818,24 +818,6 @@ mod tests {
         );
 
         drop(blocker);
-    }
-
-    // ── random_string ─────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn random_string_is_alphanumeric_and_requested_length() {
-        let (_d, ctx) = test_ctx(None).await;
-        for n in [0usize, 1, 8, 64] {
-            let v = run_internal("random_string", &json!({"length": n}), &ctx)
-                .await
-                .unwrap();
-            let s = v.get("value").and_then(Value::as_str).expect("value field");
-            assert_eq!(s.len(), n, "length mismatch for n={n}");
-            assert!(
-                s.chars().all(|c| c.is_ascii_alphanumeric()),
-                "non-alphanumeric char in {s:?}"
-            );
-        }
     }
 
     // ── dir_delete ────────────────────────────────────────────────────────
@@ -1724,8 +1706,8 @@ mod tests {
         let before = run_internal("action_cancelled", &json!({}), &ctx).await.unwrap();
         assert_eq!(before.get("cancelled"), Some(&Value::Bool(false)));
 
-        ctx.invocations.create("inv-fixed", "/pkg/foo", 0).await.unwrap();
-        ctx.invocations.request_cancel("inv-fixed").await.unwrap();
+        ctx.local.invocations().create("inv-fixed", "/pkg/foo", 0).await.unwrap();
+        ctx.local.invocations().request_cancel("inv-fixed").await.unwrap();
 
         let after = run_internal("action_cancelled", &json!({}), &ctx).await.unwrap();
         assert_eq!(after.get("cancelled"), Some(&Value::Bool(true)));

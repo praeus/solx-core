@@ -3,26 +3,35 @@ use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{json, Value};
+use serde::Deserialize;
 use solx_surface::entities::{Action, ActionExecResult, ActionInput};
 use solx_surface::managers::Solx;
-use solx_surface::query::{ListOptions, Page};
+use solx_surface::query::{ActionSearchQuery, ListOptions, Page};
 
 use crate::error::ApiError;
 use crate::routes::refs::split_url_ref;
 use crate::state::AppState;
 
-/// `/actions` (the collection) plus `/actions/{*ref}` (one action).
+/// `/actions` (the collection) plus `/actions/{*ref}` (one action), and the
+/// top-level `/actions-search`.
 ///
 /// Execution is `POST` on the action's own URL, with the params as the
 /// body — RFC 9110's "resource-specific processing of the request
 /// payload". Unlike a static `/actions/exec/...` segment, this shares the
 /// exact path pattern of the CRUD routes and so can't shadow an action
 /// stored at any particular reference.
+///
+/// Search lives at the top-level `/actions-search` rather than
+/// `/actions/search`, for the same reason document search lives at `/search`
+/// rather than `/docs/search` — see `super::docs::router`.
 pub fn router() -> Router<AppState> {
-    Router::new().route("/actions", get(list_actions)).route(
-        "/actions/*ref",
-        get(get_action).put(save_action).delete(delete_action).post(exec_action),
-    )
+    Router::new()
+        .route("/actions", get(list_actions))
+        .route(
+            "/actions/*ref",
+            get(get_action).put(save_action).delete(delete_action).post(exec_action),
+        )
+        .route("/actions-search", get(search_actions))
 }
 
 async fn save_action(
@@ -59,6 +68,27 @@ async fn list_actions(
 ) -> Result<Json<Page<Action>>, ApiError> {
     let page = state.app.actions().list(opts).await?;
     Ok(Json(page))
+}
+
+/// Split across two `Query` extractors rather than one
+/// `Query<ActionSearchQuery>`: axum's `Query` (via `serde_urlencoded`) can't
+/// deserialize a `#[serde(flatten)]`ed field — numeric fields like `limit`
+/// come back as strings and fail with "invalid type: string, expected
+/// usize". Each extractor re-parses the same query string into its own
+/// flat (non-nested) struct, which `serde_urlencoded` handles fine.
+async fn search_actions(
+    State(state): State<AppState>,
+    Query(list): Query<ListOptions>,
+    Query(SearchTerm { q }): Query<SearchTerm>,
+) -> Result<Json<Page<Action>>, ApiError> {
+    let page = state.app.actions().search(ActionSearchQuery { list, q }).await?;
+    Ok(Json(page))
+}
+
+#[derive(Deserialize)]
+struct SearchTerm {
+    #[serde(default)]
+    q: Option<String>,
 }
 
 /// Execute the action. The body is optional so a parameterless action can

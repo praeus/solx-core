@@ -246,6 +246,17 @@ pub struct SearchResults {
     pub offset: usize,
 }
 
+/// Full-text query over the action catalogue (path/name/caption/description/
+/// category/phrases, via FTS5), composable with the same filters as `list`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ActionSearchQuery {
+    #[serde(flatten)]
+    pub list: ListOptions,
+    /// Free-text query. `None`/empty behaves exactly like a plain `list`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub q: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5,19 +5,21 @@
 //! See `docs/console-implementation-plan.md` §8a for why this replaced the
 //! originally-planned stderr-capture approach: reading a child's stderr
 //! concurrently with feeding its stdin reintroduces a documented deadlock
-//! risk (`crate::exec::run_command`'s `feed`/`join!` structure exists
-//! specifically to avoid it), and a raw byte stream needs heuristic parsing
-//! to recover structure. A loopback the child calls directly needs neither.
+//! risk (`solx-actions`' `exec::run_command`'s `feed`/`join!` structure
+//! exists specifically to avoid it), and a raw byte stream needs heuristic
+//! parsing to recover structure. A loopback the child calls directly needs
+//! neither.
 //!
-//! Reuses the shape of `crate::oauth_loopback`: bind `127.0.0.1` only, mint
-//! a random one-shot token per registration, tear the registration down
-//! when it's no longer needed. The one structural difference: the OAuth
-//! loopback is started and stopped per `oauth_start`/`oauth_stop` call (one
-//! browser sign-in at a time); this listener is started **once** and lives
-//! for the process's lifetime — only the *registrations* (one per Command
-//! invocation) are short-lived, since Command actions can run at any point
-//! throughout the process and starting/stopping a listener around each one
-//! would mean needless bind/unbind churn and port-reuse races.
+//! Reuses the shape of `solx-actions`' OAuth loopback: bind `127.0.0.1`
+//! only, mint a random one-shot token per registration, tear the
+//! registration down when it's no longer needed. The one structural
+//! difference: the OAuth loopback is started and stopped per
+//! `oauth_start`/`oauth_stop` call (one browser sign-in at a time); this
+//! listener is started **once** and lives for the process's lifetime — only
+//! the *registrations* (one per Command invocation) are short-lived, since
+//! Command actions can run at any point throughout the process and
+//! starting/stopping a listener around each one would mean needless
+//! bind/unbind churn and port-reuse races.
 //!
 //! ## URL contract
 //!

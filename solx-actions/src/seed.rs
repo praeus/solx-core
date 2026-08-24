@@ -24,18 +24,10 @@
 use chrono::Utc;
 use libsql::Connection;
 use solx_surface::error::Result;
+use solx_surface::internal_actions::SeedAction;
 use uuid::Uuid;
 
 use crate::db::map_db;
-
-/// Path all built-in actions are seeded under, out of the way of
-/// user-created actions. Holds only `random_string` directly — everything
-/// else with a natural grouping lives under a `/builtin/<area>` subpath
-/// below.
-pub const BUILTIN_PATH: &str = "/builtin";
-
-/// Subdivision of the builtin namespace for console operations.
-pub const CONSOLE_PATH: &str = "/builtin/console";
 
 /// Subdivision of the builtin namespace for action operations: the
 /// asynchronous `start`/`stop`/`poll`/`cancelled` alternative to `exec` (see
@@ -78,27 +70,6 @@ pub const WEB_STREAM_PATH: &str = "/builtin/web/stream";
 /// action's own nesting.
 pub const BUILTIN_TYPES_PATH: &str = "/builtin/types";
 
-/// One built-in action to seed.
-pub struct SeedAction {
-    pub path: &'static str,
-    /// The entity name. `fn_name` (below) is the dispatch key
-    /// `crate::internal::run_internal` matches on — for a flat `/builtin`
-    /// entry the two are identical, but a nested entry (e.g. `console/print`)
-    /// needs a `name` too generic to double as a global dispatch key, hence
-    /// the split.
-    pub name: &'static str,
-    pub fn_name: &'static str,
-    pub description: &'static str,
-    /// Name under `BUILTIN_TYPES_PATH` giving this action's `param_type_ref`
-    /// a real JSON Schema, if one is seeded (see `solx-types/src/seed.rs`).
-    pub param_type: Option<&'static str>,
-}
-
-/// A flat `/builtin/<name>` entry — `name` and `fn_name` are the same.
-const fn a(name: &'static str, description: &'static str, param_type: Option<&'static str>) -> SeedAction {
-    SeedAction { path: BUILTIN_PATH, name, fn_name: name, description, param_type }
-}
-
 /// A nested entry under some `path` other than the flat `/builtin` root,
 /// with its own dispatch key distinct from its (possibly generic) `name`.
 const fn a_at(
@@ -132,9 +103,8 @@ pub fn builtin_actions() -> Vec<SeedAction> {
         a_at(ACTION_PATH, "entity_get_action", "entity_get_action", "Fetch an action by path+name.", Some("EntityRefParams")),
         a_at(ACTION_PATH, "entity_delete_action", "entity_delete_action", "Delete an action.", Some("EntityRefParams")),
         a_at(ACTION_PATH, "entity_list_actions", "entity_list_actions", "List actions, optionally filtered by path prefix.", Some("ListParams")),
-        // Action search (actions have no full-text index, so this is a
-        // structured filter, not fuzzy relevance ranking)
-        a_at(ACTION_PATH, "search_actions", "search_actions", "List/filter actions by path prefix and other fields (structured filter, no full-text index for actions).", Some("ListParams")),
+        // Action search (a real FTS5 full-text index)
+        a_at(ACTION_PATH, "search_actions", "search_actions", "Full-text + faceted search over actions.", Some("SearchActionsParams")),
         // Type CRUD
         a_at(TYPE_PATH, "entity_save_type", "entity_save_type", "Create or update (upsert) a type.", Some("TypeCrudParams")),
         a_at(TYPE_PATH, "entity_get_type", "entity_get_type", "Fetch a type by path+name.", Some("EntityRefParams")),
@@ -151,12 +121,6 @@ pub fn builtin_actions() -> Vec<SeedAction> {
         // Environment scratch store
         a_at(ENV_PATH, "get_env", "get_env", "Read a variable from the environment store, optionally from a named namespace.", Some("GetEnvParams")),
         a_at(ENV_PATH, "set_env", "set_env", "Write a variable to the environment store. In-memory by default; pass persist to also store it in solx-config.json so it survives a restart.", Some("SetEnvParams")),
-        // Small utility built-ins. `now`/`uuid`/`random_int` were removed as
-        // not model/user-facing and unused by any package script;
-        // `random_string` stays — it's load-bearing for `solx-google`'s
-        // install script (per-install secret-encryption key generation). Too
-        // small a group to justify its own subpath, so it stays flat.
-        a("random_string", "Return a random alphanumeric string of the given length.", Some("RandomStringParams")),
         // Secrets, scoped to whichever action is currently executing
         a_at(SECRETS_PATH, "get_secret", "get_secret", "Read a secret scoped to the calling action.", Some("GetSecretParams")),
         a_at(SECRETS_PATH, "set_secret", "set_secret", "Write a secret scoped to the calling action.", Some("SetSecretParams")),
@@ -168,20 +132,10 @@ pub fn builtin_actions() -> Vec<SeedAction> {
         // browser; host-side streaming HTTP lives under WEB_STREAM_PATH below.
         a_at(WEB_PATH, "http_request", "http_request", "Issue an HTTP request with optional method, headers, body, and timeout.", Some("HttpRequestParams")),
         a_at(WEB_PATH, "open_url", "open_url", "Open a URL in the system browser via the platform-native handler (xdg-open / open / cmd /C start).", Some("OpenUrlParams")),
-        // Action consoles — one per action ref, written to by every layer of
-        // that action's execution. See `crate::console` and
-        // `docs/console-implementation-plan.md`.
-        a_at(CONSOLE_PATH, "print", "console_print", "Write one entry to the calling action's own console. Requires an action caller — this cannot be called directly from the CLI, MCP, or HTTP.", Some("ConsolePrintParams")),
-        a_at(CONSOLE_PATH, "read", "console_read", "Read entries from an action's console, oldest first, starting at from_seq.", Some("ConsoleReadParams")),
-        a_at(CONSOLE_PATH, "tail", "console_tail", "Like read, but if nothing new is available yet, long-polls up to wait_secs before returning.", Some("ConsoleTailParams")),
-        a_at(CONSOLE_PATH, "clear", "console_clear", "Drop entries from the front of an action's console, freeing retention.", Some("ConsoleClearParams")),
-        a_at(CONSOLE_PATH, "list", "console_list", "List known consoles, most recently written first.", Some("ConsoleListParams")),
-        // Asynchronous actions — start/stop/poll as an async alternative to
-        // exec. See `crate::invocations` and `docs/async-actions-plan.md`.
-        a_at(ACTION_PATH, "start", "action_start", "Start an action detached: returns an invocation_id immediately while it runs in the background. Requires a long-lived host (solx-server/solx-mcp), not the CLI.", Some("ActionStartParams")),
-        a_at(ACTION_PATH, "stop", "action_stop", "Request that a detached invocation stop. Cooperative first (the running action notices and exits on its own); force-aborted after a grace period.", Some("ActionStopParams")),
-        a_at(ACTION_PATH, "poll", "action_poll", "Check a detached invocation's status, optionally long-polling until it finishes.", Some("ActionPollParams")),
-        a_at(ACTION_PATH, "cancelled", "action_cancelled", "Check whether the calling action's own invocation has had a stop requested. Requires an action caller.", Some("EmptyParams")),
+        // Action consoles (`/builtin/console/*`) and asynchronous actions
+        // (`/builtin/action/{start,stop,poll,cancelled}`) are seeded by
+        // `solx-console` itself — see `solx_console::actions::seed_actions`,
+        // merged in by `LocalActionManager::open`'s call to `seed_builtins`.
         // Host-side streaming HTTP — for callers with no sockets or
         // cross-call state of their own. Unrestricted by caller, like the
         // OAuth loopback and the action consoles: access is a bearer
@@ -194,9 +148,13 @@ pub fn builtin_actions() -> Vec<SeedAction> {
 
 /// Seed the built-in catalogue into `actions` (idempotent via
 /// `INSERT OR IGNORE` + the table's `UNIQUE(path,name)` constraint).
-pub async fn seed_builtins(conn: &Connection) -> Result<()> {
+/// `extra` is merged in alongside this crate's own [`builtin_actions`] —
+/// entries contributed by an internal-action plugin crate (e.g.
+/// `solx_console::actions::seed_actions()`), passed in here rather than
+/// hard-coded into this catalogue.
+pub async fn seed_builtins(conn: &Connection, extra: &[SeedAction]) -> Result<()> {
     let now = Utc::now().to_rfc3339();
-    for entry in builtin_actions() {
+    for entry in builtin_actions().iter().chain(extra.iter()) {
         let param_type_ref = entry
             .param_type
             .map(|n| format!("{BUILTIN_TYPES_PATH}/{n}"))

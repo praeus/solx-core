@@ -11,11 +11,9 @@
 
 pub mod auth;
 pub mod caller;
-pub mod console;
 mod db;
 mod exec;
 pub mod internal;
-pub mod invocations;
 pub mod loopback;
 mod mask;
 pub mod script;
@@ -34,18 +32,18 @@ use chrono::{DateTime, Utc};
 use libsql::Connection;
 use serde_json::{json, Value};
 use solx_config::ConfigService;
+use solx_console::{console, invocations, ConsoleStore, InvocationStore};
 use solx_surface::entities::{Action, ActionExecResult, ActionInput, ActionType, FileRef};
 use solx_surface::error::{Result, SolxError};
+use solx_surface::internal_actions::{ActionExecutor, InternalActionRegistry};
 use solx_surface::managers::{ActionManager, DocManager, FileStore, TypeManager};
 use solx_surface::path::{full_ref, normalize_path, validate_name};
-use solx_surface::query::{ListOptions, ListSchema, Page};
+use solx_surface::query::{ActionSearchQuery, ListOptions, ListSchema, Page};
 use tokio::task::AbortHandle;
 use uuid::Uuid;
 
 use caller::Caller;
 use db::{map_db, Db};
-
-pub use seed::BUILTIN_PATH;
 
 /// Whether this process is a long-lived host (`solx-server`, `solx-mcp`) —
 /// the only kind that can safely run a detached `action_start` invocation.
@@ -94,6 +92,31 @@ CREATE TABLE IF NOT EXISTS actions (\
     UNIQUE(path,name)\
 );";
 
+/// External-content FTS5 index over the action catalogue, kept in sync with
+/// `actions` purely by trigger — `save`/`delete`/`seed_builtins` never touch
+/// this table directly. `id` is `TEXT PRIMARY KEY` (not `INTEGER PRIMARY
+/// KEY`), so `actions` keeps SQLite's implicit `rowid`, which is what
+/// `content_rowid='rowid'` links against.
+const FTS_DDL: &str = "\
+CREATE VIRTUAL TABLE IF NOT EXISTS actions_fts USING fts5(\
+    path, name, caption, description, category, phrases, \
+    content='actions', content_rowid='rowid', tokenize='porter unicode61'\
+);\
+CREATE TRIGGER IF NOT EXISTS actions_ai AFTER INSERT ON actions BEGIN \
+  INSERT INTO actions_fts(rowid,path,name,caption,description,category,phrases)\
+  VALUES (new.rowid,new.path,new.name,new.caption,new.description,new.category,new.phrases);\
+END;\
+CREATE TRIGGER IF NOT EXISTS actions_ad AFTER DELETE ON actions BEGIN \
+  INSERT INTO actions_fts(actions_fts,rowid,path,name,caption,description,category,phrases)\
+  VALUES('delete',old.rowid,old.path,old.name,old.caption,old.description,old.category,old.phrases);\
+END;\
+CREATE TRIGGER IF NOT EXISTS actions_au AFTER UPDATE ON actions BEGIN \
+  INSERT INTO actions_fts(actions_fts,rowid,path,name,caption,description,category,phrases)\
+  VALUES('delete',old.rowid,old.path,old.name,old.caption,old.description,old.category,old.phrases);\
+  INSERT INTO actions_fts(rowid,path,name,caption,description,category,phrases)\
+  VALUES (new.rowid,new.path,new.name,new.caption,new.description,new.category,new.phrases);\
+END;";
+
 const DEFAULT_LIMIT: usize = 50;
 
 /// libsql-backed [`ActionManager`] with command/webhook/internal/WASM/script
@@ -104,17 +127,28 @@ pub struct LocalActionManager {
     types: Arc<dyn TypeManager>,
     docs: Arc<dyn DocManager>,
     files: Arc<dyn FileStore>,
-    /// Shares this manager's own `Db` (same physical file as `actions`) —
-    /// see the module doc on `crate::console` for what moving it to a
-    /// separate file later would cost.
-    console: Arc<console::ConsoleStore>,
+    /// Owned by `solx-console`, its own separate database file — see that
+    /// crate's module docs.
+    console: Arc<ConsoleStore>,
     /// Status/cancel-flag state for `action_start`/`action_stop`/
-    /// `action_poll` — see `crate::invocations` for why the console alone
-    /// isn't enough. Same `Db` handle as `console` and `actions`.
-    invocations: Arc<invocations::InvocationStore>,
+    /// `action_poll` — see `solx_console::invocations` for why the console
+    /// alone isn't enough. Also owned by `solx-console`.
+    invocations: Arc<InvocationStore>,
+    /// Every `fn_name -> handler` registration contributed by an internal-
+    /// action plugin crate (currently just `solx-console`, for
+    /// `console_*`/`action_{start,stop,poll,cancelled}`) — consulted by
+    /// `internal::run_internal`'s catch-all arm after its own hard-coded
+    /// built-ins. See `solx_surface::internal_actions`.
+    ///
+    /// Built lazily in [`Self::set_self_ref`] rather than in [`Self::open`]:
+    /// `solx_console::actions::plugin` needs an `Arc<dyn ActionExecutor>`
+    /// for `action_start`/`stop`/`poll`, which requires this manager to
+    /// already be wrapped in an `Arc` — the same reason [`Self::self_ref`]
+    /// itself is a `OnceLock` rather than a plain field.
+    plugin_registry: OnceLock<Arc<InternalActionRegistry>>,
     /// Abort handles for in-flight detached (`action_start`) tasks, keyed by
     /// `invocation_id`. A field, not a process global — unlike the
-    /// loopback's registry (see `loopback::console`'s doc on why *that* one
+    /// loopback's registry (see `solx_console::loopback`'s doc on why *that* one
     /// has to be a `OnceCell`), nothing here needs to survive across
     /// `LocalActionManager` instances, so keeping it per-manager is simpler
     /// and keeps tests isolated from one another.
@@ -129,6 +163,21 @@ pub struct LocalActionManager {
     /// identity. The trait's `exec` has no room for it, and deliberately
     /// so — see [`crate::caller`].
     self_ref: OnceLock<Weak<LocalActionManager>>,
+}
+
+#[async_trait]
+impl ActionExecutor for LocalActionManager {
+    async fn start_invocation(&self, path: &str, name: &str, params: Value) -> Result<Value> {
+        LocalActionManager::start_invocation(self, path, name, params).await
+    }
+
+    async fn stop_invocation(&self, invocation_id: &str, force: bool, grace_secs: Option<u64>) -> Result<Value> {
+        LocalActionManager::stop_invocation(self, invocation_id, force, grace_secs).await
+    }
+
+    async fn poll_invocation(&self, invocation_id: &str, wait_secs: Option<u64>) -> Result<Value> {
+        LocalActionManager::poll_invocation(self, invocation_id, wait_secs).await
+    }
 }
 
 impl LocalActionManager {
@@ -146,17 +195,50 @@ impl LocalActionManager {
         let db = Db::open(db_path).await?;
         let conn = db.connect().await?;
         conn.execute_batch(DDL).await.map_err(map_db)?;
-        seed::seed_builtins(&conn).await?;
+        // `actions_fts` is `content='actions'` (external content), so a bare
+        // `SELECT ... FROM actions_fts` doesn't read the FTS index — it
+        // passes straight through to `actions`. An earlier version of this
+        // backfill did `INSERT ... SELECT ... WHERE rowid NOT IN (SELECT
+        // rowid FROM actions_fts)`, which for exactly that reason always
+        // compared `actions.rowid` against itself and silently indexed
+        // nothing for a DB that had rows before this table existed — new
+        // rows still indexed fine via the triggers below, which give
+        // `actions_fts` real column values directly. The fix, and the
+        // documented way to populate an external-content FTS5 index from
+        // existing data, is `INSERT INTO actions_fts(actions_fts) VALUES
+        // ('rebuild')` — run once, only the first time the table is
+        // created (mirroring `solx-docs`'s `created_fresh` reindex), so a
+        // normal restart doesn't pay for a full rebuild on every start.
+        let fts_existed_before: bool = {
+            let mut rows = conn
+                .query(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='actions_fts'",
+                    (),
+                )
+                .await
+                .map_err(map_db)?;
+            rows.next().await.map_err(map_db)?.is_some()
+        };
+        conn.execute_batch(FTS_DDL).await.map_err(map_db)?;
+        if !fts_existed_before {
+            conn.execute("INSERT INTO actions_fts(actions_fts) VALUES('rebuild')", ())
+                .await
+                .map_err(map_db)?;
+        }
+        // Console/invocation entries are contributed by `solx-console` as
+        // plain data here — seeding them doesn't need that crate's stores
+        // or an `Arc<Self>` (unlike the full plugin registry, built later
+        // in `set_self_ref` once one exists).
+        seed::seed_builtins(&conn, &solx_console::actions::seed_actions()).await?;
 
-        let console = Arc::new(console::ConsoleStore::new(db.clone(), config.clone()));
-        console.ensure_schema().await?;
+        // Separate physical database file from `actions` (no DB-level FKs
+        // link them, only the app-level `action_ref` string) — see
+        // `solx-config::ConfigService::console_db_path`.
+        let (console, invocations) = solx_console::open(config.clone()).await?;
         // Best-effort: a sweep failure shouldn't block startup.
         if let Err(e) = console.sweep_expired().await {
             tracing::warn!("console TTL sweep failed: {e}");
         }
-
-        let invocations = Arc::new(invocations::InvocationStore::new(db.clone(), config.clone()));
-        invocations.ensure_schema().await?;
         // A row still `running`/`cancelling` from before this process last
         // exited (crash, kill, or an ungraceful restart) has no task behind
         // it anymore — flip it before anything can `poll` a status that
@@ -176,6 +258,7 @@ impl LocalActionManager {
             files,
             console,
             invocations,
+            plugin_registry: OnceLock::new(),
             running: Arc::new(Mutex::new(HashMap::new())),
             self_ref: OnceLock::new(),
         })
@@ -184,24 +267,41 @@ impl LocalActionManager {
     /// Shared handle to this manager's console store — used by `wasm::host`
     /// to redirect a WASM guest's `logger.log` calls without going through
     /// a synthetic `action-exec` round trip.
-    pub fn console(&self) -> &Arc<console::ConsoleStore> {
+    pub fn console(&self) -> &Arc<ConsoleStore> {
         &self.console
     }
 
     /// Shared handle to this manager's invocation-state store — see
-    /// `crate::invocations`.
-    pub fn invocations(&self) -> &Arc<invocations::InvocationStore> {
+    /// `solx_console::invocations`.
+    pub fn invocations(&self) -> &Arc<InvocationStore> {
         &self.invocations
     }
 
+    /// This manager's merged internal-action plugin registry (currently
+    /// just `solx-console`'s), building it on first access. Empty (not an
+    /// error) if [`Self::set_self_ref`] hasn't been called yet — every real
+    /// wiring path calls it immediately after construction, so this only
+    /// matters for a test harness that skips it, in which case
+    /// `console_print`/`action_start`/etc. simply report "unknown internal
+    /// fn_name" rather than panicking.
+    pub(crate) fn plugin_registry(&self) -> Arc<InternalActionRegistry> {
+        self.plugin_registry.get().cloned().unwrap_or_default()
+    }
+
     /// Provide this manager's own handle for recursive WASM `action-exec`
-    /// calls. Must be called exactly once, right after the manager is
-    /// wrapped in an `Arc` (e.g.
-    /// `let m = Arc::new(LocalActionManager::open(...).await?);
+    /// calls, and build [`Self::plugin_registry`] (which needs the same
+    /// `Arc<Self>` to hand `solx-console` an `Arc<dyn ActionExecutor>`).
+    /// Must be called exactly once, right after the manager is wrapped in
+    /// an `Arc` (e.g. `let m = Arc::new(LocalActionManager::open(...).await?);
     /// m.set_self_ref(Arc::downgrade(&m));`). A `Weak` is used (not a
     /// strong `Arc`) so the manager doesn't hold a reference cycle to
     /// itself.
     pub fn set_self_ref(&self, self_ref: Weak<LocalActionManager>) {
+        if let Some(strong) = self_ref.upgrade() {
+            let executor: Arc<dyn ActionExecutor> = strong;
+            let plugin = solx_console::actions::plugin(self.console.clone(), self.invocations.clone(), executor);
+            let _ = self.plugin_registry.set(Arc::new(plugin));
+        }
         let _ = self.self_ref.set(self_ref);
     }
 
@@ -566,6 +666,70 @@ impl ActionManager for LocalActionManager {
         Ok(Page::new(items, total, limit, offset))
     }
 
+    /// Free-text search over `path`/`name`/`caption`/`description`/
+    /// `category`/`phrases`, composed with the same `path_prefix`/
+    /// `filter_field`/date filters as [`Self::list`] (rendered once via
+    /// `ListOptions::to_sql`, then the `MATCH` bind is appended last so none
+    /// of its `?N` placeholders need renumbering). Joins to `actions_fts`
+    /// through a `rowid, rank`-only subquery rather than directly, so the
+    /// FTS table's own `path` column can't collide with `q.where_clause`'s
+    /// unqualified one. With `query.q` absent this runs the exact same query
+    /// plan as `list` — no join, no ranking.
+    async fn search(&self, query: ActionSearchQuery) -> Result<Page<Action>> {
+        let conn = self.db.connect().await?;
+        let limit = query.list.limit_or(DEFAULT_LIMIT);
+        let offset = query.list.offset_or_zero();
+        let q = query.list.to_sql(LIST_SCHEMA)?;
+        let mut binds: Vec<libsql::Value> =
+            q.binds.iter().cloned().map(libsql::Value::from).collect();
+
+        let term = query.q.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let select = "SELECT a.id,a.path,a.name,a.caption,a.description,a.capabilities,\
+                       a.phrases,a.category,a.param_type_ref,a.result_type_ref,a.action_type,\
+                       a.fn_name,a.bin_name,a.action_config,a.files,a.trusted,a.created_at,\
+                       a.updated_at FROM actions a";
+
+        // `actions_fts` also has a `path` column, so a plain join would make
+        // `q.where_clause`'s unqualified `path`/`created_at`/etc. ambiguous.
+        // Joining through a subquery that only exposes `rowid` and FTS5's
+        // built-in `rank` column (populated by `MATCH`, lower = better match)
+        // keeps every other column resolvable to `actions` alone.
+        let (join, where_clause, order) = match term {
+            Some(t) => {
+                binds.push(libsql::Value::from(t.to_string()));
+                let n = binds.len();
+                (
+                    format!(
+                        " JOIN (SELECT rowid, rank FROM actions_fts WHERE actions_fts MATCH ?{n}) f ON f.rowid = a.rowid"
+                    ),
+                    q.where_clause.clone(),
+                    " ORDER BY f.rank".to_string(),
+                )
+            }
+            None => (String::new(), q.where_clause.clone(), q.order_clause.clone()),
+        };
+
+        let total = {
+            let sql = format!("SELECT COUNT(*) FROM actions a{join}{where_clause}");
+            let mut rows = conn.query(&sql, binds.clone()).await.map_err(map_db)?;
+            rows.next()
+                .await
+                .map_err(map_db)?
+                .map(|r| r.get::<i64>(0).unwrap_or(0))
+                .unwrap_or(0) as usize
+        };
+
+        let sql = format!("{select}{join}{where_clause}{order} LIMIT {limit} OFFSET {offset}");
+        let mut rows = conn.query(&sql, binds).await.map_err(map_db)?;
+        let mut items = Vec::new();
+        while let Some(row) = rows.next().await.map_err(map_db)? {
+            let mut action = row_to_action(&row)?;
+            mask::mask_action_config_opt(&mut action.action_config);
+            items.push(action);
+        }
+        Ok(Page::new(items, total, limit, offset))
+    }
+
     /// Entry point for every *external* caller — the CLI, the MCP server,
     /// the HTTP route, `solx-client`. None of them is an action, so the
     /// caller is `None`; see [`LocalActionManager::exec_as`].
@@ -709,9 +873,8 @@ impl LocalActionManager {
                     actions: self.self_arc()?,
                     files: self.files.clone(),
                     config: self.config.clone(),
-                    console: self.console.clone(),
-                    invocations: self.invocations.clone(),
                     local: self.self_arc()?,
+                    registry: self.plugin_registry(),
                     action_config: action.action_config.clone(),
                     caller: caller.cloned(),
                 };
@@ -1043,6 +1206,125 @@ mod tests {
             .unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].name, "alpha-tool");
+    }
+
+    #[tokio::test]
+    async fn search_matches_caption_via_fts() {
+        let (_d, _c, m) = setup().await;
+        seed_list_fixtures(&m).await;
+        let page = m
+            .search(ActionSearchQuery {
+                q: Some("Beta".into()),
+                list: ListOptions::default(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].name, "beta-tool");
+    }
+
+    #[tokio::test]
+    async fn search_composes_q_with_path_prefix() {
+        let (_d, _c, m) = setup().await;
+        seed_list_fixtures(&m).await;
+        // "extraction" matches two actions by category, but only one lives under /tools.
+        let page = m
+            .search(ActionSearchQuery {
+                q: Some("extraction".into()),
+                list: ListOptions {
+                    path_prefix: Some("/tools".into()),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].name, "alpha-tool");
+    }
+
+    #[tokio::test]
+    async fn search_without_q_behaves_like_list() {
+        let (_d, _c, m) = setup().await;
+        seed_list_fixtures(&m).await;
+        let page = m
+            .search(ActionSearchQuery {
+                q: None,
+                list: ListOptions {
+                    path_prefix: Some("/tools".into()),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.total, 2);
+    }
+
+    /// Regression test for the backfill bug: a row inserted directly via raw
+    /// SQL *before* `actions_fts` ever existed (simulating an actions.db
+    /// from before this migration shipped) must still be searchable after
+    /// `LocalActionManager::open` runs — i.e. the one-time `'rebuild'` on
+    /// first creation actually indexes pre-existing rows, unlike the
+    /// original `INSERT ... WHERE rowid NOT IN (SELECT rowid FROM
+    /// actions_fts)` backfill, which — because `actions_fts` is
+    /// `content='actions'` and a bare `SELECT` against it passes through to
+    /// `actions` — always compared `actions.rowid` against itself and
+    /// silently indexed nothing.
+    #[tokio::test]
+    async fn search_finds_a_row_that_predates_the_fts_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let actions_db_path = dir.path().join("actions.db");
+
+        // Write a row with only the plain `actions` table present — no
+        // `actions_fts`, no triggers — exactly what an actions.db created
+        // before this migration looks like.
+        {
+            let db = Db::open(&actions_db_path).await.unwrap();
+            let conn = db.connect().await.unwrap();
+            conn.execute_batch(DDL).await.map_err(map_db).unwrap();
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO actions (id,path,name,caption,description,capabilities,phrases,category,param_type_ref,result_type_ref,action_type,fn_name,bin_name,action_config,files,trusted,created_at,updated_at) \
+                 VALUES (?1,?2,?3,?4,?5,'[]','[]','','','',?6,?7,'','null','[]',0,?8,?8)",
+                libsql::params![
+                    Uuid::new_v4().to_string(),
+                    "/tools",
+                    "old-timer",
+                    "Import your old LiveJournal posts",
+                    "Migrates entries from a LiveJournal export.",
+                    "command",
+                    "echo hi",
+                    now,
+                ],
+            )
+            .await
+            .map_err(map_db)
+            .unwrap();
+        }
+
+        // Now open it through the normal manager path — this is where the
+        // migration (and, with it, the one-time index rebuild) runs.
+        let cfg = Arc::new(ConfigService::open_in(dir.path()).unwrap());
+        let types: Arc<dyn TypeManager> =
+            Arc::new(LocalTypeManager::open(&dir.path().join("types.db")).await.unwrap());
+        let docs: Arc<dyn DocManager> = Arc::new(
+            LocalDocManager::open(&dir.path().join("docs.db"), &dir.path().join("idx"), types.clone())
+                .await
+                .unwrap(),
+        );
+        let files: Arc<dyn FileStore> = Arc::new(LocalFileStore::new(dir.path().join("files")));
+        let m = LocalActionManager::open(&actions_db_path, cfg, types, docs, files)
+            .await
+            .unwrap();
+
+        let page = m
+            .search(ActionSearchQuery {
+                q: Some("livejournal".into()),
+                list: ListOptions::default(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].name, "old-timer");
     }
 
     #[tokio::test]
@@ -1620,18 +1902,18 @@ mod tests {
     #[tokio::test]
     async fn exec_script_reads_params_and_calls_nested_action() {
         let (_d, m, files) = setup_script().await;
-        // The bare `exec /builtin/random_string` (no `json` wrapping needed)
-        // becomes the script's result directly: the callee's whole
-        // ActionExecResult, JSON-encoded — same as `handle_exec` in the CLI.
-        // `json`'s argument is parsed as JSON, and `tokenize_stage` strips
-        // one layer of quoting to form the token — so a JSON string literal
-        // needs the outer '...' shell-style quoting plus inner \"...\" JSON
-        // quotes, same as the CLI's `json` command (`solx script -e 'json
+        // The bare `exec /builtin/action/entity_list_actions` (no `json`
+        // wrapping needed) becomes the script's result directly: the callee's
+        // whole ActionExecResult, JSON-encoded — same as `handle_exec` in the
+        // CLI. `json`'s argument is parsed as JSON, and `tokenize_stage`
+        // strips one layer of quoting to form the token — so a JSON string
+        // literal needs the outer '...' shell-style quoting plus inner \"...\"
+        // JSON quotes, same as the CLI's `json` command (`solx script -e 'json
         // \'"big"\''`).
         post_script_artifact(
             &files,
             "hello.solx",
-            "if $params.go == true; exec /builtin/random_string; else; json '\"skipped\"'; endif",
+            "if $params.go == true; exec /builtin/action/entity_list_actions; else; json '\"skipped\"'; endif",
         )
         .await;
         m.save(
@@ -1648,9 +1930,11 @@ mod tests {
 
         let ran = m.exec("/tools", "hello", serde_json::json!({"go": true})).await.unwrap();
         assert_eq!(ran.result["success"], serde_json::json!(true));
+        // The nested action's result is a list page (an object), not the
+        // `{value}` shape `random_string` used to return.
         assert!(
-            ran.result["result"]["value"].as_str().is_some_and(|s| !s.is_empty()),
-            "{:?}",
+            ran.result["result"].is_object(),
+            "expected a list-page object, got: {:?}",
             ran.result
         );
 
@@ -1664,7 +1948,7 @@ mod tests {
         post_script_artifact(
             &files,
             "count.solx",
-            "exec /builtin/random_string; exec /builtin/action/entity_list_actions",
+            "exec /builtin/action/entity_list_actions; exec /builtin/action/entity_list_documents",
         )
         .await;
         m.save(
@@ -1684,8 +1968,8 @@ mod tests {
         let entries = m.console().read("/tools/count", None, 10).await.unwrap().entries;
         assert_eq!(entries.len(), 2, "{entries:?}");
         assert_eq!(entries[0].source, "script");
-        assert_eq!(entries[0].message.as_deref(), Some("exec /builtin/random_string"));
-        assert_eq!(entries[1].message.as_deref(), Some("exec /builtin/action/entity_list_actions"));
+        assert_eq!(entries[0].message.as_deref(), Some("exec /builtin/action/entity_list_actions"));
+        assert_eq!(entries[1].message.as_deref(), Some("exec /builtin/action/entity_list_documents"));
         // Both stages share the one script invocation's identity.
         assert_eq!(entries[0].invocation_id, entries[1].invocation_id);
     }

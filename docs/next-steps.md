@@ -280,8 +280,7 @@ now exist:
 - **A real grouping to scope by:** the flat `/builtin` catalogue has been
   split into `/builtin/<area>/*` subpaths (`document`, `type`, `file`,
   `env`, `secrets`, `oauth`, `web` (+ `web/stream`), and the existing
-  `console`/`action`) — see `solx-actions/src/seed.rs`. Only `random_string`
-  stays flat, too small a group on its own to warrant a subpath. This was a
+  `console`/`action`) — see `solx-actions/src/seed.rs`. This was a
   breaking path rename for anything hardcoding an old flat `/builtin/<name>`
   reference; `db/solx-actions.db` needs deleting once after upgrading past
   it, same as the earlier `console`/`action` subdivision required (see

@@ -37,7 +37,7 @@ use serde_json::{json, Value};
 use solx_config::ConfigService;
 use tokio::task::AbortHandle;
 
-use crate::console::{MAX_TAIL_WAIT_SECS, TAIL_POLL_INTERVAL};
+use solx_console::console::{MAX_TAIL_WAIT_SECS, TAIL_POLL_INTERVAL};
 
 use super::require_str;
 

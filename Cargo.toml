@@ -5,6 +5,7 @@ members = [
     "solx-types",
     "solx-files",
     "solx-docs",
+    "solx-console",
     "solx-actions",
     "solx-scripts",
     "solx-packages",
@@ -55,9 +56,11 @@ solx-config   = { path = "solx-config" }
 solx-types    = { path = "solx-types" }
 solx-files    = { path = "solx-files" }
 solx-docs     = { path = "solx-docs" }
+solx-console  = { path = "solx-console" }
 solx-actions  = { path = "solx-actions" }
 solx-scripts  = { path = "solx-scripts" }
 solx-packages = { path = "solx-packages" }
 solx-manager  = { path = "solx-manager" }
 solx-client   = { path = "solx-client" }
 solx-mcp      = { path = "solx-mcp" }
+solx-server   = { path = "solx-server" }

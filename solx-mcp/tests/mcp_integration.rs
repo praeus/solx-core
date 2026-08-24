@@ -31,14 +31,10 @@ async fn tools_list_and_call_tool_round_trip() -> anyhow::Result<()> {
 
     let tools = client.list_tools(None).await?;
     let names: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
-    assert!(
-        names.contains(&"act__builtin__document__search_documents"),
-        "expected search_documents among tools, got: {names:?}"
-    );
-    assert!(names.contains(&"act__builtin__file__file_put"), "expected file_put among tools, got: {names:?}");
-    assert!(
-        !names.iter().any(|n| !n.starts_with("act__")),
-        "every tool should be a dynamic action tool (no fixed CRUD layer), got: {names:?}"
+    assert_eq!(
+        names,
+        vec!["explore_tools"],
+        "list_tools should expose only the router meta-tool, got: {names:?}"
     );
 
     // file_put -> file_get round trip through two real tool calls.
@@ -101,7 +97,7 @@ async fn call_tool_streams_console_entries_as_progress_notifications() -> anyhow
     app.files()
         .put(
             &solx_files::shared_action_file_path("count.solx"),
-            b"exec /builtin/random_string; exec /builtin/action/entity_list_actions".to_vec(),
+            b"exec /builtin/action/entity_list_actions; exec /builtin/action/entity_list_documents".to_vec(),
         )
         .await?;
     app.actions()
@@ -153,11 +149,11 @@ async fn call_tool_streams_console_entries_as_progress_notifications() -> anyhow
     assert!(received.iter().all(|p| p.progress_token == token), "{received:?}");
     let messages: Vec<String> = received.iter().filter_map(|p| p.message.clone()).collect();
     assert!(
-        messages.iter().any(|m| m.contains("exec /builtin/random_string")),
+        messages.iter().any(|m| m.contains("exec /builtin/action/entity_list_actions")),
         "expected a progress message naming the first stage, got: {messages:?}"
     );
     assert!(
-        messages.iter().any(|m| m.contains("exec /builtin/action/entity_list_actions")),
+        messages.iter().any(|m| m.contains("exec /builtin/action/entity_list_documents")),
         "expected a progress message naming the second stage, got: {messages:?}"
     );
     // Progress must be non-decreasing per the MCP spec — using the
@@ -174,12 +170,12 @@ async fn call_tool_streams_console_entries_as_progress_notifications() -> anyhow
     Ok(())
 }
 
-/// A server constructed with a `path_prefix` only exposes tools for actions
-/// under that path (and everything under it) — the mechanism a client uses
-/// to run several narrower `solx-mcp` instances instead of always seeing the
+/// A server constructed with a `path_prefix` scopes the router's discovery
+/// to that path (and everything under it) — the mechanism a client uses to
+/// run several narrower `solx-mcp` instances instead of always seeing the
 /// full action catalogue. See `docs/next-steps.md` §5.
 #[tokio::test]
-async fn list_tools_respects_path_prefix() -> anyhow::Result<()> {
+async fn router_list_all_respects_path_prefix() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let app = solx_manager::App::build_in(dir.path()).await?;
 
@@ -195,18 +191,21 @@ async fn list_tools_respects_path_prefix() -> anyhow::Result<()> {
     });
 
     let client = ().serve(client_transport).await?;
-    let tools = client.list_tools(None).await?;
-    let names: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
 
-    assert_eq!(
-        names.len(),
-        5,
-        "expected only the 5 /builtin/console actions, got: {names:?}"
-    );
-    assert!(names.iter().all(|n| n.starts_with("act__builtin__console__")), "{names:?}");
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("explore_tools")
+                .with_arguments(serde_json::json!({"discovery_mode": "list_all"}).as_object().unwrap().clone()),
+        )
+        .await?;
+    let text = &result.content[0].as_text().expect("text content").text;
     assert!(
-        !names.contains(&"act__builtin__file__file_put"),
-        "a /builtin-root action should not appear when scoped to /builtin/console, got: {names:?}"
+        text.contains("act__builtin__console__"),
+        "router should list /builtin/console actions, got: {text}"
+    );
+    assert!(
+        !text.contains("act__builtin__file__file_put"),
+        "a /builtin-root action should not appear when scoped to /builtin/console, got: {text}"
     );
 
     client.cancel().await?;

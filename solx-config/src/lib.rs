@@ -22,7 +22,7 @@ use fs2::FileExt;
 use serde_json::{Map, Value};
 use solx_surface::error::{Result, SolxError};
 
-pub use types::{CommandDef, InstalledPackage, SolxConfig};
+pub use types::{CommandDef, InstalledPackage, McpExcludeRule, SolxConfig};
 
 const CONFIG_FILE: &str = "solx-config.json";
 
@@ -236,6 +236,14 @@ impl ConfigService {
             .join(self.snapshot().actions_db.unwrap_or_else(|| "solx-actions.db".into()))
     }
 
+    /// Separate physical file from `actions_db_path()` — consoles and
+    /// invocations have no DB-level foreign keys into the `actions` table,
+    /// only an app-level `action_ref` string, so they don't need to share
+    /// its file.
+    pub fn console_db_path(&self) -> PathBuf {
+        self.db_dir().join("solx-console.db")
+    }
+
     pub fn types_db_path(&self) -> PathBuf {
         self.db_dir()
             .join(self.snapshot().types_db.unwrap_or_else(|| "solx-types.db".into()))
@@ -407,6 +415,12 @@ impl ConfigService {
     /// Deny-by-default: unset or empty means no URL is permitted.
     pub fn allowed_webhook_base_urls(&self) -> Vec<String> {
         self.snapshot().allowed_webhook_base_urls.unwrap_or_default()
+    }
+
+    /// The MCP tool-catalogue exclusion rules. Empty (the default) means
+    /// nothing is hidden.
+    pub fn mcp_exclude(&self) -> Vec<McpExcludeRule> {
+        self.snapshot().mcp_exclude.unwrap_or_default()
     }
 
     /// Replace the webhook base-URL allowlist wholesale.

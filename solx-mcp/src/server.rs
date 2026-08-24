@@ -1,32 +1,41 @@
 //! The MCP `ServerHandler` implementation.
 //!
-//! `list_tools`/`call_tool` are pure functions of current actions-DB state —
-//! no cached tool map, no mutable server state beyond the `Arc<App>` itself.
+//! `list_tools` exposes a single router meta-tool (`explore_tools`) rather
+//! than the full action catalogue; `call_tool` either handles that router
+//! (searching/listing the live actions DB) or dispatches a real action tool.
 //! Implemented by hand rather than via rmcp's `#[tool_router]`/`#[tool]`
-//! macros: those assume a fixed, compile-time-known tool set, but every tool
-//! here comes from a live `actions.list()` query.
+//! macros: those assume a fixed, compile-time-known tool set, but the tools
+//! the router discovers come from a live `actions.list()`/`actions.search()`
+//! query.
 
 use std::sync::Arc;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ErrorData, Implementation,
-    InitializeResult, ListToolsResult, PaginatedRequestParams, ProgressNotificationParam,
-    ProgressToken, ProtocolVersion, ServerCapabilities, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorData,
+    Implementation, InitializeResult, JsonObject, ListToolsResult, PaginatedRequestParams,
+    ProgressNotificationParam, ProgressToken, ProtocolVersion, ServerCapabilities, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{Peer, RoleServer, ServerHandler};
 use serde_json::{Map, Value};
 
 use solx_manager::App;
-use solx_surface::entities::ActionExecResult;
+use solx_surface::entities::{Action, ActionExecResult};
 use solx_surface::error::SolxError;
 use solx_surface::managers::Solx;
 use solx_surface::path::full_ref;
-use solx_surface::query::ListOptions;
+use solx_surface::query::{ActionSearchQuery, ListOptions};
 
-use crate::{error, schema, tools};
+use crate::{error, tools};
 
 const PAGE_SIZE: usize = 200;
+
+/// The single router meta-tool's name. Plain (not `act__`-prefixed) so it
+/// can never collide with an encoded action tool name.
+const ROUTER_TOOL_NAME: &str = "explore_tools";
+
+/// Max candidates returned per router page (both `search` and `list_all`).
+const ROUTER_PAGE_SIZE: usize = 10;
 
 /// Long-poll interval passed to `console/tail` between progress
 /// notifications — mirrors `solx-cli`'s `TAIL_WAIT_SECS`, which this whole
@@ -47,40 +56,200 @@ impl SolxMcpServer {
         SolxMcpServer { app, path_prefix }
     }
 
-    async fn list_action_tools(&self, offset: usize) -> Result<(Vec<Tool>, Option<usize>), ErrorData> {
+    /// The single router meta-tool exposed by `list_tools`.
+    fn router_tool() -> Tool {
+        let schema: JsonObject = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "discovery_mode": {
+                    "type": "string",
+                    "enum": ["search", "list_all"],
+                    "description": "Choose 'search' to filter tools by keywords, or 'list_all' to step through every available tool."
+                },
+                "search_query": {
+                    "type": "string",
+                    "description": "Required when discovery_mode is 'search'. Keywords matching your intent (e.g. 'git log', 'database')."
+                },
+                "path_prefix": {
+                    "type": "string",
+                    "description": "Optional. Restrict discovery to actions under this path (e.g. '/builtin')."
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "For 'list_all' mode: pass the next_cursor returned by the previous page to get the next page."
+                }
+            },
+            "required": ["discovery_mode"]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        Tool::new(
+            ROUTER_TOOL_NAME,
+            "Discover available tools. Use 'search' to find tools for a specific task, or 'list_all' to browse the complete registry. Returns tool names you can then invoke directly.",
+            Arc::new(schema),
+        )
+    }
+
+    /// Whether the action at `path`/`name` is hidden by the configured
+    /// `mcp_exclude` denylist.
+    fn is_excluded(&self, path: &str, name: &str) -> bool {
+        self.app
+            .config
+            .mcp_exclude()
+            .iter()
+            .any(|rule| rule.matches(path, name))
+    }
+
+    /// The effective path scope for a router call: the caller's `path_prefix`
+    /// argument when present, else the server's own `path_prefix`.
+    fn effective_prefix(&self, args: &Map<String, Value>) -> Option<String> {
+        args.get("path_prefix")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .or_else(|| self.path_prefix.clone())
+    }
+
+    /// Fetch every non-excluded action in the effective scope, in the default
+    /// `path,name` order. Used by the router's `list_all` mode.
+    async fn all_actions(&self, path_prefix: Option<String>) -> Result<Vec<Action>, ErrorData> {
         let actions = self.app.actions();
-        let types = self.app.types();
-        let page = actions
-            .list(ListOptions {
-                path_prefix: self.path_prefix.clone(),
-                limit: Some(PAGE_SIZE),
-                offset: Some(offset),
-                ..Default::default()
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        loop {
+            let page = actions
+                .list(ListOptions {
+                    path_prefix: path_prefix.clone(),
+                    limit: Some(PAGE_SIZE),
+                    offset: Some(offset),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            let n = page.items.len();
+            for a in page.items {
+                if !self.is_excluded(&a.path, &a.name) {
+                    out.push(a);
+                }
+            }
+            offset += n;
+            if n == 0 || offset >= page.total {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Format one action as a text candidate the model can read and then
+    /// invoke by its encoded tool name.
+    async fn format_candidate(&self, a: &Action) -> String {
+        let tool_name = tools::encode_tool_name(&a.path, &a.name);
+        let description = a
+            .description
+            .clone()
+            .or_else(|| a.caption.clone())
+            .unwrap_or_else(|| format!("Execute the '{}{}' action.", a.path, a.name));
+        let schema_str = match &a.param_type_ref {
+            Some(type_ref) => match self.app.types().resolve(type_ref).await {
+                Ok(ty) => ty.schema.to_string(),
+                Err(_) => "{}".to_string(),
+            },
+            None => "{}".to_string(),
+        };
+        format!("Tool: {tool_name}\nDescription: {description}\nSchema: {schema_str}")
+    }
+
+    /// Handle a `call_tool` invocation of the router meta-tool.
+    async fn handle_explore_tools(
+        &self,
+        args: &Map<String, Value>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match args.get("discovery_mode").and_then(Value::as_str) {
+            Some("search") => self.explore_search(args).await,
+            Some("list_all") => self.explore_list_all(args).await,
+            _ => Ok(CallToolResult::error(vec![ContentBlock::text(
+                "invalid 'discovery_mode': must be 'search' or 'list_all'".to_string(),
+            )])),
+        }
+    }
+
+    async fn explore_search(&self, args: &Map<String, Value>) -> Result<CallToolResult, ErrorData> {
+        let query = args
+            .get("search_query")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if query.is_empty() {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "'search' mode requires a non-empty 'search_query'".to_string(),
+            )]));
+        }
+        let page = self
+            .app
+            .actions()
+            .search(ActionSearchQuery {
+                list: ListOptions {
+                    path_prefix: self.effective_prefix(args),
+                    limit: Some(50),
+                    ..Default::default()
+                },
+                q: Some(query.clone()),
             })
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        let mut out = Vec::with_capacity(page.items.len());
+        let mut lines = Vec::new();
         for a in &page.items {
-            let input_schema = match &a.param_type_ref {
-                Some(type_ref) => match types.resolve(type_ref).await {
-                    Ok(ty) => schema::schema_from_type_value(&ty.schema),
-                    Err(_) => schema::permissive_object_schema(),
-                },
-                None => schema::permissive_object_schema(),
-            };
-            let name = tools::encode_tool_name(&a.path, &a.name);
-            let description = a
-                .description
-                .clone()
-                .or_else(|| a.caption.clone())
-                .unwrap_or_else(|| format!("Execute the '{}{}' action.", a.path, a.name));
-            out.push(Tool::new(name, description, input_schema));
+            if self.is_excluded(&a.path, &a.name) {
+                continue;
+            }
+            if lines.len() >= ROUTER_PAGE_SIZE {
+                break;
+            }
+            lines.push(self.format_candidate(a).await);
         }
+        if lines.is_empty() {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "no tools matched '{query}'"
+            ))]));
+        }
+        let mut text = format!(
+            "Found {} tool(s) matching '{query}'. Invoke one by its tool name:\n\n",
+            lines.len()
+        );
+        text.push_str(&lines.join("\n\n"));
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+    }
 
-        let next_offset = offset + page.items.len();
-        let next = if next_offset < page.total { Some(next_offset) } else { None };
-        Ok((out, next))
+    async fn explore_list_all(&self, args: &Map<String, Value>) -> Result<CallToolResult, ErrorData> {
+        let all = self.all_actions(self.effective_prefix(args)).await?;
+        let start = args
+            .get("cursor")
+            .and_then(Value::as_str)
+            .and_then(|c| c.parse::<usize>().ok())
+            .unwrap_or(0);
+        if start >= all.len() {
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
+                "No more tools available.".to_string(),
+            )]));
+        }
+        let end = (start + ROUTER_PAGE_SIZE).min(all.len());
+        let mut lines = Vec::new();
+        for a in &all[start..end] {
+            lines.push(self.format_candidate(a).await);
+        }
+        let mut text = format!(
+            "Displaying tools {} to {} of {}.\n\n",
+            start + 1,
+            end,
+            all.len()
+        );
+        text.push_str(&lines.join("\n\n"));
+        if end < all.len() {
+            text.push_str(&format!("\n\nnext_cursor: {end}"));
+        }
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 }
 
@@ -104,17 +273,10 @@ impl ServerHandler for SolxMcpServer {
 
     async fn list_tools(
         &self,
-        request: Option<PaginatedRequestParams>,
+        _request: Option<PaginatedRequestParams>,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let offset: usize = request
-            .and_then(|r| r.cursor)
-            .and_then(|c: String| c.parse::<usize>().ok())
-            .unwrap_or(0);
-        let (tools, next_offset) = self.list_action_tools(offset).await?;
-        let mut result = ListToolsResult::with_all_items(tools);
-        result.next_cursor = next_offset.map(|o| o.to_string());
-        Ok(result)
+        Ok(ListToolsResult::with_all_items(vec![Self::router_tool()]))
     }
 
     async fn call_tool(
@@ -122,12 +284,27 @@ impl ServerHandler for SolxMcpServer {
         request: CallToolRequestParams,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        // The router meta-tool is handled here, before `decode_tool_name`
+        // (which only understands `act__`-prefixed action tool names).
+        if request.name == ROUTER_TOOL_NAME {
+            let args = request.arguments.clone().unwrap_or_default();
+            return Ok(self.handle_explore_tools(&args).await?.into());
+        }
         let Some((path, name)) = tools::decode_tool_name(&request.name) else {
             return Err(ErrorData::invalid_params(
                 format!("unknown tool '{}'", request.name),
                 None,
             ));
         };
+        // Defense in depth: a client that already knows a hidden tool's name
+        // still can't invoke it — excluded tools are rejected here, not just
+        // omitted from `list_tools`.
+        if self.is_excluded(&path, &name) {
+            return Err(ErrorData::invalid_params(
+                format!("unknown tool '{}'", request.name),
+                None,
+            ));
+        }
         // Not `request.progress_token()`: on the receiving side, rmcp
         // strips the wire `_meta` into the request envelope's `Extensions`
         // during deserialization rather than populating the typed params'

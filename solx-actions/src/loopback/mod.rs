@@ -2,13 +2,9 @@
 //! not part of the CLI/MCP/HTTP-route surface, just infrastructure this
 //! crate stands up for itself.
 //!
-//! Two, with different lifecycles:
-//!
-//! * [`oauth`] — one per `oauth_start`/`oauth_stop` pair, RFC 6749/8252
-//!   authorization-code capture for a single browser sign-in.
-//! * [`console`] — started once, lives for the process's lifetime; lets a
-//!   spawned Command action's child process write to its own console (see
-//!   `docs/console-implementation-plan.md` §8a).
+//! One per `oauth_start`/`oauth_stop` pair, RFC 6749/8252
+//! authorization-code capture for a single browser sign-in. The equivalent
+//! listener for action consoles (started once, lives for the process's
+//! lifetime) now lives in `solx-console` — see `solx_console::loopback`.
 
-pub mod console;
 pub mod oauth;

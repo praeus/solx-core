@@ -702,7 +702,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use solx_surface::entities::{Action, ActionExecResult};
-    use solx_surface::query::{ListOptions, Page};
+    use solx_surface::query::{ActionSearchQuery, ListOptions, Page};
 
     fn clear() {
         cache().lock().unwrap().clear();
@@ -727,6 +727,9 @@ mod tests {
         }
         async fn list(&self, _opts: ListOptions) -> solx_surface::error::Result<Page<Action>> {
             panic!("stub ActionManager::list should not be called by these tests")
+        }
+        async fn search(&self, _query: ActionSearchQuery) -> solx_surface::error::Result<Page<Action>> {
+            panic!("stub ActionManager::search should not be called by these tests")
         }
         async fn exec(&self, _path: &str, _name: &str, _params: Value) -> solx_surface::error::Result<ActionExecResult> {
             panic!("stub ActionManager::exec should not be called by these tests")

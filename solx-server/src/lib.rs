@@ -25,6 +25,8 @@ pub mod error;
 pub mod routes;
 pub mod state;
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
 use axum::middleware;
 use axum::routing::get;
 use axum::Router;
@@ -54,4 +56,22 @@ pub fn build_router(state: AppState) -> Router {
         .merge(protected)
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+/// Bind `127.0.0.1:port` and start serving in the background. Returns once
+/// the listener is bound; the spawned task keeps running until the process
+/// exits. For a process (like `solx-cli`) that wants a real HTTP surface
+/// available to child processes it spawns, without itself being
+/// `solx-server` — see `solx-cli`'s `build_app` for the caller.
+pub async fn spawn_embedded(state: AppState, port: u16) -> std::io::Result<SocketAddr> {
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
+    let router = build_router(state);
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, router).await {
+            tracing::warn!("embedded solx-server on {addr} exited: {e}");
+        }
+    });
+    Ok(bound)
 }
