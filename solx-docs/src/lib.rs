@@ -1,4 +1,5 @@
-//! `solx-docs` — the document store (its own libsql database + Tantivy index).
+//! `solx-docs` — the document store (its own libsql database, with SQLite
+//! FTS5 for full-text search).
 //!
 //! Documents are organized by `path` + `name` (unique together). Each document
 //! references its type by full path string; on write the contents are validated
@@ -6,8 +7,8 @@
 //! database). Links (doc→doc and doc→URL) and file references are stored as JSON
 //! columns — the bytes themselves live in the files store.
 
+mod content;
 mod db;
-mod search;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -20,12 +21,11 @@ use solx_surface::entities::{DocLink, Document, DocumentInput, FileRef};
 use solx_surface::error::{Result, SolxError};
 use solx_surface::managers::{DocManager, TypeManager};
 use solx_surface::path::{full_ref, normalize_path, validate_name};
-use solx_surface::query::{ListOptions, ListSchema, Page, SearchQuery, SearchResults};
+use solx_surface::query::{ListOptions, ListSchema, Page, SearchHit, SearchQuery, SearchResults};
 use uuid::Uuid;
 
+use content::{flatten_strings, walk_contents};
 use db::{map_db, Db};
-use search::{flatten_strings, walk_contents, DocIndexWriter, DocSearcher};
-use tokio::sync::{mpsc, oneshot};
 
 const DDL: &str = "\
 CREATE TABLE IF NOT EXISTS documents (\
@@ -41,138 +41,103 @@ CREATE TABLE IF NOT EXISTS documents (\
     confidence REAL,\
     links TEXT NOT NULL DEFAULT '[]',\
     files TEXT NOT NULL DEFAULT '[]',\
+    content_text TEXT NOT NULL DEFAULT '',\
     created_at TEXT NOT NULL,\
     updated_at TEXT NOT NULL,\
     UNIQUE(path,name)\
-);";
+);\
+CREATE TABLE IF NOT EXISTS document_refs (\
+    document_id TEXT NOT NULL,\
+    target TEXT NOT NULL\
+);\
+CREATE INDEX IF NOT EXISTS document_refs_target ON document_refs(target);\
+CREATE INDEX IF NOT EXISTS document_refs_document_id ON document_refs(document_id);";
+
+/// External-content FTS5 index over `documents.name`/`content_text`, kept in
+/// sync purely by trigger — `save`/`delete` never touch this table directly.
+/// `id` is `TEXT PRIMARY KEY` (not `INTEGER PRIMARY KEY`), so `documents`
+/// keeps SQLite's implicit `rowid`, which is what `content_rowid='rowid'`
+/// links against. Mirrors `solx-actions`'s `actions_fts` pattern exactly —
+/// see that crate's `FTS_DDL` for the general shape.
+///
+/// `title`/`summary` aren't indexed separately: `content_text` already folds
+/// them in (see [`LocalDocManager::compute_content`]), same as the old
+/// Tantivy index only ever searched `name` + `content_text`.
+const FTS_DDL: &str = "\
+CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(\
+    name, content_text, \
+    content='documents', content_rowid='rowid', tokenize='porter unicode61'\
+);\
+CREATE TRIGGER IF NOT EXISTS documents_ai AFTER INSERT ON documents BEGIN \
+  INSERT INTO documents_fts(rowid,name,content_text)\
+  VALUES (new.rowid,new.name,new.content_text);\
+END;\
+CREATE TRIGGER IF NOT EXISTS documents_ad AFTER DELETE ON documents BEGIN \
+  INSERT INTO documents_fts(documents_fts,rowid,name,content_text)\
+  VALUES('delete',old.rowid,old.name,old.content_text);\
+  DELETE FROM document_refs WHERE document_id = old.id;\
+END;\
+CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN \
+  INSERT INTO documents_fts(documents_fts,rowid,name,content_text)\
+  VALUES('delete',old.rowid,old.name,old.content_text);\
+  INSERT INTO documents_fts(rowid,name,content_text)\
+  VALUES (new.rowid,new.name,new.content_text);\
+END;";
 
 const DEFAULT_LIMIT: usize = 50;
 
-/// One staged index mutation plus a channel to report the commit back on.
-struct IndexRequest {
-    op: IndexOp,
-    /// Resolved once the batch containing this op has been committed, so a
-    /// `save` that has returned is always visible to a subsequent `search`.
-    done: oneshot::Sender<std::result::Result<(), String>>,
-}
-
-enum IndexOp {
-    /// Boxed: the add variant is much larger than the delete one, and this
-    /// keeps every queued request small.
-    Add(Box<IndexDoc>),
-    Delete(String),
-}
-
-struct IndexDoc {
-    id: String,
-    path: String,
-    name: String,
-    name_raw: String,
-    title: Option<String>,
-    summary: Option<String>,
-    type_ref: String,
-    doc_ref_names: Vec<String>,
-    content_text: String,
-}
-
-/// libsql + Tantivy backed [`DocManager`].
-///
-/// Tantivy is entirely synchronous, so neither half of it may run inline in
-/// these async methods. Writes are queued to a dedicated thread that batches
-/// them behind a single commit; reads clone the (cheap, Arc-backed) searcher
-/// and run on the blocking pool.
-///
-/// This replaced a single `std::sync::Mutex<DocIndex>` that committed —
-/// segment serialize, `fsync`, reader reload — on **every individual
-/// document write**, on an async worker, with all searches serialized behind
-/// the same lock.
+/// libsql + FTS5 backed [`DocManager`].
 pub struct LocalDocManager {
     db: Db,
-    searcher: DocSearcher,
-    index_tx: mpsc::UnboundedSender<IndexRequest>,
     types: Arc<dyn TypeManager>,
 }
 
-/// Own the writer on a dedicated OS thread and drain the queue in batches.
-///
-/// A plain thread rather than a tokio task: every operation here is blocking
-/// tantivy work, so a task would just park a worker for the whole commit.
-fn spawn_index_writer(mut writer: DocIndexWriter, mut rx: mpsc::UnboundedReceiver<IndexRequest>) {
-    std::thread::Builder::new()
-        .name("solx-docs-index".into())
-        .spawn(move || {
-            while let Some(first) = rx.blocking_recv() {
-                // Take everything already queued so a burst of writes costs
-                // one commit rather than N.
-                let mut batch = vec![first];
-                while let Ok(next) = rx.try_recv() {
-                    batch.push(next);
-                }
-
-                let mut staged = Ok(());
-                for req in &batch {
-                    let r = match &req.op {
-                        IndexOp::Add(d) => writer.stage_doc(
-                            &d.id,
-                            &d.path,
-                            &d.name,
-                            &d.name_raw,
-                            d.title.as_deref(),
-                            d.summary.as_deref(),
-                            &d.type_ref,
-                            &d.doc_ref_names,
-                            &d.content_text,
-                        ),
-                        IndexOp::Delete(name_raw) => {
-                            writer.stage_delete(name_raw.as_str());
-                            Ok(())
-                        }
-                    };
-                    if let Err(e) = r {
-                        staged = Err(e.to_string());
-                        break;
-                    }
-                }
-
-                let outcome = match staged {
-                    Ok(()) => writer.commit().map_err(|e| e.to_string()),
-                    Err(e) => Err(e),
-                };
-                // A failure is reported to everyone in the batch: they share
-                // a commit, so they share its fate.
-                for req in batch {
-                    let _ = req.done.send(outcome.clone());
-                }
-            }
-        })
-        .expect("failed to spawn document index writer thread");
-}
-
 impl LocalDocManager {
-    /// Open the documents database and search index, validating contents
-    /// against types resolved via `types`.
-    pub async fn open(
-        db_path: &Path,
-        index_dir: &Path,
-        types: Arc<dyn TypeManager>,
-    ) -> Result<Self> {
+    /// Open the documents database, validating contents against types
+    /// resolved via `types`.
+    pub async fn open(db_path: &Path, types: Arc<dyn TypeManager>) -> Result<Self> {
         let db = Db::open(db_path).await?;
         let conn = db.connect().await?;
         conn.execute_batch(DDL).await.map_err(map_db)?;
-        let (writer, searcher, created_fresh) = DocIndexWriter::open(index_dir)?;
-        let (index_tx, index_rx) = mpsc::unbounded_channel();
-        spawn_index_writer(writer, index_rx);
-        let manager = LocalDocManager {
-            db,
-            searcher,
-            index_tx,
-            types,
-        };
-        // A freshly-created index (first run, or an incompatible on-disk
-        // schema that was just wiped and recreated) has no documents in it —
-        // repopulate from the database so search results survive an index
-        // schema upgrade.
-        if created_fresh {
+
+        // Pre-existing databases predate `content_text`; add it so the FTS5
+        // triggers created below have something to index.
+        let needs_backfill = !column_exists(&conn, "documents", "content_text").await?;
+        if needs_backfill {
+            conn.execute(
+                "ALTER TABLE documents ADD COLUMN content_text TEXT NOT NULL DEFAULT ''",
+                (),
+            )
+            .await
+            .map_err(map_db)?;
+        }
+
+        conn.execute_batch(FTS_DDL).await.map_err(map_db)?;
+        if needs_backfill {
+            // Any row that predates `documents_fts` was never indexed by the
+            // `documents_ai` trigger, so the `documents_au` trigger's
+            // delete-then-reinsert (which `reindex_all`'s per-row `UPDATE`
+            // below will trigger) would try to delete an entry that was
+            // never there — silently corrupting the FTS5 shadow tables
+            // (surfaces later as "database disk image is malformed"). The
+            // documented fix for seeding an external-content FTS5 index from
+            // pre-existing rows is this one-time `'rebuild'` command (same
+            // as solx-actions's backfill), run *before* any trigger-driven
+            // write touches those rows.
+            conn.execute("INSERT INTO documents_fts(documents_fts) VALUES('rebuild')", ())
+                .await
+                .map_err(map_db)?;
+        }
+        // Done with this connection before handing off to `reindex_all`,
+        // which opens its own — an unfinished statement left open here would
+        // otherwise hold a read lock that blocks that connection's writes.
+        drop(conn);
+
+        let manager = LocalDocManager { db, types };
+        if needs_backfill {
+            // `'rebuild'` only seeded `documents_fts` with `content_text`'s
+            // current (empty, for pre-existing rows) value; this computes
+            // and writes the real per-row content.
             manager.reindex_all().await?;
         }
         Ok(manager)
@@ -183,23 +148,38 @@ impl LocalDocManager {
         self.types.clone()
     }
 
-    /// Re-index every document currently in the database. Called
-    /// automatically by [`Self::open`] after a fresh/recreated search index;
-    /// safe to call at any time (e.g. to recover from an out-of-band index
-    /// corruption). Returns the number of documents re-indexed.
+    /// Recompute `content_text`/`document_refs` for every document currently
+    /// in the database, via a real `UPDATE` per row so the `documents_au`
+    /// trigger picks up the new `content_text` into `documents_fts`
+    /// automatically. Called once by [`Self::open`] to backfill a database
+    /// that predates `content_text`; safe to call at any other time too
+    /// (e.g. to recover search results after a type's schema changed which
+    /// fields are `DocRef`s). Returns the number of documents re-indexed.
     pub async fn reindex_all(&self) -> Result<usize> {
         let conn = self.db.connect().await?;
         let mut rows = conn.query(SELECT, ()).await.map_err(map_db)?;
-        let mut count = 0usize;
+        let mut docs = Vec::new();
         while let Some(row) = rows.next().await.map_err(map_db)? {
-            let doc = row_to_doc(&row)?;
-            self.reindex(&doc).await?;
-            count += 1;
+            docs.push(row_to_doc(&row)?);
+        }
+        let count = docs.len();
+        for doc in docs {
+            let (content_text, doc_ref_names) = self.compute_content(&doc).await;
+            conn.execute(
+                "UPDATE documents SET content_text=?1 WHERE id=?2",
+                libsql::params![content_text, doc.id.to_string()],
+            )
+            .await
+            .map_err(map_db)?;
+            write_doc_refs(&conn, &doc.id.to_string(), &doc_ref_names).await?;
         }
         Ok(count)
     }
 
-    async fn reindex(&self, doc: &Document) -> Result<()> {
+    /// Compute the full-text bag (`name` + `title` + `summary` + walked
+    /// `contents`) and the `DocRef` targets `contents` points at, resolving
+    /// `doc.type_ref`'s schema for a schema-aware walk when possible.
+    async fn compute_content(&self, doc: &Document) -> (String, Vec<String>) {
         let mut content_text = String::new();
         content_text.push_str(&doc.name);
         content_text.push(' ');
@@ -212,10 +192,6 @@ impl LocalDocManager {
             content_text.push(' ');
         }
 
-        // Schema-aware content walking: resolve the type to get its schema,
-        // then walk contents to extract DocRef targets and rich-text plain
-        // text. Fall back to naive flatten_strings if the type can't be
-        // resolved.
         let type_schema = self.types.resolve(&doc.type_ref).await.ok().map(|t| t.schema);
         let doc_ref_names = match type_schema {
             Some(ref schema) => {
@@ -232,33 +208,66 @@ impl LocalDocManager {
             }
         };
 
-        let name_raw = full_ref(&doc.path, &doc.name)?;
-        self.submit(IndexOp::Add(Box::new(IndexDoc {
-            id: doc.id.to_string(),
-            path: doc.path.clone(),
-            name: doc.name.clone(),
-            name_raw,
-            title: doc.title.clone(),
-            summary: doc.summary.clone(),
-            type_ref: doc.type_ref.clone(),
-            doc_ref_names,
-            content_text,
-        })))
-        .await
+        (content_text, doc_ref_names)
     }
+}
 
-    /// Queue an index mutation and wait for the batch containing it to
-    /// commit. Awaiting the commit is what preserves read-your-writes;
-    /// batching only ever merges genuinely concurrent writers.
-    async fn submit(&self, op: IndexOp) -> Result<()> {
-        let (done, wait) = oneshot::channel();
-        self.index_tx
-            .send(IndexRequest { op, done })
-            .map_err(|_| SolxError::Other("document index writer thread has stopped".into()))?;
-        wait.await
-            .map_err(|_| SolxError::Other("document index writer dropped the request".into()))?
-            .map_err(SolxError::Other)
+async fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    // `table` is always a hardcoded literal from this module, never caller
+    // input — PRAGMA statements don't support parameter binding for names.
+    let mut rows = conn
+        .query(&format!("PRAGMA table_info({table})"), ())
+        .await
+        .map_err(map_db)?;
+    // Drained to `None` rather than returning as soon as a match is found:
+    // an abandoned `Rows` cursor holds a read lock that outlives dropping it
+    // (this isn't released until the statement is stepped to completion),
+    // which would otherwise block a write from another connection later in
+    // `open` — see the (much longer-lived) version of this bug that used to
+    // corrupt `documents_fts` before `reindex_all` ran.
+    let mut found = false;
+    while let Some(row) = rows.next().await.map_err(map_db)? {
+        let name: String = row.get(1).map_err(map_db)?;
+        if name == column {
+            found = true;
+        }
     }
+    Ok(found)
+}
+
+async fn write_doc_refs(conn: &Connection, document_id: &str, targets: &[String]) -> Result<()> {
+    conn.execute(
+        "DELETE FROM document_refs WHERE document_id=?1",
+        libsql::params![document_id.to_string()],
+    )
+    .await
+    .map_err(map_db)?;
+    for target in targets {
+        conn.execute(
+            "INSERT INTO document_refs (document_id, target) VALUES (?1, ?2)",
+            libsql::params![document_id.to_string(), target.clone()],
+        )
+        .await
+        .map_err(map_db)?;
+    }
+    Ok(())
+}
+
+/// Turn free-text `q` into a safe FTS5 `MATCH` expression: each whitespace-
+/// separated term becomes a quoted, prefix-matched phrase (`"term"*`), ANDed
+/// together (FTS5's default for space-separated terms). Quoting every term
+/// keeps it immune to FTS5 query-syntax errors from special characters in
+/// document text (`"`, `-`, `:`, `(`, ...). `solx-actions` mirrors this as
+/// its own `fts_match_query` — any free-text search term can hit the same
+/// FTS5 syntax errors, not just document content. This mirrors the old
+/// Tantivy bare-term path's auto-prefix behavior; Tantivy's advanced
+/// operator syntax (`~` fuzzy, `^` boost) has no FTS5 equivalent and isn't
+/// exercised by any caller today.
+fn fts_match_query(q: &str) -> String {
+    q.split_whitespace()
+        .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn opt(s: String) -> Option<String> {
@@ -307,26 +316,6 @@ fn parse_dt(s: &str) -> Result<DateTime<Utc>> {
         .map_err(|e| SolxError::Db(e.to_string()))
 }
 
-const SELECT: &str = "SELECT id,path,name,title,summary,type_ref,contents,author,pub_date,confidence,links,files,created_at,updated_at FROM documents";
-
-/// Columns this store exposes to `ListOptions`.
-///
-/// `contents` is deliberately absent: it holds the whole document body, and a
-/// LIKE filter over it would be both slow and a worse answer than the Tantivy
-/// index that `search` already provides.
-const LIST_SCHEMA: ListSchema<'static> = ListSchema {
-    filterable: &["name", "title", "summary", "author", "type_ref"],
-    sortable: &[
-        ("name", "path,name"),
-        ("path", "path,name"),
-        ("title", "title"),
-        ("created_at", "created_at"),
-        ("updated_at", "updated_at"),
-    ],
-    default_sort: "path,name",
-    date_column: Some("created_at"),
-};
-
 async fn get_row(conn: &Connection, path: &str, name: &str) -> Result<Option<Document>> {
     let mut rows = conn
         .query(
@@ -340,6 +329,26 @@ async fn get_row(conn: &Connection, path: &str, name: &str) -> Result<Option<Doc
         None => Ok(None),
     }
 }
+
+const SELECT: &str = "SELECT id,path,name,title,summary,type_ref,contents,author,pub_date,confidence,links,files,created_at,updated_at FROM documents";
+
+/// Columns this store exposes to `ListOptions`.
+///
+/// `contents` is deliberately absent: it holds the whole document body, and a
+/// LIKE filter over it would be both slow and a worse answer than the FTS5
+/// index that `search` already provides.
+const LIST_SCHEMA: ListSchema<'static> = ListSchema {
+    filterable: &["name", "title", "summary", "author", "type_ref"],
+    sortable: &[
+        ("name", "path,name"),
+        ("path", "path,name"),
+        ("title", "title"),
+        ("created_at", "created_at"),
+        ("updated_at", "updated_at"),
+    ],
+    default_sort: "path,name",
+    date_column: Some("created_at"),
+};
 
 #[async_trait]
 impl DocManager for LocalDocManager {
@@ -388,6 +397,30 @@ impl DocManager for LocalDocManager {
         let id = existing.as_ref().map(|d| d.id).unwrap_or_else(Uuid::new_v4);
         let created_at = existing.as_ref().map(|d| d.created_at).unwrap_or(now);
 
+        // Computed before the write so the FTS5 triggers see the final
+        // `content_text` value in the same statement that lands the row —
+        // `walk_contents` needs an async `TypeManager.resolve()` call, which
+        // is why this can't just be a pure-SQL trigger the way `content_text`
+        // itself is consumed by one.
+        let (content_text, doc_ref_names) = self
+            .compute_content(&Document {
+                id,
+                path: path.clone(),
+                name: name.clone(),
+                title: title.clone(),
+                summary: summary.clone(),
+                type_ref: type_ref.clone(),
+                contents: contents.clone(),
+                author: author.clone(),
+                pub_date: pub_date.clone(),
+                confidence,
+                links: links.clone(),
+                files: files.clone(),
+                created_at,
+                updated_at: now,
+            })
+            .await;
+
         let params = libsql::params![
             id.to_string(),
             path.clone(),
@@ -396,6 +429,7 @@ impl DocManager for LocalDocManager {
             summary.clone().unwrap_or_default(),
             type_ref.clone(),
             contents.to_string(),
+            content_text,
             author.clone().unwrap_or_default(),
             pub_date.clone().unwrap_or_default(),
             confidence,
@@ -407,26 +441,25 @@ impl DocManager for LocalDocManager {
 
         if existing.is_some() {
             conn.execute(
-                "UPDATE documents SET title=?4,summary=?5,type_ref=?6,contents=?7,author=?8,pub_date=?9,confidence=?10,links=?11,files=?12,updated_at=?14 WHERE path=?2 AND name=?3",
+                "UPDATE documents SET title=?4,summary=?5,type_ref=?6,contents=?7,content_text=?8,author=?9,pub_date=?10,confidence=?11,links=?12,files=?13,updated_at=?15 WHERE path=?2 AND name=?3",
                 params,
             )
             .await
             .map_err(map_db)?;
         } else {
             conn.execute(
-                "INSERT INTO documents (id,path,name,title,summary,type_ref,contents,author,pub_date,confidence,links,files,created_at,updated_at) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                "INSERT INTO documents (id,path,name,title,summary,type_ref,contents,content_text,author,pub_date,confidence,links,files,created_at,updated_at) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
                 params,
             )
             .await
             .map_err(map_db)?;
         }
+        write_doc_refs(&conn, &id.to_string(), &doc_ref_names).await?;
 
-        let doc = get_row(&conn, &path, &name)
+        get_row(&conn, &path, &name)
             .await?
-            .ok_or_else(|| SolxError::Other("document vanished after write".into()))?;
-        self.reindex(&doc).await?;
-        Ok(doc)
+            .ok_or_else(|| SolxError::Other("document vanished after write".into()))
     }
 
     async fn get(&self, path: &str, name: &str) -> Result<Document> {
@@ -455,7 +488,8 @@ impl DocManager for LocalDocManager {
         if affected == 0 {
             return Err(SolxError::NotFound(format!("document {fr}")));
         }
-        self.submit(IndexOp::Delete(fr)).await?;
+        // The `documents_ad` trigger removes the row from `documents_fts`
+        // and clears its `document_refs` — no separate cleanup needed here.
         Ok(())
     }
 
@@ -495,15 +529,105 @@ impl DocManager for LocalDocManager {
         Ok(Page::new(items, total, limit, offset))
     }
 
+    /// Free-text search over `name`/`content_text` (a schema-aware flattening
+    /// of the document's title/summary/contents, see
+    /// [`Self::compute_content`]), composed with `path_prefix`/`type_ref`/
+    /// `linked_to` facets. Joins to `documents_fts` through a `rowid, rank`
+    /// subquery rather than directly, so the FTS table's own `name` column
+    /// can't collide with `documents.name` — same reasoning as
+    /// `solx-actions`'s `search()`. With `query.q` absent this runs the same
+    /// query plan as a plain facet filter — no join, no ranking.
     async fn search(&self, query: SearchQuery) -> Result<SearchResults> {
-        // Tantivy search is synchronous CPU work plus mmap page faults that
-        // can reach real disk, so it goes to the blocking pool. The searcher
-        // is a cheap Arc-backed clone, so no lock is held and concurrent
-        // searches no longer serialize behind each other or behind a commit.
-        let searcher = self.searcher.clone();
-        tokio::task::spawn_blocking(move || searcher.search(&query))
-            .await
-            .map_err(|e| SolxError::Other(format!("search task panicked: {e}")))?
+        let conn = self.db.connect().await?;
+        let limit = query.limit.unwrap_or(20).max(1);
+        let offset = query.offset.unwrap_or(0);
+
+        let mut conditions: Vec<String> = Vec::new();
+        let mut binds: Vec<libsql::Value> = Vec::new();
+
+        if let Some(prefix) = query.path_prefix.as_deref().filter(|s| !s.is_empty()) {
+            let p = normalize_path(prefix)?;
+            if p == "/" {
+                binds.push(libsql::Value::from("/%".to_string()));
+                conditions.push(format!("d.path LIKE ?{}", binds.len()));
+            } else {
+                binds.push(libsql::Value::from(p.clone()));
+                let exact = binds.len();
+                binds.push(libsql::Value::from(format!("{p}/%")));
+                let under = binds.len();
+                conditions.push(format!("(d.path=?{exact} OR d.path LIKE ?{under})"));
+            }
+        }
+        if let Some(tr) = query.type_ref.as_deref().filter(|s| !s.is_empty()) {
+            binds.push(libsql::Value::from(tr.to_string()));
+            conditions.push(format!("d.type_ref=?{}", binds.len()));
+        }
+        if let Some(target) = query.linked_to.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            binds.push(libsql::Value::from(target.to_string()));
+            conditions.push(format!(
+                "EXISTS (SELECT 1 FROM document_refs r WHERE r.document_id = d.id AND r.target = ?{})",
+                binds.len()
+            ));
+        }
+
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conditions.join(" AND "))
+        };
+
+        let term = query.q.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let (join, order) = match term {
+            Some(t) => {
+                binds.push(libsql::Value::from(fts_match_query(t)));
+                let n = binds.len();
+                (
+                    format!(" JOIN (SELECT rowid, rank FROM documents_fts WHERE documents_fts MATCH ?{n}) f ON f.rowid = d.rowid"),
+                    " ORDER BY f.rank".to_string(),
+                )
+            }
+            None => (String::new(), " ORDER BY d.path ASC, d.name ASC".to_string()),
+        };
+
+        let total: usize = {
+            let sql = format!("SELECT COUNT(*) FROM documents d{join}{where_clause}");
+            let mut rows = conn.query(&sql, binds.clone()).await.map_err(map_db)?;
+            rows.next()
+                .await
+                .map_err(map_db)?
+                .map(|r| r.get::<i64>(0).unwrap_or(0))
+                .unwrap_or(0) as usize
+        };
+
+        let rank_select = if term.is_some() { ", f.rank" } else { "" };
+        let sql = format!(
+            "SELECT d.id,d.path,d.name,d.title,d.summary,d.type_ref,d.contents,d.author,d.pub_date,d.confidence,d.links,d.files,d.created_at,d.updated_at{rank_select} \
+             FROM documents d{join}{where_clause}{order} LIMIT {limit} OFFSET {offset}"
+        );
+        let mut rows = conn.query(&sql, binds).await.map_err(map_db)?;
+        let mut hits = Vec::new();
+        while let Some(row) = rows.next().await.map_err(map_db)? {
+            let doc = row_to_doc(&row)?;
+            // FTS5's `rank` is negative, lower = better; negate it so higher
+            // = better, matching the score convention `SearchHit.score`
+            // already promised under the old (positive, higher-is-better)
+            // Tantivy BM25 score.
+            let score = if term.is_some() {
+                -(row.get::<f64>(14).unwrap_or(0.0) as f32)
+            } else {
+                0.0
+            };
+            hits.push(SearchHit {
+                id: doc.id.to_string(),
+                path: doc.path,
+                name: doc.name,
+                title: doc.title,
+                summary: doc.summary,
+                type_ref: doc.type_ref,
+                score,
+            });
+        }
+        Ok(SearchResults { hits, total, limit, offset })
     }
 }
 
@@ -516,13 +640,9 @@ mod tests {
     async fn setup() -> (tempfile::TempDir, LocalDocManager) {
         let dir = tempfile::tempdir().unwrap();
         let types = LocalTypeManager::open(&dir.path().join("types.db")).await.unwrap();
-        let m = LocalDocManager::open(
-            &dir.path().join("docs.db"),
-            &dir.path().join("idx"),
-            Arc::new(types),
-        )
-        .await
-        .unwrap();
+        let m = LocalDocManager::open(&dir.path().join("docs.db"), Arc::new(types))
+            .await
+            .unwrap();
         (dir, m)
     }
 
@@ -651,49 +771,47 @@ mod tests {
         assert_eq!(res_none.total, 0);
     }
 
+    /// A database created before `content_text` existed (no such column, no
+    /// `documents_fts` table) must have its rows backfilled and made
+    /// searchable on open — mirroring the bug `solx-actions` hit and fixed
+    /// (see this crate's `FTS_DDL` doc comment), except here the source
+    /// column itself is new rather than just the FTS wiring.
     #[tokio::test]
-    async fn reindex_all_repopulates_after_incompatible_index() {
+    async fn a_pre_content_text_database_is_backfilled_on_open() {
         let dir = tempfile::tempdir().unwrap();
         let types = Arc::new(LocalTypeManager::open(&dir.path().join("types.db")).await.unwrap());
         let db_path = dir.path().join("docs.db");
-        let idx_path = dir.path().join("idx");
 
+        // Seed a `documents` table shaped like the pre-migration schema (no
+        // `content_text` column), with one row already in it, via raw SQL —
+        // simulating a database that predates this crate's FTS5 support.
         {
-            let m = LocalDocManager::open(&db_path, &idx_path, types.clone())
-                .await
-                .unwrap();
-            m.save(
-                "/a",
-                "one",
-                DocumentInput {
-                    type_ref: Some("/types/docs/Document".into()),
-                    contents: json!({ "body": "searchable content" }),
-                    ..Default::default()
-                },
+            let db = Db::open(&db_path).await.unwrap();
+            let conn = db.connect().await.unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS documents (\
+                    id TEXT PRIMARY KEY, path TEXT NOT NULL, name TEXT NOT NULL, \
+                    title TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', \
+                    type_ref TEXT NOT NULL, contents TEXT NOT NULL DEFAULT '{}', \
+                    author TEXT NOT NULL DEFAULT '', pub_date TEXT NOT NULL DEFAULT '', \
+                    confidence REAL, links TEXT NOT NULL DEFAULT '[]', \
+                    files TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, \
+                    updated_at TEXT NOT NULL, UNIQUE(path,name));",
+            )
+            .await
+            .unwrap();
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO documents (id,path,name,title,summary,type_ref,contents,author,pub_date,confidence,links,files,created_at,updated_at) \
+                 VALUES (?1,'/a','one','','', '/types/docs/Document', '{\"body\":\"searchable content\"}', '', '', NULL, '[]', '[]', ?2, ?2)",
+                libsql::params![Uuid::new_v4().to_string(), now],
             )
             .await
             .unwrap();
         }
 
-        // Simulate a stale on-disk index missing a required field (e.g. from
-        // before `doc_ref_names` was added) by replacing it with a minimal
-        // incompatible schema.
-        {
-            use tantivy::schema::{SchemaBuilder, STORED, STRING};
-            let mut b = SchemaBuilder::new();
-            b.add_text_field("id", STRING | STORED);
-            let schema = b.build();
-            std::fs::remove_dir_all(&idx_path).unwrap();
-            std::fs::create_dir_all(&idx_path).unwrap();
-            tantivy::Index::create_in_dir(&idx_path, schema).unwrap();
-        }
-
-        // Reopening must detect the incompatibility, recreate the index, and
-        // automatically repopulate it from the documents database.
-        let m2 = LocalDocManager::open(&db_path, &idx_path, types.clone())
-            .await
-            .unwrap();
-        let res = m2
+        let m = LocalDocManager::open(&db_path, types).await.unwrap();
+        let res = m
             .search(SearchQuery {
                 q: Some("searchable".into()),
                 ..Default::default()
@@ -703,8 +821,6 @@ mod tests {
         assert_eq!(res.total, 1);
         assert_eq!(res.hits[0].name, "one");
     }
-
-    // ── Index writer thread ──────────────────────────────────────────────
 
     async fn save_doc(m: &LocalDocManager, path: &str, name: &str, body: &str) {
         m.save(
@@ -720,10 +836,10 @@ mod tests {
         .unwrap();
     }
 
-    /// Writes now go through a channel to a dedicated thread that batches
-    /// them behind one commit — but a `save` that has returned must still be
-    /// immediately findable. `submit` awaits its batch's commit for exactly
-    /// this reason.
+    /// Writes go through a single synchronous SQL statement (row write plus
+    /// its FTS5 trigger), so a `save` that has returned must be immediately
+    /// findable — no separate commit-and-await step is needed the way the
+    /// old Tantivy writer thread required.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_returned_save_is_immediately_searchable() {
         let (_d, m) = setup().await;
@@ -760,8 +876,6 @@ mod tests {
         assert_eq!(after.total, 0);
     }
 
-    /// Concurrent writers and searchers used to serialize behind one
-    /// `std::sync::Mutex`, with a full commit inside it per document.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_writes_and_searches_all_land() {
         let (_d, m) = setup().await;

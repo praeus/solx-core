@@ -122,7 +122,7 @@ async fn call_tool_streams_console_entries_as_progress_notifications_over_http()
     app.files()
         .put(
             &solx_files::shared_action_file_path("count.solx"),
-            b"exec /builtin/action/entity_list_actions; exec /builtin/action/entity_list_documents".to_vec(),
+            b"exec /builtin/action/entity_list_actions; exec /builtin/document/entity_list_documents".to_vec(),
         )
         .await?;
     app.actions()

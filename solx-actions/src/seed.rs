@@ -96,7 +96,7 @@ pub fn builtin_actions() -> Vec<SeedAction> {
         // Document path-style field ops (nested reads/writes via dotted path)
         a_at(DOCUMENT_PATH, "get_field_at_path", "get_field_at_path", "Read a field at a slash-separated path inside a document's contents.", Some("GetFieldAtPathParams")),
         a_at(DOCUMENT_PATH, "set_field_at_path", "set_field_at_path", "Write a field at a slash-separated path inside a document's contents (optionally creating missing parents).", Some("SetFieldAtPathParams")),
-        // Document search (a real Tantivy full-text index)
+        // Document search (SQLite FTS5)
         a_at(DOCUMENT_PATH, "search_documents", "search_documents", "Full-text + faceted search over documents.", Some("SearchDocumentsParams")),
         // Action CRUD (alongside the async start/stop/poll/cancelled below)
         a_at(ACTION_PATH, "entity_save_action", "entity_save_action", "Create or update (upsert) an action.", Some("ActionCrudParams")),

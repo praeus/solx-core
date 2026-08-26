@@ -17,6 +17,10 @@
 			"path": "../solx-web"
 		},
 		{
+			"name": "solx-explorer",
+			"path": "../solx-explorer"
+		},
+		{
 			"name": "examples",
 			"path": "../examples"
 		},

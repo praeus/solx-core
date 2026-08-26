@@ -2,7 +2,7 @@
 //!
 //! Every entity manager is an object-safe `#[async_trait]` trait using only
 //! `solx-surface` DTOs and `serde_json::Value`. Phase 1 ships local impls
-//! (libsql/tantivy/wasmtime); a future `solx-client` can implement the same
+//! (libsql/wasmtime); a future `solx-client` can implement the same
 //! traits as HTTP proxies and `solx-server` can host a local impl, with no
 //! change to callers (the CLI) that already depend only on `Arc<dyn _>`.
 

@@ -157,11 +157,10 @@ fn to_anyhow(e: SolxError) -> anyhow::Error {
 /// Build the `App`, auto-detecting a locally-reachable `solx-server` before
 /// falling back to opening local storage directly.
 ///
-/// Without this, every CLI invocation opens the local Tantivy docs index
+/// Without this, every CLI invocation opens the local libsql storage
 /// itself (`App::build()`'s default when no `server_url` is configured),
-/// which collides with `LockBusy` if a `solx-server` is already running
-/// against the same appdata dir (only one `IndexWriter` per directory is
-/// allowed). And with no server running at all, any spawned Command action
+/// racing a `solx-server` already running against the same appdata dir for
+/// the same database files. And with no server running at all, any spawned Command action
 /// that talks to `solx-server` over HTTP for the file store (e.g.
 /// `solx-quickjs`'s `build-javascript-action`, via
 /// `solx-package-lib::ServerConfig`) has nothing to reach.
@@ -296,12 +295,12 @@ async fn handle_save(
         let local = file.ok_or_else(|| anyhow!("save file requires --file <local path>"))?;
         let bytes = std::fs::read(&local).with_context(|| format!("read {local}"))?;
         let stored = app.files().put(&reference, bytes).await.map_err(to_anyhow)?;
-        return Ok(serde_json::json!({ "rel_path": stored }));
+        return Ok(serde_json::json!({ "relPath": stored }));
     }
 
     let mut body = build_body(json, piped)?;
     if let Some(t) = type_ref {
-        body.insert("type_ref".to_string(), Value::String(t));
+        body.insert("typeRef".to_string(), Value::String(t));
     }
     let body = Value::Object(body);
     let (path, name) = split_ref(&reference).map_err(to_anyhow)?;
@@ -341,7 +340,7 @@ async fn handle_get(app: &Arc<App>, entity: Entity, reference: String) -> Result
             ),
         };
         return Ok(serde_json::json!({
-            "rel_path": reference,
+            "relPath": reference,
             "encoding": encoding,
             "content": content,
         }));

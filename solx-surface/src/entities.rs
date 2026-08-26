@@ -16,6 +16,7 @@ fn default_now() -> DateTime<Utc> {
 /// A registered type: a named JSON-schema at a path, optionally tagged with
 /// type groups for faceted organization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TypeEntity {
     pub id: Uuid,
     pub path: String,
@@ -33,6 +34,7 @@ pub struct TypeEntity {
 
 /// Payload for `post type` (create-or-replace).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TypeInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -49,6 +51,7 @@ pub struct TypeInput {
 /// action. The bytes live on disk; only this row-side metadata is persisted in
 /// the owning entity's database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileRef {
     /// Display name of the file (e.g. `diagram.png`).
     pub name: String,
@@ -72,6 +75,7 @@ pub enum LinkKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DocLink {
     pub kind: LinkKind,
     pub target: String,
@@ -84,6 +88,7 @@ pub struct DocLink {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Document {
     pub id: Uuid,
     pub path: String,
@@ -114,6 +119,7 @@ pub struct Document {
 
 /// Payload for `post doc` (create-or-replace).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DocumentInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -157,6 +163,7 @@ pub enum ActionType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Action {
     pub id: Uuid,
     pub path: String,
@@ -206,6 +213,7 @@ pub struct Action {
 
 /// Payload for `post action` (create-or-replace).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActionInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caption: Option<String>,
@@ -239,6 +247,7 @@ pub struct ActionInput {
 
 /// Result of executing an action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActionExecResult {
     pub action: String,
     pub result: Value,

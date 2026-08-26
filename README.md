@@ -9,10 +9,10 @@ your LLM client can call immediately.
 ```sh
 # Register an action. It's a row in a database, not a line of code.
 solx save action /weather/forecast --json '{
-  "action_type": "webhook",
-  "fn_name": "https://api.weather.gov/points/{lat},{lon}",
+  "actionType": "webhook",
+  "fnName": "https://api.weather.gov/points/{lat},{lon}",
   "description": "Get the forecast for a coordinate pair.",
-  "param_type_ref": "/weather/ForecastParams"
+  "paramTypeRef": "/weather/ForecastParams"
 }'
 
 # It is now a tool named act__weather__forecast in every connected MCP client.
@@ -119,7 +119,7 @@ Every surface is built on the same four traits in `solx-surface`
 | `solx-config`   | `solx-config.json` with cross-process-safe read-modify-write (mtime-guarded reads, advisory lock on write, unknown-field preservation). |
 | `solx-types`    | Type registry: JSON-schema types by path, type groups, validation. |
 | `solx-files`    | On-disk byte store for files attached to docs and actions. |
-| `solx-docs`     | Document store: links, file refs, type validation, Tantivy full-text + path-faceted search. |
+| `solx-docs`     | Document store: links, file refs, type validation, SQLite FTS5 full-text + path-faceted search. |
 | `solx-actions`  | Action store and execution: all five dispatch kinds, plus consoles, detached invocations, streaming HTTP, OAuth loopback and scoped secrets. |
 | `solx-scripts`  | The solx shell pipeline language (`;`, `\|`, `$var`), decoupled from the CLI via a `CommandRunner` trait. |
 | `solx-packages` | Install/uninstall packages by running their `install.solx` and recording their allowlist grants. |
@@ -143,7 +143,7 @@ solx save doc /research/ai/note --type /types/custom/Person --json '{"contents":
 solx search Ada --path /research
 
 # Register a command action — the allowlist entry comes first, by design
-solx save action /demo/echo --json '{"action_type":"command","fn_name":"echo-number"}'
+solx save action /demo/echo --json '{"actionType":"command","fnName":"echo-number"}'
 solx exec /demo/echo
 ```
 

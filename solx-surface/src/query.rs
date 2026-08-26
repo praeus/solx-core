@@ -17,6 +17,7 @@ pub enum SortOrder {
 
 /// Options for a paginated `list` over an entity database.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ListOptions {
     /// Restrict to entities whose path is (or is under) this prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -202,6 +203,7 @@ impl<T> Page<T> {
 
 /// A full-text + faceted search query (documents).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SearchQuery {
     /// Free-text query.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -225,6 +227,7 @@ pub struct SearchQuery {
 
 /// A single search hit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SearchHit {
     pub id: String,
     pub path: String,
@@ -249,6 +252,7 @@ pub struct SearchResults {
 /// Full-text query over the action catalogue (path/name/caption/description/
 /// category/phrases, via FTS5), composable with the same filters as `list`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActionSearchQuery {
     #[serde(flatten)]
     pub list: ListOptions,

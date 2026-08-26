@@ -493,6 +493,23 @@ const LIST_SCHEMA: ListSchema<'static> = ListSchema {
     date_column: Some("created_at"),
 };
 
+/// Turn free-text `q` into a safe FTS5 `MATCH` expression: each whitespace-
+/// separated term becomes a quoted, prefix-matched phrase (`"term"*`), ANDed
+/// together (FTS5's default for space-separated terms). Quoting every term
+/// keeps it immune to FTS5 query-syntax errors from special characters
+/// (`"`, `-`, `:`, `(`, ...) — a bare `foo: bar` would otherwise be parsed as
+/// a `foo` column filter and fail with "no such column: foo" on any column
+/// name that isn't one of `actions_fts`'s. Mirrors `solx-docs`'s
+/// `fts_match_query` (that crate's doc comment used to argue action search
+/// terms were unlikely to need this — a normal query like `browser: firefox`
+/// proved otherwise).
+fn fts_match_query(q: &str) -> String {
+    q.split_whitespace()
+        .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 async fn get_row(conn: &Connection, path: &str, name: &str) -> Result<Option<Action>> {
     let mut rows = conn
         .query(
@@ -604,9 +621,17 @@ impl ActionManager for LocalActionManager {
             .map_err(map_db)?;
         }
 
-        get_row(&conn, &path, &name)
+        let mut saved = get_row(&conn, &path, &name)
             .await?
-            .ok_or_else(|| SolxError::Other("action vanished after write".into()))
+            .ok_or_else(|| SolxError::Other("action vanished after write".into()))?;
+        // `get`/`list`/`search` all redact action_config.secrets/auth before
+        // returning (see `crate::mask`) -- `save`'s own response must too, or
+        // an upsert (which necessarily carries the real key/credential in
+        // its *request*, same as any of those reads' prior write did) echoes
+        // that same material straight back out in the response instead of
+        // just confirming the write succeeded.
+        mask::mask_action_config_opt(&mut saved.action_config);
+        Ok(saved)
     }
 
     async fn get(&self, path: &str, name: &str) -> Result<Action> {
@@ -696,7 +721,7 @@ impl ActionManager for LocalActionManager {
         // keeps every other column resolvable to `actions` alone.
         let (join, where_clause, order) = match term {
             Some(t) => {
-                binds.push(libsql::Value::from(t.to_string()));
+                binds.push(libsql::Value::from(fts_match_query(t)));
                 let n = binds.len();
                 (
                     format!(
@@ -1307,7 +1332,7 @@ mod tests {
         let types: Arc<dyn TypeManager> =
             Arc::new(LocalTypeManager::open(&dir.path().join("types.db")).await.unwrap());
         let docs: Arc<dyn DocManager> = Arc::new(
-            LocalDocManager::open(&dir.path().join("docs.db"), &dir.path().join("idx"), types.clone())
+            LocalDocManager::open(&dir.path().join("docs.db"), types.clone())
                 .await
                 .unwrap(),
         );
@@ -1412,13 +1437,9 @@ mod tests {
                 .unwrap(),
         );
         let docs: Arc<dyn DocManager> = Arc::new(
-            LocalDocManager::open(
-                &dir.path().join("docs.db"),
-                &dir.path().join("idx"),
-                types.clone(),
-            )
-            .await
-            .unwrap(),
+            LocalDocManager::open(&dir.path().join("docs.db"), types.clone())
+                .await
+                .unwrap(),
         );
         let files: Arc<dyn FileStore> = Arc::new(LocalFileStore::new(dir.path().join("files")));
         let m = LocalActionManager::open(
@@ -1493,6 +1514,25 @@ mod tests {
             raw.action_config.as_ref().unwrap()["secrets"]["API_TOKEN"],
             serde_json::json!("c3VwZXItc2VjcmV0LWtleS1oZXJlLXBhZGRpbmc=")
         );
+    }
+
+    /// Regression test: `save`'s own response must be redacted too, not just
+    /// subsequent `get`/`list` calls -- an upsert's *request* necessarily
+    /// carries the real secret (that's how it gets stored), but echoing that
+    /// same value back in the *response* is the same leak `get`/`list`
+    /// exist to prevent, just one call earlier.
+    #[tokio::test]
+    async fn save_response_redacts_secrets_too() {
+        let (_d, _c, m) = setup().await;
+        let input = ActionInput {
+            action_type: Some(ActionType::Command),
+            fn_name: Some("echo".into()),
+            action_config: Some(cfg_with_secret("c3VwZXItc2VjcmV0LWtleS1oZXJlLXBhZGRpbmc=")),
+            ..Default::default()
+        };
+        let saved = m.save("/tools", "s", input).await.unwrap();
+        assert_eq!(saved.action_config.as_ref().unwrap()["secrets"]["API_TOKEN"], serde_json::json!("***"));
+        assert_eq!(saved.action_config.as_ref().unwrap()["cwd"], serde_json::json!("/work"));
     }
 
     /// The round trip that would otherwise destroy a key: fetch (redacted),
@@ -1736,7 +1776,7 @@ mod tests {
                 "entity_save_action",
                 serde_json::json!({
                     "path": "/evil", "name": "shell",
-                    "action_type": ty, "fn_name": "rm -rf /"
+                    "actionType": ty, "fnName": "rm -rf /"
                 }),
             )
             .await
@@ -1767,7 +1807,7 @@ mod tests {
         let err = exec_builtin(
             &m,
             "entity_save_action",
-            serde_json::json!({ "path": "/tools", "name": "safe", "fn_name": "rm -rf /" }),
+            serde_json::json!({ "path": "/tools", "name": "safe", "fnName": "rm -rf /" }),
         )
         .await
         .unwrap_err();
@@ -1814,7 +1854,7 @@ mod tests {
             "entity_save_action",
             serde_json::json!({
                 "path": "/tools", "name": "w",
-                "action_type": "wasm", "bin_name": "x.wasm"
+                "actionType": "wasm", "binName": "x.wasm"
             }),
         )
         .await
@@ -1866,13 +1906,9 @@ mod tests {
                 .unwrap(),
         );
         let docs: Arc<dyn DocManager> = Arc::new(
-            LocalDocManager::open(
-                &dir.path().join("docs.db"),
-                &dir.path().join("idx"),
-                types.clone(),
-            )
-            .await
-            .unwrap(),
+            LocalDocManager::open(&dir.path().join("docs.db"), types.clone())
+                .await
+                .unwrap(),
         );
         let files: Arc<dyn FileStore> = Arc::new(LocalFileStore::new(dir.path().join("files")));
         let m = LocalActionManager::open(
@@ -1930,8 +1966,7 @@ mod tests {
 
         let ran = m.exec("/tools", "hello", serde_json::json!({"go": true})).await.unwrap();
         assert_eq!(ran.result["success"], serde_json::json!(true));
-        // The nested action's result is a list page (an object), not the
-        // `{value}` shape `random_string` used to return.
+        // The nested action's result is a list page (an object).
         assert!(
             ran.result["result"].is_object(),
             "expected a list-page object, got: {:?}",
@@ -1948,7 +1983,7 @@ mod tests {
         post_script_artifact(
             &files,
             "count.solx",
-            "exec /builtin/action/entity_list_actions; exec /builtin/action/entity_list_documents",
+            "exec /builtin/action/entity_list_actions; exec /builtin/document/entity_list_documents",
         )
         .await;
         m.save(
@@ -1969,7 +2004,7 @@ mod tests {
         assert_eq!(entries.len(), 2, "{entries:?}");
         assert_eq!(entries[0].source, "script");
         assert_eq!(entries[0].message.as_deref(), Some("exec /builtin/action/entity_list_actions"));
-        assert_eq!(entries[1].message.as_deref(), Some("exec /builtin/action/entity_list_documents"));
+        assert_eq!(entries[1].message.as_deref(), Some("exec /builtin/document/entity_list_documents"));
         // Both stages share the one script invocation's identity.
         assert_eq!(entries[0].invocation_id, entries[1].invocation_id);
     }
@@ -2053,7 +2088,7 @@ mod tests {
             "entity_save_action",
             serde_json::json!({
                 "path": "/tools", "name": "s",
-                "action_type": "script", "bin_name": "x.solx"
+                "actionType": "script", "binName": "x.solx"
             }),
         )
         .await

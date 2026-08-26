@@ -218,8 +218,11 @@ fn encrypt(value: &str, key_b64: &str) -> Result<String, String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(blob))
 }
 
-fn decrypt(blob_b64: &str, key_b64: &str) -> Result<String, String> {
-    let key_bytes = decode_key(key_b64)?;
+/// Decrypt `blob_b64` with an already-decoded key. Any failure here means
+/// the *entry* itself can't be trusted (wrong key or corrupted blob), as
+/// opposed to a malformed `key_b64` argument, which `decode_key` rejects
+/// before this is ever called.
+fn decrypt_with_key(blob_b64: &str, key_bytes: &[u8; KEY_LEN]) -> Result<String, String> {
     let blob = base64::engine::general_purpose::STANDARD
         .decode(blob_b64)
         .map_err(|e| format!("stored secret is not valid base64: {e}"))?;
@@ -227,7 +230,7 @@ fn decrypt(blob_b64: &str, key_b64: &str) -> Result<String, String> {
         return Err("stored secret is too short to contain a nonce".to_string());
     }
     let (nonce_bytes, ciphertext) = blob.split_at(NONCE_LEN);
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key_bytes));
     let plaintext = cipher
         .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
         .map_err(|_| "secret decryption failed (wrong key or corrupted entry)".to_string())?;
@@ -245,12 +248,27 @@ pub async fn set_secret(name: &str, value: &str, key_b64: &str) -> Result<(), St
 }
 
 /// Read the value stored under `name`, decrypting with `key_b64`.
-/// Returns `Ok(None)` if no entry exists under that name. Returns
-/// `Err` if an entry exists but `key_b64` cannot decrypt it (wrong
-/// key) or the entry is corrupted.
+/// Returns `Ok(None)` if no entry exists under that name. Also returns
+/// `Ok(None)` — after clearing the entry — if one exists but can't be
+/// decrypted (wrong key or corrupted blob): a self-heal so a caller that
+/// lost its encryption key isn't stuck forever behind a dead entry, it
+/// just goes through its normal "nothing persisted yet" path again.
+/// Still returns `Err` if `key_b64` itself is malformed, since that's a
+/// caller config problem, not something clearing the entry would fix.
 pub async fn get_secret(name: &str, key_b64: &str) -> Result<Option<String>, String> {
+    let key_bytes = decode_key(key_b64)?;
     match raw_get(name).await? {
-        Some(blob) => decrypt(&blob, key_b64).map(Some),
+        Some(blob) => match decrypt_with_key(&blob, &key_bytes) {
+            Ok(value) => Ok(Some(value)),
+            Err(e) => {
+                tracing::warn!(
+                    "secret '{name}' could not be decrypted ({e}); clearing the \
+                     corrupted entry so it can be re-created"
+                );
+                raw_delete(name).await?;
+                Ok(None)
+            }
+        },
         None => Ok(None),
     }
 }
@@ -485,11 +503,30 @@ mod tests {
 
     #[tokio::test]
     #[serial(secrets_backend)]
-    async fn get_secret_with_wrong_key_fails_to_decrypt() {
+    async fn get_secret_with_wrong_key_self_heals_by_clearing_entry() {
         install_fake_backend();
         set_secret("MY_SECRET", "top-secret-value", &key_a()).await.unwrap();
-        let err = get_secret("MY_SECRET", &key_b()).await.unwrap_err();
-        assert!(err.contains("decryption failed"), "{err}");
+        assert_eq!(get_secret("MY_SECRET", &key_b()).await.unwrap(), None);
+        // The corrupted entry was cleared, not just masked -- even the
+        // originally-correct key now finds nothing.
+        assert_eq!(get_secret("MY_SECRET", &key_a()).await.unwrap(), None);
+        set_secret_backend_for_tests(None);
+    }
+
+    #[tokio::test]
+    #[serial(secrets_backend)]
+    async fn get_secret_with_malformed_key_errors_without_deleting_entry() {
+        install_fake_backend();
+        set_secret("MY_SECRET", "top-secret-value", &key_a()).await.unwrap();
+        let bad_key = base64::engine::general_purpose::STANDARD.encode(b"not-32-bytes");
+        let err = get_secret("MY_SECRET", &bad_key).await.unwrap_err();
+        assert!(err.contains("must decode to"), "{err}");
+        // A malformed key argument is a caller config problem, not a
+        // corrupted entry -- the stored secret must survive untouched.
+        assert_eq!(
+            get_secret("MY_SECRET", &key_a()).await.unwrap(),
+            Some("top-secret-value".to_string())
+        );
         set_secret_backend_for_tests(None);
     }
 

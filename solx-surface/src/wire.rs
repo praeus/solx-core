@@ -22,6 +22,7 @@ use serde_json::Value;
 /// the `/types/{*ref}` catch-all would permanently shadow any type stored
 /// at that reference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ValidateRequest {
     pub value: Value,
     pub type_ref: String,
@@ -30,6 +31,7 @@ pub struct ValidateRequest {
 /// Response body for `PUT /files/{*rel_path}` — the stored path, which may
 /// differ from the requested one (see `FileStore::put`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FilePutResponse {
     pub rel_path: String,
 }

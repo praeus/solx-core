@@ -35,7 +35,6 @@ schemars    = { version = "0.8", features = ["uuid1", "chrono", "preserve_order"
 # Runtime / backend (only pulled in by impl crates, never by solx-surface).
 tokio      = { version = "1", features = ["full"] }
 libsql     = "0.6"
-tantivy    = "0.22"
 jsonschema = { version = "0.28", default-features = false }
 base64     = "0.22"
 mime_guess = "2"

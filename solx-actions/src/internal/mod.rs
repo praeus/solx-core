@@ -342,13 +342,9 @@ mod tests {
                 .unwrap(),
         );
         let docs: Arc<dyn DocManager> = Arc::new(
-            solx_docs::LocalDocManager::open(
-                &dir.path().join("docs.db"),
-                &dir.path().join("idx"),
-                types.clone(),
-            )
-            .await
-            .unwrap(),
+            solx_docs::LocalDocManager::open(&dir.path().join("docs.db"), types.clone())
+                .await
+                .unwrap(),
         );
         let files: Arc<dyn FileStore> = Arc::new(solx_files::LocalFileStore::new(dir.path().join("files")));
         let cfg = Arc::new(solx_config::ConfigService::open_in(dir.path()).unwrap());
@@ -484,7 +480,7 @@ mod tests {
         let (_d, ctx) = test_ctx(None).await;
         let created = run_internal(
             "entity_save_document",
-            &json!({"path": "/research/ai", "name": "note", "type_ref": "/types/core/Object", "contents": {"a": 1}}),
+            &json!({"path": "/research/ai", "name": "note", "typeRef": "/types/core/Object", "contents": {"a": 1}}),
             &ctx,
         )
         .await
@@ -524,7 +520,7 @@ mod tests {
         let (_d, ctx) = test_ctx(None).await;
         run_internal(
             "entity_save_document",
-            &json!({"path": "/notes", "name": "a", "type_ref": "/types/core/Object", "contents": {}, "title": "Hello world"}),
+            &json!({"path": "/notes", "name": "a", "typeRef": "/types/core/Object", "contents": {}, "title": "Hello world"}),
             &ctx,
         )
         .await
@@ -534,7 +530,7 @@ mod tests {
             .unwrap();
         assert!(results.get("total").and_then(Value::as_u64).unwrap_or(0) >= 1);
 
-        let actions = run_internal("search_actions", &json!({"path_prefix": "/"}), &ctx)
+        let actions = run_internal("search_actions", &json!({"pathPrefix": "/"}), &ctx)
             .await
             .unwrap();
         assert!(actions.get("total").and_then(Value::as_u64).unwrap_or(0) >= 1);
@@ -591,7 +587,7 @@ mod tests {
         let (_d, ctx) = test_ctx(None).await;
         run_internal(
             "entity_save_document",
-            &json!({"name": "note", "type_ref": "/types/core/Object", "contents": {"a": 1}}),
+            &json!({"name": "note", "typeRef": "/types/core/Object", "contents": {"a": 1}}),
             &ctx,
         )
         .await
@@ -886,7 +882,7 @@ mod tests {
             "entity_save_document",
             &json!({
                 "name": "doc",
-                "type_ref": "/types/core/Object",
+                "typeRef": "/types/core/Object",
                 "contents": {
                     "metadata": { "tags": ["alpha", "beta"] },
                     "score": 7,
@@ -950,7 +946,7 @@ mod tests {
             "entity_save_document",
             &json!({
                 "name": "doc",
-                "type_ref": "/types/core/Object",
+                "typeRef": "/types/core/Object",
                 "contents": { "metadata": { "tags": ["a", "b", "c"] }, "score": 1 }
             }),
             &ctx,
@@ -991,7 +987,7 @@ mod tests {
             "entity_save_document",
             &json!({
                 "name": "doc",
-                "type_ref": "/types/core/Object",
+                "typeRef": "/types/core/Object",
                 "contents": {}
             }),
             &ctx,
@@ -1017,7 +1013,7 @@ mod tests {
             "entity_save_document",
             &json!({
                 "name": "doc",
-                "type_ref": "/types/core/Object",
+                "typeRef": "/types/core/Object",
                 "contents": {}
             }),
             &ctx,

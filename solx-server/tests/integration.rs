@@ -167,7 +167,7 @@ async fn rest_surface_over_raw_http() {
 
     // PUT to a nested reference, then GET the same URL back.
     let created = auth(http.put(format!("{base_url}/docs/research/ai/note")))
-        .json(&json!({ "type_ref": DOC_TYPE, "contents": { "k": "v" }, "title": "Nested" }))
+        .json(&json!({ "typeRef": DOC_TYPE, "contents": { "k": "v" }, "title": "Nested" }))
         .send()
         .await
         .unwrap();
@@ -182,7 +182,7 @@ async fn rest_surface_over_raw_http() {
 
     // A root-level entity is just one segment: `/docs/{name}`.
     auth(http.put(format!("{base_url}/docs/rootnote")))
-        .json(&json!({ "type_ref": DOC_TYPE, "contents": {} }))
+        .json(&json!({ "typeRef": DOC_TYPE, "contents": {} }))
         .send()
         .await
         .unwrap();
@@ -193,7 +193,7 @@ async fn rest_surface_over_raw_http() {
 
     // A name needing percent-encoding survives the round trip intact.
     auth(http.put(format!("{base_url}/docs/notes/100%25%20%231")))
-        .json(&json!({ "type_ref": DOC_TYPE, "contents": {} }))
+        .json(&json!({ "typeRef": DOC_TYPE, "contents": {} }))
         .send()
         .await
         .unwrap();
@@ -208,18 +208,18 @@ async fn rest_surface_over_raw_http() {
 
     // List options ride in the query string.
     let listed: serde_json::Value = auth(http.get(format!("{base_url}/docs")))
-        .query(&[("path_prefix", "/research"), ("limit", "10")])
+        .query(&[("pathPrefix", "/research"), ("limit", "10")])
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    assert_eq!(listed["total"], 1, "path_prefix should exclude the root-level docs");
+    assert_eq!(listed["total"], 1, "pathPrefix should exclude the root-level docs");
 
     // Search is top-level, so a doc named `search` at the root stays reachable.
     auth(http.put(format!("{base_url}/docs/search")))
-        .json(&json!({ "type_ref": DOC_TYPE, "contents": {}, "title": "Not the search route" }))
+        .json(&json!({ "typeRef": DOC_TYPE, "contents": {}, "title": "Not the search route" }))
         .send()
         .await
         .unwrap();
@@ -284,7 +284,7 @@ async fn rest_surface_over_raw_http() {
     )
     .unwrap();
     auth(http.put(format!("{base_url}/actions/tools/echo")))
-        .json(&json!({ "action_type": "command", "fn_name": "echo-42" }))
+        .json(&json!({ "actionType": "command", "fnName": "echo-42" }))
         .send()
         .await
         .unwrap();

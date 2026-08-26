@@ -46,12 +46,14 @@ segment**. A name of `100% #1` becomes `100%25%20%231`.
 with the saved entity — the underlying manager does not distinguish a create
 from a replace, so there is no `201`.
 
-Query parameters for `/docs` (all optional): `path_prefix`, `limit`, `offset`,
-`filter_field`, `filter_value`, `sort_by`, `sort_order` (`asc`/`desc`),
-`date_after`, `date_before` (RFC 3339). The same set applies to `/types` and
-`/actions`.
+Query parameters for `/docs` (all optional): `pathPrefix`, `limit`, `offset`,
+`filterField`, `filterValue`, `sortBy`, `sortOrder` (`asc`/`desc`),
+`dateAfter`, `dateBefore` (RFC 3339). The same set applies to `/types` and
+`/actions`. `filterField`'s and `sortBy`'s *values* name the underlying
+column (e.g. `sortBy=created_at`) and stay snake_case — only the parameter
+keys themselves are camelCase.
 
-Query parameters for `/search`: `q`, `path_prefix`, `type_ref`, `linked_to`,
+Query parameters for `/search`: `q`, `pathPrefix`, `typeRef`, `linkedTo`,
 `limit`, `offset`.
 
 Search is a top-level route rather than `/docs/search` on purpose. A static
@@ -67,7 +69,7 @@ permanently unreachable.
 | `GET` | `/types/{ref}` | — | `TypeEntity` |
 | `PUT` | `/types/{ref}` | `TypeInput` | `TypeEntity` |
 | `DELETE` | `/types/{ref}` | — | `204` |
-| `POST` | `/validate` | `{ "value": …, "type_ref": "…" }` | `204`, or `422` |
+| `POST` | `/validate` | `{ "value": …, "typeRef": "…" }` | `204`, or `422` |
 
 There is no `resolve` route. Resolving a type reference is just splitting it
 into `(path, name)` and fetching it — which `GET /types/{ref}` already is.
@@ -86,24 +88,26 @@ into `(path, name)` and fetching it — which `GET /types/{ref}` already is.
 processing of the request payload". The body is optional: a parameterless
 action can be invoked with an empty `POST` and no `Content-Type`.
 
-Secrets in an action's `action_config` are masked as `"***"` in every
+Secrets in an action's `actionConfig` are masked as `"***"` in every
 response. Saving a masked config back does not destroy the stored secret.
 
-An action whose `result_type_ref` is `/builtin/types/WidgetDescriptor` renders
-a UI. Its result is `{ "tag_name": …, "bin_name": …, "fields": … }`: create the
-custom element `tag_name`, load its bundle from `GET /files/{bin_name}`, and
-hand it `fields`. There is no widget-specific route or protocol — the widget
-calls back in through the routes on this page like any other client. See
-[widget-actions.md](widget-actions.md).
+An action whose `resultTypeRef` is `/builtin/types/WidgetDescriptor` renders
+a UI. Its result is `{ "tag_name": …, "bin_name": …, "fields": … }` (this
+result payload is the action's own opaque return value, not a generic entity
+response, so it keeps the widget schema's own snake_case field names): create
+the custom element `tag_name`, load its bundle from `GET /files/{bin_name}`,
+and hand it `fields`. There is no widget-specific route or protocol — the
+widget calls back in through the routes on this page like any other client.
+See [widget-actions.md](widget-actions.md).
 
 ### Files
 
 | Method | Route | Body | Returns |
 | --- | --- | --- | --- |
 | `GET` | `/files?prefix=…` | — | `{ "paths": [ … ] }` |
-| `GET` | `/files/{rel_path}` | — | raw bytes |
-| `PUT` | `/files/{rel_path}` | raw bytes | `{ "rel_path": "…" }` |
-| `DELETE` | `/files/{rel_path}` | — | `204` |
+| `GET` | `/files/{relPath}` | — | raw bytes |
+| `PUT` | `/files/{relPath}` | raw bytes | `{ "relPath": "…" }` |
+| `DELETE` | `/files/{relPath}` | — | `204` |
 
 File content is transferred as raw bytes, not base64. On `GET`, the
 `Content-Type` is guessed from the extension (`application/octet-stream` when
@@ -111,7 +115,7 @@ unknown) — the file store does not persist a content type of its own; that
 lives on a `FileRef` in document metadata. The request `Content-Type` on `PUT`
 is ignored. Bodies are capped at 64 MiB.
 
-A `rel_path` may contain `/` and is used as-is (no path/name split). Traversal
+A `relPath` may contain `/` and is used as-is (no path/name split). Traversal
 is rejected by the file store.
 
 ### Other
@@ -150,14 +154,14 @@ AUTH="Authorization: Bearer $TOKEN"
 # Save a document (create or replace).
 curl -X PUT "$BASE/docs/research/ai/note" -H "$AUTH" \
      -H 'Content-Type: application/json' \
-     -d '{"type_ref":"/types/docs/Document","title":"A note","contents":{"k":"v"}}'
+     -d '{"typeRef":"/types/docs/Document","title":"A note","contents":{"k":"v"}}'
 
 # Read it back.
 curl -H "$AUTH" "$BASE/docs/research/ai/note"
 
 # List and search.
-curl -H "$AUTH" "$BASE/docs?path_prefix=/research&limit=20&sort_by=created_at"
-curl -H "$AUTH" "$BASE/search?q=ada&type_ref=/types/docs/Document"
+curl -H "$AUTH" "$BASE/docs?pathPrefix=/research&limit=20&sortBy=created_at"
+curl -H "$AUTH" "$BASE/search?q=ada&typeRef=/types/docs/Document"
 
 # Execute an action.
 curl -X POST "$BASE/actions/tools/echo" -H "$AUTH" \

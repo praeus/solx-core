@@ -46,7 +46,7 @@ rustup target add wasm32-wasip2
 `solx-surface` is the seam. It holds the entity DTOs, the error type, the
 wire types, and the four manager traits (`TypeManager`, `FileStore`,
 `DocManager`, `ActionManager`) — and it stays dependency-light. Runtime
-dependencies (tokio, libsql, tantivy, reqwest) belong in implementation
+dependencies (tokio, libsql, reqwest) belong in implementation
 crates, never in `solx-surface`.
 
 Everything else is either an implementation of those traits (`solx-types`,

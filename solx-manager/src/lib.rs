@@ -124,13 +124,9 @@ impl App {
                 .context("open types db")?,
         );
         let docs: Arc<dyn DocManager> = Arc::new(
-            LocalDocManager::open(
-                &config.docs_db_path(),
-                &config.search_index_dir().join("docs"),
-                types.clone(),
-            )
-            .await
-            .context("open docs db")?,
+            LocalDocManager::open(&config.docs_db_path(), types.clone())
+                .await
+                .context("open docs db")?,
         );
         let files: Arc<dyn FileStore> = Arc::new(LocalFileStore::from_config(&config));
 

@@ -16,9 +16,9 @@ source "$(dirname "$0")/lib.sh"
 
 echo "== 05: internal action (oauth loopback) =="
 
-solx save action /demo/oauth/start --json '{"action_type":"internal","fn_name":"oauth_start"}' >/dev/null
-solx save action /demo/oauth/await --json '{"action_type":"internal","fn_name":"oauth_await"}' >/dev/null
-solx save action /demo/oauth/stop  --json '{"action_type":"internal","fn_name":"oauth_stop"}'  >/dev/null
+solx save action /demo/oauth/start --json '{"actionType":"internal","fnName":"oauth_start"}' >/dev/null
+solx save action /demo/oauth/await --json '{"actionType":"internal","fnName":"oauth_await"}' >/dev/null
+solx save action /demo/oauth/stop  --json '{"actionType":"internal","fnName":"oauth_stop"}'  >/dev/null
 
 SCRIPT_FILE="$(mktemp)"
 cat > "$SCRIPT_FILE" <<'SOLX'

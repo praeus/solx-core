@@ -97,7 +97,7 @@ async fn call_tool_streams_console_entries_as_progress_notifications() -> anyhow
     app.files()
         .put(
             &solx_files::shared_action_file_path("count.solx"),
-            b"exec /builtin/action/entity_list_actions; exec /builtin/action/entity_list_documents".to_vec(),
+            b"exec /builtin/action/entity_list_actions; exec /builtin/document/entity_list_documents".to_vec(),
         )
         .await?;
     app.actions()
@@ -153,7 +153,7 @@ async fn call_tool_streams_console_entries_as_progress_notifications() -> anyhow
         "expected a progress message naming the first stage, got: {messages:?}"
     );
     assert!(
-        messages.iter().any(|m| m.contains("exec /builtin/action/entity_list_documents")),
+        messages.iter().any(|m| m.contains("exec /builtin/document/entity_list_documents")),
         "expected a progress message naming the second stage, got: {messages:?}"
     );
     // Progress must be non-decreasing per the MCP spec — using the

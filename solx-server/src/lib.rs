@@ -1,9 +1,7 @@
 //! HTTP server hosting the local solx managers (`solx_manager::App::build_local()`)
 //! so multiple `solx-cli`/`solx-mcp` processes can share one appdata dir
 //! concurrently, proxying through `solx-client` instead of each opening
-//! their own exclusive local storage (in particular, the Tantivy docs
-//! index, which only tolerates one writer per process — see
-//! `solx-docs/src/search.rs`).
+//! their own local libsql/SQLite storage directly.
 //!
 //! The surface is REST: an entity's `path`/`name` are the URL
 //! (`GET /docs/research/ai/note`), `list`/`search` options are the query

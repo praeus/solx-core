@@ -98,13 +98,9 @@ impl Harness {
                 .unwrap(),
         );
         let docs: Arc<dyn DocManager> = Arc::new(
-            solx_docs::LocalDocManager::open(
-                &dir.path().join("docs.db"),
-                &dir.path().join("idx"),
-                types.clone(),
-            )
-            .await
-            .unwrap(),
+            solx_docs::LocalDocManager::open(&dir.path().join("docs.db"), types.clone())
+                .await
+                .unwrap(),
         );
         let files: Arc<dyn FileStore> =
             Arc::new(solx_files::LocalFileStore::new(dir.path().join("files")));

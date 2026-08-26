@@ -2,7 +2,7 @@
 //!
 //! `solx-surface` is dependency-light on purpose (so it can back both a local
 //! impl and a future HTTP client/server), so backend errors from libsql,
-//! tantivy, wasmtime, etc. are mapped into these variants (usually via
+//! wasmtime, etc. are mapped into these variants (usually via
 //! `.to_string()`) at the edges of the impl crates.
 
 use serde::{Deserialize, Serialize};
