@@ -6,12 +6,14 @@
 //!   [`solx_config::CommandDef`]'s `command` field is what actually runs.
 //!   **Deny-by-default**: an unregistered key is a hard error, not a
 //!   fallback to running the key text itself.
-//! * **Webhook** — `fn_name` is the literal URL to POST to, but the URL must
+//! * **Webhook** — `fn_name` is the literal URL to call, but the URL must
 //!   start with one of the prefixes in `ConfigService::allowed_webhook_base_urls`
 //!   (also `solx-config.json`) or dispatch is refused before any network
 //!   call. Auth/headers come from `action_config`; OAuth token exchange
 //!   (bearer, refresh_token, service_account, authorization_code) is
-//!   resolved via [`crate::auth::resolve_auth`].
+//!   resolved via [`crate::auth::resolve_auth`]. Defaults to POSTing
+//!   `params` as a JSON body; `action_config.method: "GET"` sends `params`
+//!   as query-string parameters instead, with no body.
 //!
 //! Both allowlists are deny-by-default: an unset or empty allowlist rejects
 //! every Command/Webhook action, not the old behavior of permitting
@@ -271,8 +273,9 @@ pub async fn run_webhook(
         )));
     }
 
+    let method = webhook_method_label(action_config);
     let started = std::time::Instant::now();
-    log_webhook(&console, action_ref, &invocation_id, "info", format!("POST {url}")).await;
+    log_webhook(&console, action_ref, &invocation_id, "info", format!("{method} {url}")).await;
 
     let result = run_webhook_inner(actions, path, name, url, action_config, params).await;
 
@@ -284,7 +287,7 @@ pub async fn run_webhook(
                 action_ref,
                 &invocation_id,
                 "info",
-                format!("POST {url} succeeded ({elapsed_ms}ms)"),
+                format!("{method} {url} succeeded ({elapsed_ms}ms)"),
             )
             .await;
         }
@@ -294,13 +297,34 @@ pub async fn run_webhook(
                 action_ref,
                 &invocation_id,
                 "warn",
-                format!("POST {url} failed after {elapsed_ms}ms: {e}"),
+                format!("{method} {url} failed after {elapsed_ms}ms: {e}"),
             )
             .await;
         }
     }
 
     result
+}
+
+/// `action_config.method` opts a webhook action into a real HTTP GET (query-
+/// string params, no body) instead of the default POST-with-JSON-body.
+/// Case-insensitive; anything other than `"GET"` (including absent) stays
+/// POST, matching every webhook action registered before this existed.
+fn webhook_method_label(action_config: &Option<Value>) -> &'static str {
+    if is_get_method(action_config) {
+        "GET"
+    } else {
+        "POST"
+    }
+}
+
+fn is_get_method(action_config: &Option<Value>) -> bool {
+    action_config
+        .as_ref()
+        .and_then(|c| c.get("method"))
+        .and_then(Value::as_str)
+        .map(|m| m.eq_ignore_ascii_case("GET"))
+        .unwrap_or(false)
 }
 
 /// Substitutes `{key}` placeholders in `url` with the matching string
@@ -345,7 +369,21 @@ async fn run_webhook_inner(
     action_config: &Option<Value>,
     params: &Value,
 ) -> Result<Value> {
-    let client = reqwest::Client::new();
+    // `action_config.timeout_secs` was previously read only by `run_command`
+    // -- a webhook call had no timeout at all, so a stalled connection or an
+    // unresponsive endpoint hung forever, bounded only by whatever *outer*
+    // ceiling happened to wrap the call (e.g. a Script or Wasm action's own
+    // timeout, which then reads as the whole action "hanging" with no
+    // indication which HTTP call inside it was actually stuck).
+    let timeout_secs = action_config
+        .as_ref()
+        .and_then(|c| c.get("timeout_secs"))
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_TIMEOUT_SECS);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|e| SolxError::Exec(format!("failed to build HTTP client: {e}")))?;
 
     // Check for oauth_authorization_code — short-circuit token exchange.
     if let Some(cfg) = action_config {
@@ -368,6 +406,14 @@ async fn run_webhook_inner(
             .post(url)
             .header(reqwest::header::CONTENT_TYPE, body.content_type)
             .body(body.bytes)
+    } else if is_get_method(action_config) {
+        let mut r = client.get(url);
+        // Only object params serialize sensibly as query pairs; anything
+        // else (missing, null) just means no query string.
+        if params.is_object() {
+            r = r.query(params);
+        }
+        r
     } else {
         client.post(url).json(params)
     };
@@ -692,6 +738,135 @@ mod tests {
         assert!(
             body.contains("redirect_uri=http%3A%2F%2Fstatic-fallback%2Fcallback"),
             "expected the auth.redirect_uri fallback in the POST body, got: {body}"
+        );
+    }
+
+    // ── run_webhook_inner: method selection ─────────────────────────────────
+
+    /// Stub ActionManager for `run_webhook_inner` tests below. `action_config`
+    /// carries no `auth` block in these tests, so `crate::auth::resolve_auth`
+    /// returns early without ever touching this -- any call reaching it
+    /// indicates the test needs a real mock instead.
+    struct StubActionManager;
+
+    #[async_trait::async_trait]
+    impl ActionManager for StubActionManager {
+        async fn save(&self, _path: &str, _name: &str, _input: solx_surface::entities::ActionInput) -> Result<solx_surface::entities::Action> {
+            panic!("stub ActionManager::save should not be called by these tests")
+        }
+        async fn get(&self, _path: &str, _name: &str) -> Result<solx_surface::entities::Action> {
+            panic!("stub ActionManager::get should not be called by these tests")
+        }
+        async fn delete(&self, _path: &str, _name: &str) -> Result<()> {
+            panic!("stub ActionManager::delete should not be called by these tests")
+        }
+        async fn list(&self, _opts: solx_surface::query::ListOptions) -> Result<solx_surface::query::Page<solx_surface::entities::Action>> {
+            panic!("stub ActionManager::list should not be called by these tests")
+        }
+        async fn search(&self, _query: solx_surface::query::ActionSearchQuery) -> Result<solx_surface::query::Page<solx_surface::entities::Action>> {
+            panic!("stub ActionManager::search should not be called by these tests")
+        }
+        async fn exec(&self, _path: &str, _name: &str, _params: Value) -> Result<solx_surface::entities::ActionExecResult> {
+            panic!("stub ActionManager::exec should not be called by these tests")
+        }
+    }
+
+    /// Binds a one-shot HTTP server that captures the request line (method +
+    /// path, including any query string) and whatever body bytes follow the
+    /// headers, then replies with a minimal JSON 200. Returns the base URL
+    /// plus a `JoinHandle` yielding `(request_line, body)`.
+    async fn start_capturing_endpoint() -> (String, tokio::task::JoinHandle<(String, String)>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}/things");
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = stream.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let request_line = req.lines().next().unwrap_or("").to_string();
+            let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+            let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.shutdown().await;
+            (request_line, body)
+        });
+        (base, handle)
+    }
+
+    /// `action_config.method: "GET"` must send params as a query string with
+    /// no body -- the whole point being REST endpoints (Drive's `files.list`
+    /// vs. `files.create` at the same URL, etc.) that dispatch on HTTP method,
+    /// where a POST would silently hit the wrong operation.
+    #[tokio::test]
+    async fn get_method_sends_query_string_and_no_body() {
+        let (url, handle) = start_capturing_endpoint().await;
+        let action_config = Some(json!({ "method": "GET" }));
+        let params = json!({ "q": "trashed=false", "pageSize": 5 });
+
+        let result = run_webhook_inner(&StubActionManager, "/p", "n", &url, &action_config, &params).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+
+        let (request_line, body) = handle.await.unwrap();
+        assert!(request_line.starts_with("GET "), "expected a GET request, got: {request_line}");
+        assert!(request_line.contains("q=trashed%3Dfalse"), "expected q in the query string, got: {request_line}");
+        assert!(request_line.contains("pageSize=5"), "expected pageSize in the query string, got: {request_line}");
+        assert!(body.is_empty(), "GET must not send a body, got: {body:?}");
+    }
+
+    /// Absent (or non-"GET") `method` must keep the original POST-with-JSON-
+    /// body behavior every already-registered webhook action relies on.
+    #[tokio::test]
+    async fn default_method_still_posts_json_body() {
+        let (url, handle) = start_capturing_endpoint().await;
+        let params = json!({ "name": "a-file" });
+
+        let result = run_webhook_inner(&StubActionManager, "/p", "n", &url, &None, &params).await;
+        assert!(result.is_ok(), "{:?}", result.err());
+
+        let (request_line, body) = handle.await.unwrap();
+        assert!(request_line.starts_with("POST "), "expected a POST request, got: {request_line}");
+        assert!(!request_line.contains('?'), "POST must not carry a query string, got: {request_line}");
+        assert!(body.contains("\"name\":\"a-file\""), "expected the JSON body, got: {body}");
+    }
+
+    /// Binds a listener that accepts the connection and then never writes a
+    /// response -- simulates a stalled/unresponsive endpoint. Returns the
+    /// base URL; the accepted socket is kept alive for the test's duration
+    /// so the client can't fail on connection reset, only on its own
+    /// timeout.
+    async fn start_stalling_endpoint() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // Never read or write -- just hold the connection open forever.
+            std::mem::forget(stream);
+        });
+        format!("http://{addr}/stalls")
+    }
+
+    /// Regression test: before `action_config.timeout_secs` was wired into
+    /// the HTTP client, a webhook call to an unresponsive endpoint hung
+    /// indefinitely -- the only thing that ever stopped it was whatever
+    /// *outer* ceiling happened to wrap the call (a Script/Wasm action's own
+    /// timeout), which then reads as the whole action silently hanging with
+    /// no indication which HTTP call inside it was actually stuck. A stalled
+    /// connection must now fail on its own, promptly, with a real error.
+    #[tokio::test]
+    async fn stalled_connection_times_out_instead_of_hanging_forever() {
+        let url = start_stalling_endpoint().await;
+        let action_config = Some(json!({ "timeout_secs": 1 }));
+
+        let started = std::time::Instant::now();
+        let result = run_webhook_inner(&StubActionManager, "/p", "n", &url, &action_config, &json!({})).await;
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "a stalled connection must error, not succeed");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "expected the 1s action_config.timeout_secs to cut this off promptly, took {elapsed:?}"
         );
     }
 }

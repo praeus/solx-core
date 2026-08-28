@@ -190,7 +190,7 @@ pub struct SolxConfig {
     ///
     /// ```json
     /// "mcp_exclude": [
-    ///   { "path": "*/_internal/*" },
+    ///   { "path": "*/_private/*" },
     ///   { "path": "/packages/solx-google", "actions": ["search"] }
     /// ]
     /// ```
@@ -261,11 +261,11 @@ mod tests {
 
     #[test]
     fn glob_star_matches_across_slashes() {
-        assert!(glob_matches("*/_internal/*", "/a/_internal/b"));
-        assert!(glob_matches("*/_internal/*", "/_internal/b"));
-        assert!(glob_matches("*/_internal/*", "/x/y/_internal/z"));
-        assert!(!glob_matches("*/_internal/*", "/a/internal/b"));
-        assert!(!glob_matches("*/_internal/*", "/a/_internal"));
+        assert!(glob_matches("*/_private/*", "/a/_private/b"));
+        assert!(glob_matches("*/_private/*", "/_private/b"));
+        assert!(glob_matches("*/_private/*", "/x/y/_private/z"));
+        assert!(!glob_matches("*/_private/*", "/a/internal/b"));
+        assert!(!glob_matches("*/_private/*", "/a/_private"));
     }
 
     #[test]
@@ -284,8 +284,8 @@ mod tests {
 
     #[test]
     fn rule_path_only_excludes_everything_under_path() {
-        let rule = McpExcludeRule { path: "*/_internal/*".into(), actions: None };
-        assert!(rule.matches("/a/_internal/b", "anything"));
+        let rule = McpExcludeRule { path: "*/_private/*".into(), actions: None };
+        assert!(rule.matches("/a/_private/b", "anything"));
         assert!(!rule.matches("/a/public/b", "anything"));
     }
 
