@@ -259,6 +259,17 @@ pub struct ActionSearchQuery {
     /// Free-text query. `None`/empty behaves exactly like a plain `list`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub q: Option<String>,
+    /// Drop actions hidden from model-facing tool catalogues.
+    ///
+    /// Opt-in, so the CLI, the HTTP admin routes, and anything else
+    /// inventorying the registry keep seeing everything. Set it when
+    /// assembling a catalogue an LLM will choose from.
+    ///
+    /// Filtering happens after the query, so a full page can come back short
+    /// and `total` stays the *unfiltered* count — an upper bound, not an
+    /// exact one. The implementation over-fetches to keep that rare.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exclude_hidden: bool,
 }
 
 #[cfg(test)]

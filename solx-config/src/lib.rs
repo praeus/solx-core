@@ -22,7 +22,19 @@ use fs2::FileExt;
 use serde_json::{Map, Value};
 use solx_surface::error::{Result, SolxError};
 
-pub use types::{CommandDef, InstalledPackage, McpExcludeRule, SolxConfig};
+pub use types::{
+    validate_capabilities, CommandDef, InstalledPackage, McpExcludeRule, SolxConfig, ToolPolicy,
+    ToolRule, CAP_DESTRUCTIVE, CAP_HIDDEN, RESERVED_CAPS, RESERVED_CAP_PREFIX,
+};
+
+/// `tool_exclude` ∪ the former `mcp_exclude`. Union rather than
+/// either-or, so a config that still carries only the old key keeps working
+/// and one carrying both gets the sum instead of a silent winner.
+fn merged_exclude(cfg: &SolxConfig) -> Vec<ToolRule> {
+    let mut rules = cfg.tool_exclude.clone().unwrap_or_default();
+    rules.extend(cfg.mcp_exclude.clone().unwrap_or_default());
+    rules
+}
 
 const CONFIG_FILE: &str = "solx-config.json";
 
@@ -417,10 +429,26 @@ impl ConfigService {
         self.snapshot().allowed_webhook_base_urls.unwrap_or_default()
     }
 
-    /// The MCP tool-catalogue exclusion rules. Empty (the default) means
-    /// nothing is hidden.
-    pub fn mcp_exclude(&self) -> Vec<McpExcludeRule> {
-        self.snapshot().mcp_exclude.unwrap_or_default()
+    /// The configured tool-catalogue exclusion rules: `tool_exclude` plus
+    /// anything still under the former `mcp_exclude` key.
+    ///
+    /// Empty (the default) means no action is hidden *by config* — a row may
+    /// still carry [`CAP_HIDDEN`], which is why callers should prefer
+    /// [`Self::tool_policy`] over reading this directly.
+    pub fn tool_exclude(&self) -> Vec<ToolRule> {
+        let cfg = self.snapshot();
+        merged_exclude(&cfg)
+    }
+
+    /// Resolve the hidden/destructive policy once, for repeated application
+    /// across a catalogue.
+    ///
+    /// Build this before a loop rather than calling it inside one:
+    /// [`Self::snapshot`] deserializes the entire config on every call.
+    pub fn tool_policy(&self) -> ToolPolicy {
+        let cfg = self.snapshot();
+        let hidden = merged_exclude(&cfg);
+        ToolPolicy::new(hidden, cfg.tool_destructive.clone().unwrap_or_default())
     }
 
     /// Replace the webhook base-URL allowlist wholesale.
@@ -628,5 +656,70 @@ mod tests {
         assert_eq!(cfg.ensure_server_token().unwrap(), token);
         let cfg2 = ConfigService::open_in(dir.path()).unwrap();
         assert_eq!(cfg2.ensure_server_token().unwrap(), token);
+    }
+
+    /// A ConfigService over a throwaway directory. The TempDir must stay
+    /// alive for the service's lifetime, hence the tuple.
+    fn svc() -> (tempfile::TempDir, ConfigService) {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ConfigService::open_in(dir.path()).unwrap();
+        (dir, cfg)
+    }
+
+    #[test]
+    fn tool_exclude_reads_the_new_key() {
+        let (_d, c) = svc();
+        c.set("tool_exclude", serde_json::json!([{ "path": "/a" }])).unwrap();
+        let rules = c.tool_exclude();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].path, "/a");
+    }
+
+    #[test]
+    fn tool_exclude_still_reads_the_former_key() {
+        // An existing solx-config.json must keep working untouched — nothing
+        // rewrites the file, so the old key has to stay readable indefinitely.
+        let (_d, c) = svc();
+        c.set("mcp_exclude", serde_json::json!([{ "path": "/legacy" }])).unwrap();
+        let rules = c.tool_exclude();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].path, "/legacy");
+    }
+
+    #[test]
+    fn both_keys_union_rather_than_one_winning() {
+        // The reason this is two fields and not #[serde(alias)]: serde would
+        // reject both-names-present as a duplicate field, and snapshot()
+        // turns any deserialization error into SolxConfig::default() — so
+        // adding the new key beside the old one would silently blank the
+        // whole config instead of merging the lists.
+        let (_d, c) = svc();
+        c.set("tool_exclude", serde_json::json!([{ "path": "/new" }])).unwrap();
+        c.set("mcp_exclude", serde_json::json!([{ "path": "/legacy" }])).unwrap();
+
+        let paths: Vec<String> = c.tool_exclude().into_iter().map(|r| r.path).collect();
+        assert_eq!(paths.len(), 2, "{paths:?}");
+        assert!(paths.contains(&"/new".to_string()), "{paths:?}");
+        assert!(paths.contains(&"/legacy".to_string()), "{paths:?}");
+
+        // And the rest of the config must survive both keys being present.
+        assert!(
+            c.snapshot().command_actions.is_some() || c.get("tool_exclude").is_some(),
+            "config must still deserialize with both keys set"
+        );
+    }
+
+    #[test]
+    fn tool_policy_sees_rules_from_either_key() {
+        let (_d, c) = svc();
+        c.set("mcp_exclude", serde_json::json!([{ "path": "/legacy" }])).unwrap();
+        let policy = c.tool_policy();
+        let a: solx_surface::entities::Action = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000000",
+            "path": "/legacy",
+            "name": "thing",
+        }))
+        .unwrap();
+        assert!(policy.is_hidden(&a));
     }
 }

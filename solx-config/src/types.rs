@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use solx_surface::entities::{Action, ActionType};
 
 /// A single allowed shell command for `Command`-type actions. A Command
 /// action's `fn_name` is never the literal command to run — it's a key into
@@ -181,37 +182,82 @@ pub struct SolxConfig {
     pub allowed_webhook_base_urls: Option<Vec<String>>,
 
     /// Denylist of action paths (and optionally specific action names at
-    /// those paths) that the MCP server hides from its tool catalogue. A
-    /// rule's `path` is a glob pattern matched against the action's full
-    /// path (leading slash); `*` matches any characters including `/`, `?`
+    /// those paths) hidden from the tool catalogue a model sees. A rule's
+    /// `path` is a glob pattern matched against the action's full path
+    /// (leading slash); `*` matches any characters including `/`, `?`
     /// matches a single character. When `actions` is unset or empty, every
-    /// action under the matched path is excluded; otherwise only the named
+    /// action under the matched path is hidden; otherwise only the named
     /// actions are.
     ///
     /// ```json
-    /// "mcp_exclude": [
+    /// "tool_exclude": [
     ///   { "path": "*/_private/*" },
     ///   { "path": "/packages/solx-google", "actions": ["search"] }
     /// ]
     /// ```
+    ///
+    /// One of *three* inputs to the hidden decision — see [`ToolPolicy`],
+    /// which unions this with [`SolxConfig::mcp_exclude`] and the
+    /// [`CAP_HIDDEN`] tag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_exclude: Option<Vec<McpExcludeRule>>,
+    pub tool_exclude: Option<Vec<ToolRule>>,
+
+    /// Former name of [`SolxConfig::tool_exclude`], still read so an existing
+    /// `solx-config.json` keeps working untouched. The rules are unioned, not
+    /// overridden, so a file carrying both keys behaves as the sum of the two.
+    ///
+    /// Deliberately a second field rather than `#[serde(alias)]` on
+    /// `tool_exclude`: serde rejects a struct that carries *both* names as a
+    /// duplicate field, and [`crate::ConfigService::snapshot`] swallows a
+    /// deserialization error into `SolxConfig::default()` — so adding the new
+    /// key beside an existing old one would silently blank the entire config,
+    /// command allowlists and all, rather than merging the two lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_exclude: Option<Vec<ToolRule>>,
+
+    /// Action paths flagged as destructive: a model may call them, but a
+    /// caller that implements an approval step should stop and ask first.
+    /// Same rule shape as [`SolxConfig::tool_exclude`].
+    ///
+    /// ```json
+    /// "tool_destructive": [
+    ///   { "path": "/builtin/document", "actions": ["entity_delete_document"] }
+    /// ]
+    /// ```
+    ///
+    /// Also one of several inputs — see [`ToolPolicy`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_destructive: Option<Vec<ToolRule>>,
 }
 
-/// A single MCP tool-catalogue exclusion rule. See
-/// [`SolxConfig::mcp_exclude`].
+/// Reserved capability tag marking an action hidden from model-facing tool
+/// catalogues. Namespaced so a typo is visible as an unrecognized tag rather
+/// than silently unhiding the action, and so it cannot collide with a
+/// descriptive capability.
+pub const CAP_HIDDEN: &str = "solx:hidden";
+
+/// Reserved capability tag marking an action destructive. See [`CAP_HIDDEN`]
+/// for why it is namespaced.
+pub const CAP_DESTRUCTIVE: &str = "solx:destructive";
+
+/// A single path/name rule, used by [`SolxConfig::tool_exclude`] and
+/// [`SolxConfig::tool_destructive`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct McpExcludeRule {
+pub struct ToolRule {
     /// Glob pattern matched against the action's full path (leading slash).
     pub path: String,
     /// When set and non-empty, only these action names at the matched path
-    /// are excluded; otherwise every action under the path is.
+    /// match; otherwise every action under the path does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actions: Option<Vec<String>>,
 }
 
-impl McpExcludeRule {
-    /// Whether this rule excludes the action at `path`/`name`.
+/// Former name of [`ToolRule`]. The struct now backs `tool_exclude` and
+/// `tool_destructive`, so the `McpExclude` name no longer describes it.
+pub type McpExcludeRule = ToolRule;
+
+impl ToolRule {
+    /// Whether this rule matches the action at `path`/`name`.
     pub fn matches(&self, path: &str, name: &str) -> bool {
         if !glob_matches(&self.path, path) {
             return false;
@@ -221,6 +267,87 @@ impl McpExcludeRule {
             _ => true,
         }
     }
+}
+
+/// Resolved hidden/destructive policy, built once from a config snapshot and
+/// then applied to many actions.
+///
+/// Two reasons this is a struct rather than a pair of `ConfigService`
+/// methods. It is the single place both decisions are made, so a caller
+/// cannot consult one input and forget the other; and `ConfigService::snapshot`
+/// deserializes the whole config on every call, which a per-action check
+/// inside a catalogue loop would pay hundreds of times.
+///
+/// **Both decisions union their inputs, and nothing subtracts.** Config rules
+/// are a floor that a row cannot lower: anything that can call
+/// `entity_save_action` can rewrite a row's `capabilities` (the executable-
+/// action guard protects Command and Webhook *rows*, not the tags on a Script
+/// or Wasm one), so a tag alone would be a flag the flagged party can remove.
+#[derive(Debug, Clone, Default)]
+pub struct ToolPolicy {
+    hidden: Vec<ToolRule>,
+    destructive: Vec<ToolRule>,
+}
+
+impl ToolPolicy {
+    pub fn new(hidden: Vec<ToolRule>, destructive: Vec<ToolRule>) -> Self {
+        ToolPolicy { hidden, destructive }
+    }
+
+    /// Hidden = config rules ∪ the [`CAP_HIDDEN`] tag.
+    ///
+    /// A hidden action is omitted from the catalogue *and* refused when
+    /// called by name — hiding a tool a client has already learned the name
+    /// of is not, on its own, a control.
+    pub fn is_hidden(&self, action: &Action) -> bool {
+        has_tag(action, CAP_HIDDEN) || self.hidden.iter().any(|r| r.matches(&action.path, &action.name))
+    }
+
+    /// Destructive = config rules ∪ the [`CAP_DESTRUCTIVE`] tag ∪ every
+    /// Command and Webhook row, unconditionally.
+    ///
+    /// That last clause is the one to keep even if the rest changes: a shell
+    /// action is destructive by construction, and must never depend on
+    /// someone having remembered to tag it.
+    pub fn is_destructive(&self, action: &Action) -> bool {
+        matches!(action.action_type, Some(ActionType::Command) | Some(ActionType::Webhook))
+            || has_tag(action, CAP_DESTRUCTIVE)
+            || self.destructive.iter().any(|r| r.matches(&action.path, &action.name))
+    }
+}
+
+/// Prefix owned by solx for capability tags that carry meaning to the
+/// runtime rather than describing what an action does.
+pub const RESERVED_CAP_PREFIX: &str = "solx:";
+
+/// Every reserved capability tag the runtime understands.
+pub const RESERVED_CAPS: &[&str] = &[CAP_HIDDEN, CAP_DESTRUCTIVE];
+
+/// Reject a `solx:`-prefixed capability that isn't one the runtime knows.
+///
+/// This is what makes the namespace worth having. Without it, `solx:destructiv`
+/// is merely an unrecognized tag and the action silently stays ungated — the
+/// exact failure a typo in a bare `destructive` would cause. Unprefixed tags
+/// are the free-form descriptive vocabulary and are never checked.
+pub fn validate_capabilities(capabilities: &[String]) -> Result<(), String> {
+    for cap in capabilities {
+        if cap.starts_with(RESERVED_CAP_PREFIX) && !RESERVED_CAPS.contains(&cap.as_str()) {
+            return Err(format!(
+                "unknown reserved capability '{cap}': the '{RESERVED_CAP_PREFIX}' prefix is \
+                 reserved, and the recognized tags are {}",
+                RESERVED_CAPS.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Exact match on one capability entry.
+///
+/// Deliberately not the SQL `LIKE` filter `capabilities` supports: a
+/// substring test would make `non-destructive` match `solx:destructive`.
+fn has_tag(action: &Action, tag: &str) -> bool {
+    action.capabilities.iter().any(|c| c == tag)
 }
 
 /// Match a glob pattern against a path. `*` matches any sequence of
@@ -282,16 +409,99 @@ mod tests {
         assert!(glob_matches("*", "/anything/at/all"));
     }
 
+    /// Built through serde rather than a struct literal: `Action` has no
+    /// `Default`, and this way the helper survives the struct gaining fields.
+    fn action(path: &str, name: &str, caps: &[&str], ty: Option<ActionType>) -> Action {
+        serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000000",
+            "path": path,
+            "name": name,
+            "capabilities": caps,
+            "actionType": ty,
+        }))
+        .expect("test action must deserialize")
+    }
+
+    #[test]
+    fn tag_hides_an_action_no_config_rule_covers() {
+        let policy = ToolPolicy::default();
+        assert!(policy.is_hidden(&action("/packages/x", "y", &[CAP_HIDDEN], None)));
+        assert!(!policy.is_hidden(&action("/packages/x", "y", &["hidden"], None)));
+    }
+
+    #[test]
+    fn config_rule_hides_an_untagged_action() {
+        let policy = ToolPolicy::new(vec![ToolRule { path: "/packages/x".into(), actions: None }], vec![]);
+        assert!(policy.is_hidden(&action("/packages/x", "y", &[], None)));
+        assert!(!policy.is_hidden(&action("/packages/z", "y", &[], None)));
+    }
+
+    #[test]
+    fn removing_the_tag_cannot_unhide_what_config_hid() {
+        // The whole reason config is a floor rather than the only input:
+        // a row's capabilities are writable by anything that can call
+        // entity_save_action.
+        let policy = ToolPolicy::new(vec![ToolRule { path: "/packages/x".into(), actions: None }], vec![]);
+        assert!(policy.is_hidden(&action("/packages/x", "y", &["totally-safe"], None)));
+    }
+
+    #[test]
+    fn command_and_webhook_are_destructive_untagged() {
+        let policy = ToolPolicy::default();
+        assert!(policy.is_destructive(&action("/p", "a", &[], Some(ActionType::Command))));
+        assert!(policy.is_destructive(&action("/p", "a", &[], Some(ActionType::Webhook))));
+        assert!(!policy.is_destructive(&action("/p", "a", &[], Some(ActionType::Wasm))));
+        assert!(!policy.is_destructive(&action("/p", "a", &[], None)));
+    }
+
+    #[test]
+    fn destructive_unions_tag_and_config() {
+        let policy = ToolPolicy::new(
+            vec![],
+            vec![ToolRule { path: "/builtin/document".into(), actions: Some(vec!["entity_delete_document".into()]) }],
+        );
+        assert!(policy.is_destructive(&action("/builtin/document", "entity_delete_document", &[], Some(ActionType::Internal))));
+        assert!(!policy.is_destructive(&action("/builtin/document", "entity_get_document", &[], Some(ActionType::Internal))));
+        assert!(policy.is_destructive(&action("/packages/x", "wipe", &[CAP_DESTRUCTIVE], Some(ActionType::Wasm))));
+    }
+
+    #[test]
+    fn reserved_prefix_rejects_a_typo_but_allows_free_form_tags() {
+        assert!(validate_capabilities(&["document".into(), CAP_HIDDEN.into()]).is_ok());
+        // The whole point of the namespace: this is an error, not a silently
+        // ungated action.
+        let err = validate_capabilities(&["solx:destructiv".into()]).unwrap_err();
+        assert!(err.contains("solx:destructiv"), "{err}");
+        assert!(err.contains(CAP_DESTRUCTIVE), "{err}");
+        // Unprefixed tags are free-form and never checked.
+        assert!(validate_capabilities(&["destructive".into(), "hidden".into()]).is_ok());
+    }
+
+    #[test]
+    fn a_tag_is_matched_exactly_not_as_a_substring() {
+        let policy = ToolPolicy::default();
+        assert!(!policy.is_destructive(&action("/p", "a", &["non-solx:destructive"], Some(ActionType::Wasm))));
+        assert!(!policy.is_hidden(&action("/p", "a", &["solx:hidden-ish"], None)));
+    }
+
+    #[test]
+    fn hidden_and_destructive_are_independent() {
+        let policy = ToolPolicy::default();
+        let a = action("/p", "a", &[CAP_DESTRUCTIVE], Some(ActionType::Wasm));
+        assert!(policy.is_destructive(&a));
+        assert!(!policy.is_hidden(&a), "destructive must stay callable, just gated");
+    }
+
     #[test]
     fn rule_path_only_excludes_everything_under_path() {
-        let rule = McpExcludeRule { path: "*/_private/*".into(), actions: None };
+        let rule = ToolRule { path: "*/_private/*".into(), actions: None };
         assert!(rule.matches("/a/_private/b", "anything"));
         assert!(!rule.matches("/a/public/b", "anything"));
     }
 
     #[test]
     fn rule_with_actions_excludes_only_named() {
-        let rule = McpExcludeRule {
+        let rule = ToolRule {
             path: "/packages/solx-google".into(),
             actions: Some(vec!["search".into()]),
         };
@@ -302,7 +512,7 @@ mod tests {
 
     #[test]
     fn rule_with_empty_actions_behaves_like_path_only() {
-        let rule = McpExcludeRule { path: "/x".into(), actions: Some(vec![]) };
+        let rule = ToolRule { path: "/x".into(), actions: Some(vec![]) };
         assert!(rule.matches("/x", "anything"));
     }
 }

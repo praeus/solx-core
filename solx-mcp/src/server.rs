@@ -19,6 +19,7 @@ use rmcp::service::RequestContext;
 use rmcp::{Peer, RoleServer, ServerHandler};
 use serde_json::{Map, Value};
 
+use solx_config::ToolPolicy;
 use solx_manager::App;
 use solx_surface::entities::{Action, ActionExecResult};
 use solx_surface::error::SolxError;
@@ -91,14 +92,14 @@ impl SolxMcpServer {
         )
     }
 
-    /// Whether the action at `path`/`name` is hidden by the configured
-    /// `mcp_exclude` denylist.
-    fn is_excluded(&self, path: &str, name: &str) -> bool {
-        self.app
-            .config
-            .mcp_exclude()
-            .iter()
-            .any(|rule| rule.matches(path, name))
+    /// Resolve the hidden/destructive policy once, to apply across a whole
+    /// catalogue page.
+    ///
+    /// Built per request rather than cached on the server so an edit to a
+    /// row's capabilities, or to `solx-config.json`, takes effect on the next
+    /// call instead of at the next restart.
+    fn policy(&self) -> ToolPolicy {
+        self.app.config.tool_policy()
     }
 
     /// The effective path scope for a router call: the caller's `path_prefix`
@@ -114,6 +115,7 @@ impl SolxMcpServer {
     /// `path,name` order. Used by the router's `list_all` mode.
     async fn all_actions(&self, path_prefix: Option<String>) -> Result<Vec<Action>, ErrorData> {
         let actions = self.app.actions();
+        let policy = self.policy();
         let mut out = Vec::new();
         let mut offset = 0usize;
         loop {
@@ -128,7 +130,7 @@ impl SolxMcpServer {
                 .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
             let n = page.items.len();
             for a in page.items {
-                if !self.is_excluded(&a.path, &a.name) {
+                if !policy.is_hidden(&a) {
                     out.push(a);
                 }
             }
@@ -142,7 +144,11 @@ impl SolxMcpServer {
 
     /// Format one action as a text candidate the model can read and then
     /// invoke by its encoded tool name.
-    async fn format_candidate(&self, a: &Action) -> String {
+    ///
+    /// A destructive action is labelled rather than withheld: this server has
+    /// no approval step of its own, so the most it can do is tell the client
+    /// — which is generally driving a human who can be asked.
+    async fn format_candidate(&self, a: &Action, policy: &ToolPolicy) -> String {
         let tool_name = tools::encode_tool_name(&a.path, &a.name);
         let description = a
             .description
@@ -156,7 +162,12 @@ impl SolxMcpServer {
             },
             None => "{}".to_string(),
         };
-        format!("Tool: {tool_name}\nDescription: {description}\nSchema: {schema_str}")
+        let warning = if policy.is_destructive(a) {
+            "\nDestructive: yes - this action changes or removes data. Confirm with the user before invoking it."
+        } else {
+            ""
+        };
+        format!("Tool: {tool_name}\nDescription: {description}{warning}\nSchema: {schema_str}")
     }
 
     /// Handle a `call_tool` invocation of the router meta-tool.
@@ -195,19 +206,23 @@ impl SolxMcpServer {
                     ..Default::default()
                 },
                 q: Some(query.clone()),
+                // The manager applies the same ToolPolicy this server would,
+                // and over-fetches to keep the page full — so the loop below
+                // only has to trim to the router's page size.
+                exclude_hidden: true,
             })
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
+        // `policy` is still needed to mark destructive candidates; hidden
+        // ones never arrive.
+        let policy = self.policy();
         let mut lines = Vec::new();
         for a in &page.items {
-            if self.is_excluded(&a.path, &a.name) {
-                continue;
-            }
             if lines.len() >= ROUTER_PAGE_SIZE {
                 break;
             }
-            lines.push(self.format_candidate(a).await);
+            lines.push(self.format_candidate(a, &policy).await);
         }
         if lines.is_empty() {
             return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
@@ -235,9 +250,10 @@ impl SolxMcpServer {
             )]));
         }
         let end = (start + ROUTER_PAGE_SIZE).min(all.len());
+        let policy = self.policy();
         let mut lines = Vec::new();
         for a in &all[start..end] {
-            lines.push(self.format_candidate(a).await);
+            lines.push(self.format_candidate(a, &policy).await);
         }
         let mut text = format!(
             "Displaying tools {} to {} of {}.\n\n",
@@ -297,13 +313,22 @@ impl ServerHandler for SolxMcpServer {
             ));
         };
         // Defense in depth: a client that already knows a hidden tool's name
-        // still can't invoke it — excluded tools are rejected here, not just
-        // omitted from `list_tools`.
-        if self.is_excluded(&path, &name) {
-            return Err(ErrorData::invalid_params(
-                format!("unknown tool '{}'", request.name),
-                None,
-            ));
+        // still can't invoke it — hidden tools are rejected here, not just
+        // omitted from discovery.
+        //
+        // This costs one `get` per call, which the old path-only check did
+        // not: `solx:hidden` lives on the row, so there is nothing to test
+        // without reading it. A row that has gone missing falls through to
+        // `exec`, which does its own `get` and reports NotFound in-band —
+        // failing open here would be wrong, but so would inventing a
+        // different error for a race `exec` already handles.
+        if let Ok(action) = self.app.actions().get(&path, &name).await {
+            if self.policy().is_hidden(&action) {
+                return Err(ErrorData::invalid_params(
+                    format!("unknown tool '{}'", request.name),
+                    None,
+                ));
+            }
         }
         // Not `request.progress_token()`: on the receiving side, rmcp
         // strips the wire `_meta` into the request envelope's `Extensions`

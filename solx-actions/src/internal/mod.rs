@@ -136,7 +136,7 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
         "entity_list_types" => entity::type_list(params, &ctx.types).await,
 
         "entity_save_action" => entity::action_save(params, &ctx.actions).await,
-        "entity_get_action" => entity::action_get(params, &ctx.actions).await,
+        "entity_get_action" => entity::action_get(params, &ctx.actions, &ctx.config).await,
         "entity_delete_action" => entity::action_delete(params, &ctx.actions).await,
         "entity_list_actions" => entity::action_list(params, &ctx.actions).await,
 
@@ -513,6 +513,46 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(deleted.get("deleted").and_then(Value::as_bool), Some(true));
+    }
+
+    /// Both spellings of the flag reach the same check.
+    ///
+    /// The two halves of the catalogue filter are reached by different
+    /// handlers with different param conventions — `search_actions`
+    /// deserializes a camelCase `ActionSearchQuery`, `entity_get_action`
+    /// reads raw snake_case keys. A caller that guessed wrong would get an
+    /// *unfiltered* answer with no error, so both are accepted.
+    #[tokio::test]
+    async fn entity_get_action_accepts_either_spelling_of_exclude_hidden() {
+        let (_d, ctx) = test_ctx(None).await;
+        run_internal(
+            "entity_save_action",
+            &json!({
+                "path": "/tools",
+                "name": "secret",
+                "actionType": "script",
+                "capabilities": [solx_config::CAP_HIDDEN],
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        // Without the flag it reads back normally.
+        run_internal("entity_get_action", &json!({"path": "/tools", "name": "secret"}), &ctx)
+            .await
+            .unwrap();
+
+        for key in ["excludeHidden", "exclude_hidden"] {
+            let err = run_internal(
+                "entity_get_action",
+                &json!({"path": "/tools", "name": "secret", key: true}),
+                &ctx,
+            )
+            .await
+            .expect_err("hidden action must read back as not-found");
+            assert!(err.contains("not found"), "{key}: {err}");
+        }
     }
 
     #[tokio::test]

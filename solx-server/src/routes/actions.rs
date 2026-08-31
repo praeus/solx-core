@@ -79,14 +79,22 @@ async fn list_actions(
 async fn search_actions(
     State(state): State<AppState>,
     Query(list): Query<ListOptions>,
-    Query(SearchTerm { q }): Query<SearchTerm>,
+    Query(SearchTerm { q, exclude_hidden }): Query<SearchTerm>,
 ) -> Result<Json<Page<Action>>, ApiError> {
-    let page = state.app.actions().search(ActionSearchQuery { list, q }).await?;
+    let page = state
+        .app
+        .actions()
+        .search(ActionSearchQuery { list, q, exclude_hidden })
+        .await?;
     Ok(Json(page))
 }
 
 #[derive(Deserialize)]
 struct SearchTerm {
+    /// `?exclude_hidden=true` drops actions hidden from model-facing
+    /// catalogues. Off by default, like every other caller of `search`.
+    #[serde(default)]
+    exclude_hidden: bool,
     #[serde(default)]
     q: Option<String>,
 }

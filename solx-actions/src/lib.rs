@@ -467,6 +467,14 @@ const SELECT: &str = "SELECT id,path,name,caption,description,capabilities,phras
 /// `action_config` is deliberately absent: it can hold secrets (see
 /// [`mask`]), and a LIKE filter over it would leak their contents by
 /// letting a caller probe for substrings.
+/// How much to over-fetch when `exclude_hidden` forces post-query
+/// filtering, so a page that loses a few rows is usually still full.
+const HIDDEN_OVERFETCH: usize = 4;
+
+/// Ceiling on that inflated fetch, so a large `limit` cannot turn into an
+/// unbounded scan.
+const HIDDEN_FETCH_CAP: usize = 1000;
+
 const LIST_SCHEMA: ListSchema<'static> = ListSchema {
     filterable: &[
         "name",
@@ -529,6 +537,10 @@ impl ActionManager for LocalActionManager {
     async fn save(&self, path: &str, name: &str, input: ActionInput) -> Result<Action> {
         let path = normalize_path(path)?;
         validate_name(name)?;
+        // Checked here rather than at each surface, for the same reason
+        // `guard_executable_action` is shared: the CLI, MCP, HTTP, scripts,
+        // and wasm guests all arrive through this one method.
+        solx_config::validate_capabilities(&input.capabilities).map_err(SolxError::Invalid)?;
         let name = name.trim().to_string();
         let conn = self.db.connect().await?;
         let existing = get_row(&conn, &path, &name).await?;
@@ -702,7 +714,18 @@ impl ActionManager for LocalActionManager {
     /// plan as `list` — no join, no ranking.
     async fn search(&self, query: ActionSearchQuery) -> Result<Page<Action>> {
         let conn = self.db.connect().await?;
-        let limit = query.list.limit_or(DEFAULT_LIMIT);
+        let want = query.list.limit_or(DEFAULT_LIMIT);
+        // Hidden-ness is resolved from config rules *and* the row's own
+        // capabilities, so it cannot be pushed into the SQL: a LIKE over the
+        // capabilities JSON would match `non-destructive` against
+        // `solx:destructive`. Filtering therefore happens after the query,
+        // and the fetch is inflated so a full page usually survives it —
+        // the same over-fetch-and-trim solx-mcp's router already does.
+        let limit = if query.exclude_hidden {
+            want.saturating_mul(HIDDEN_OVERFETCH).min(HIDDEN_FETCH_CAP)
+        } else {
+            want
+        };
         let offset = query.list.offset_or_zero();
         let q = query.list.to_sql(LIST_SCHEMA)?;
         let mut binds: Vec<libsql::Value> =
@@ -752,7 +775,12 @@ impl ActionManager for LocalActionManager {
             mask::mask_action_config_opt(&mut action.action_config);
             items.push(action);
         }
-        Ok(Page::new(items, total, limit, offset))
+        if query.exclude_hidden {
+            let policy = self.config.tool_policy();
+            items.retain(|a| !policy.is_hidden(a));
+            items.truncate(want);
+        }
+        Ok(Page::new(items, total, want, offset))
     }
 
     /// Entry point for every *external* caller — the CLI, the MCP server,
@@ -1241,7 +1269,8 @@ mod tests {
             .search(ActionSearchQuery {
                 q: Some("Beta".into()),
                 list: ListOptions::default(),
-            })
+                        exclude_hidden: false,
+                    })
             .await
             .unwrap();
         assert_eq!(page.total, 1);
@@ -1260,6 +1289,7 @@ mod tests {
                     path_prefix: Some("/tools".into()),
                     ..Default::default()
                 },
+                exclude_hidden: false,
             })
             .await
             .unwrap();
@@ -1278,6 +1308,7 @@ mod tests {
                     path_prefix: Some("/tools".into()),
                     ..Default::default()
                 },
+                exclude_hidden: false,
             })
             .await
             .unwrap();
@@ -1345,7 +1376,8 @@ mod tests {
             .search(ActionSearchQuery {
                 q: Some("livejournal".into()),
                 list: ListOptions::default(),
-            })
+                        exclude_hidden: false,
+                    })
             .await
             .unwrap();
         assert_eq!(page.total, 1);
@@ -1514,6 +1546,117 @@ mod tests {
             raw.action_config.as_ref().unwrap()["secrets"]["API_TOKEN"],
             serde_json::json!("c3VwZXItc2VjcmV0LWtleS1oZXJlLXBhZGRpbmc=")
         );
+    }
+
+    #[tokio::test]
+    async fn search_without_the_flag_still_returns_hidden_actions() {
+        // Opt-in: the CLI and admin routes inventory the registry and must
+        // keep seeing everything.
+        let (_d, _c, m) = setup().await;
+        m.save("/tools", "visible", ActionInput::default()).await.unwrap();
+        m.save(
+            "/tools",
+            "secret",
+            ActionInput { capabilities: vec![solx_config::CAP_HIDDEN.into()], ..Default::default() },
+        )
+        .await
+        .unwrap();
+
+        let page = m
+            .search(ActionSearchQuery {
+                list: ListOptions { path_prefix: Some("/tools".into()), ..Default::default() },
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 2, "{:?}", page.items.iter().map(|a| &a.name).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn search_with_exclude_hidden_drops_tagged_actions() {
+        let (_d, _c, m) = setup().await;
+        m.save("/tools", "visible", ActionInput::default()).await.unwrap();
+        m.save(
+            "/tools",
+            "secret",
+            ActionInput { capabilities: vec![solx_config::CAP_HIDDEN.into()], ..Default::default() },
+        )
+        .await
+        .unwrap();
+
+        let page = m
+            .search(ActionSearchQuery {
+                list: ListOptions { path_prefix: Some("/tools".into()), ..Default::default() },
+                exclude_hidden: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let names: Vec<&String> = page.items.iter().map(|a| &a.name).collect();
+        assert_eq!(names, vec![&"visible".to_string()], "{names:?}");
+    }
+
+    #[tokio::test]
+    async fn exclude_hidden_still_fills_a_page_when_it_can() {
+        // The over-fetch: filtering happens after the query, so without it a
+        // limit-2 page containing one hidden row would come back with one
+        // item even though a second visible one exists.
+        let (_d, _c, m) = setup().await;
+        m.save("/tools", "a", ActionInput::default()).await.unwrap();
+        m.save(
+            "/tools",
+            "b",
+            ActionInput { capabilities: vec![solx_config::CAP_HIDDEN.into()], ..Default::default() },
+        )
+        .await
+        .unwrap();
+        m.save("/tools", "c", ActionInput::default()).await.unwrap();
+
+        let page = m
+            .search(ActionSearchQuery {
+                list: ListOptions {
+                    path_prefix: Some("/tools".into()),
+                    limit: Some(2),
+                    ..Default::default()
+                },
+                exclude_hidden: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let names: Vec<&String> = page.items.iter().map(|a| &a.name).collect();
+        assert_eq!(names, vec![&"a".to_string(), &"c".to_string()], "{names:?}");
+        assert_eq!(page.limit, 2, "the caller's limit, not the inflated one");
+    }
+
+    #[tokio::test]
+    async fn save_rejects_an_unknown_reserved_capability() {
+        let (_d, _c, m) = setup().await;
+        let input = ActionInput {
+            capabilities: vec!["document".into(), "solx:destructiv".into()],
+            ..Default::default()
+        };
+        let err = m.save("/tools", "typo", input).await.unwrap_err();
+        assert!(
+            err.to_string().contains("solx:destructiv"),
+            "a mistyped reserved tag must fail the save, not silently leave the              action ungated: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_accepts_reserved_and_free_form_capabilities() {
+        let (_d, _c, m) = setup().await;
+        let input = ActionInput {
+            capabilities: vec![
+                "document".into(),
+                solx_config::CAP_HIDDEN.into(),
+                solx_config::CAP_DESTRUCTIVE.into(),
+            ],
+            ..Default::default()
+        };
+        let saved = m.save("/tools", "flagged", input).await.unwrap();
+        assert!(saved.capabilities.iter().any(|c| c == solx_config::CAP_HIDDEN));
+        assert!(saved.capabilities.iter().any(|c| c == solx_config::CAP_DESTRUCTIVE));
     }
 
     /// Regression test: `save`'s own response must be redacted too, not just

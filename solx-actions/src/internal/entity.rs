@@ -100,10 +100,39 @@ pub(super) async fn action_save(params: &Value, actions: &Arc<dyn ActionManager>
     to_value(&a)
 }
 
-pub(super) async fn action_get(params: &Value, actions: &Arc<dyn ActionManager>) -> Result<Value, String> {
+/// `excludeHidden: true` makes a hidden action indistinguishable from a
+/// missing one.
+///
+/// This is the dispatch-time half of the catalogue filter: a caller that
+/// already knows a hidden action's reference must not be able to read it back
+/// just because it skipped discovery. It reports NotFound rather than a
+/// distinct "hidden" error on purpose — a caller that can tell the two apart
+/// can enumerate what is hidden.
+///
+/// Both spellings of the flag are accepted. This handler reads its params by
+/// raw key, where the convention is snake_case (`rel_path`, `stream_id`,
+/// `doc_path`), but the sibling `search_actions` deserializes an
+/// `ActionSearchQuery`, which is `rename_all = "camelCase"`. One concept
+/// reached by two calls should not need two spellings from the caller, and a
+/// guest that guesses wrong would silently get an *unfiltered* answer.
+pub(super) async fn action_get(
+    params: &Value,
+    actions: &Arc<dyn ActionManager>,
+    config: &Arc<solx_config::ConfigService>,
+) -> Result<Value, String> {
     let name = require_str(params, "name")?;
-    let a = actions.get(path_or_root(params), name).await.map_err(|e| e.to_string())?;
+    let path = path_or_root(params);
+    let a = actions.get(path, name).await.map_err(|e| e.to_string())?;
+    if exclude_hidden_flag(params) && config.tool_policy().is_hidden(&a) {
+        return Err(format!("action not found: {path}/{name}"));
+    }
     to_value(&a)
+}
+
+fn exclude_hidden_flag(params: &Value) -> bool {
+    ["excludeHidden", "exclude_hidden"]
+        .iter()
+        .any(|k| params.get(k).and_then(Value::as_bool) == Some(true))
 }
 
 pub(super) async fn action_delete(params: &Value, actions: &Arc<dyn ActionManager>) -> Result<Value, String> {
