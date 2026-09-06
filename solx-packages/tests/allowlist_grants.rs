@@ -1,4 +1,4 @@
-//! `package.json`-declared `command_actions`/`allowed_webhook_base_urls`
+//! `solx-package.json`-declared `command_actions`/`allowed_base_urls`
 //! grants — see the module doc on `solx_packages::install_package`.
 //!
 //! Uses a `CommandRunner` fake that ignores every script stage: these tests
@@ -22,17 +22,22 @@ impl CommandRunner for NoopRunner {
     }
 }
 
-/// Writes a minimal package directory: `package.json` (with the given extra
-/// top-level fields merged in) plus trivial `install.solx`/`uninstall.solx`.
-fn write_package(dir: &Path, name: &str, extra: Value) {
+/// Writes a minimal package directory: a manifest named `file` (with the
+/// given extra top-level fields merged in) plus trivial
+/// `install.solx`/`uninstall.solx`.
+fn write_package_as(dir: &Path, file: &str, name: &str, extra: Value) {
     std::fs::create_dir_all(dir).unwrap();
     let mut meta = json!({ "name": name, "version": "0.0.1" });
     for (k, v) in extra.as_object().unwrap() {
         meta.as_object_mut().unwrap().insert(k.clone(), v.clone());
     }
-    std::fs::write(dir.join("package.json"), serde_json::to_string(&meta).unwrap()).unwrap();
+    std::fs::write(dir.join(file), serde_json::to_string(&meta).unwrap()).unwrap();
     std::fs::write(dir.join("install.solx"), "json '{}'").unwrap();
     std::fs::write(dir.join("uninstall.solx"), "json '{}'").unwrap();
+}
+
+fn write_package(dir: &Path, name: &str, extra: Value) {
+    write_package_as(dir, "solx-package.json", name, extra);
 }
 
 #[tokio::test]
@@ -47,7 +52,7 @@ async fn install_grants_declared_command_and_webhook_entries() {
         "pkg-a",
         json!({
             "command_actions": { "pkg-a-cmd": { "command": "echo 1" } },
-            "allowed_webhook_base_urls": ["https://pkg-a.example.com"]
+            "allowed_base_urls": ["https://pkg-a.example.com"]
         }),
     );
 
@@ -55,13 +60,13 @@ async fn install_grants_declared_command_and_webhook_entries() {
     assert!(outcome.warnings.is_empty());
     assert_eq!(outcome.package.granted_commands, vec!["pkg-a-cmd".to_string()]);
     assert_eq!(
-        outcome.package.granted_webhook_prefixes,
+        outcome.package.granted_base_urls,
         vec!["https://pkg-a.example.com".to_string()]
     );
 
     assert_eq!(cfg.command_actions()["pkg-a-cmd"].command, "echo 1");
     assert!(cfg
-        .allowed_webhook_base_urls()
+        .allowed_base_urls()
         .contains(&"https://pkg-a.example.com".to_string()));
 }
 
@@ -77,9 +82,9 @@ async fn install_with_no_manifest_grants_is_unaffected() {
     let outcome = install_package(&runner, &cfg, pkg_dir.path()).await.unwrap();
     assert!(outcome.warnings.is_empty());
     assert!(outcome.package.granted_commands.is_empty());
-    assert!(outcome.package.granted_webhook_prefixes.is_empty());
+    assert!(outcome.package.granted_base_urls.is_empty());
     assert!(cfg.command_actions().is_empty());
-    assert!(cfg.allowed_webhook_base_urls().is_empty());
+    assert!(cfg.allowed_base_urls().is_empty());
 }
 
 #[tokio::test]
@@ -165,4 +170,86 @@ async fn reinstalling_the_same_package_is_not_a_collision() {
     let outcome = install_package(&runner, &cfg, pkg_dir.path()).await.unwrap();
     assert!(outcome.warnings.is_empty(), "reinstalling your own package must not warn");
     assert_eq!(cfg.command_actions()["own-key"].command, "echo v2");
+}
+
+// ── manifest filename: solx-package.json, with package.json as fallback ─────
+
+#[tokio::test]
+async fn a_legacy_package_json_manifest_still_installs_but_warns() {
+    let appdata = tempfile::tempdir().unwrap();
+    let cfg = ConfigService::open_in(appdata.path()).unwrap();
+    let runner = NoopRunner;
+
+    let pkg_dir = tempfile::tempdir().unwrap();
+    write_package_as(
+        pkg_dir.path(),
+        "package.json",
+        "pkg-legacy",
+        json!({ "allowed_base_urls": ["https://legacy.example.com/"] }),
+    );
+
+    let outcome = install_package(&runner, &cfg, pkg_dir.path()).await.unwrap();
+    assert_eq!(outcome.warnings.len(), 1, "{:?}", outcome.warnings);
+    assert!(outcome.warnings[0].contains("solx-package.json"), "{:?}", outcome.warnings);
+    // It still installs and still grants — the warning is advisory.
+    assert!(cfg
+        .allowed_base_urls()
+        .contains(&"https://legacy.example.com/".to_string()));
+}
+
+#[tokio::test]
+async fn solx_package_json_wins_when_both_manifests_are_present() {
+    let appdata = tempfile::tempdir().unwrap();
+    let cfg = ConfigService::open_in(appdata.path()).unwrap();
+    let runner = NoopRunner;
+
+    let pkg_dir = tempfile::tempdir().unwrap();
+    write_package_as(
+        pkg_dir.path(),
+        "package.json",
+        "pkg-npm-name",
+        json!({ "allowed_base_urls": ["https://from-package-json.example.com/"] }),
+    );
+    write_package_as(
+        pkg_dir.path(),
+        "solx-package.json",
+        "pkg-solx-name",
+        json!({ "allowed_base_urls": ["https://from-solx-manifest.example.com/"] }),
+    );
+
+    let outcome = install_package(&runner, &cfg, pkg_dir.path()).await.unwrap();
+    assert!(outcome.warnings.is_empty(), "{:?}", outcome.warnings);
+    assert_eq!(outcome.package.name, "pkg-solx-name");
+    assert_eq!(
+        outcome.package.granted_base_urls,
+        vec!["https://from-solx-manifest.example.com/".to_string()]
+    );
+}
+
+/// The former manifest key is read for the same reason the config key is.
+#[tokio::test]
+async fn the_legacy_allowed_webhook_base_urls_manifest_key_still_grants() {
+    let appdata = tempfile::tempdir().unwrap();
+    let cfg = ConfigService::open_in(appdata.path()).unwrap();
+    let runner = NoopRunner;
+
+    let pkg_dir = tempfile::tempdir().unwrap();
+    write_package(
+        pkg_dir.path(),
+        "pkg-legacy-key",
+        json!({ "allowed_webhook_base_urls": ["https://legacy-key.example.com/"] }),
+    );
+
+    let outcome = install_package(&runner, &cfg, pkg_dir.path()).await.unwrap();
+    assert_eq!(
+        outcome.package.granted_base_urls,
+        vec!["https://legacy-key.example.com/".to_string()]
+    );
+    assert!(cfg
+        .allowed_base_urls()
+        .contains(&"https://legacy-key.example.com/".to_string()));
+
+    // And revoking still reaches it.
+    uninstall_package(&runner, &cfg, "pkg-legacy-key").await.unwrap();
+    assert!(cfg.allowed_base_urls().is_empty());
 }

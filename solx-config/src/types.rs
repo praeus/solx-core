@@ -42,11 +42,15 @@ pub struct InstalledPackage {
     /// `package.json` off disk. See `docs/next-steps.md` §1.
     #[serde(default)]
     pub granted_commands: Vec<String>,
-    /// `allowed_webhook_base_urls` prefixes this package's manifest declared
-    /// and had granted at install time. Same defaulting/rationale as
+    /// `allowed_base_urls` prefixes this package's manifest declared and had
+    /// granted at install time. Same defaulting/rationale as
     /// `granted_commands`.
-    #[serde(default)]
-    pub granted_webhook_prefixes: Vec<String>,
+    ///
+    /// The `alias` is load-bearing: rows written before the rename carry
+    /// `granted_webhook_prefixes`, and without it they would read as empty —
+    /// so `uninstall_package` would silently revoke nothing.
+    #[serde(default, alias = "granted_webhook_prefixes")]
+    pub granted_base_urls: Vec<String>,
 }
 
 /// Typed snapshot of the config. All fields are optional so a partial or
@@ -170,14 +174,26 @@ pub struct SolxConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_actions: Option<HashMap<String, CommandDef>>,
 
-    /// Allowlist of URL prefixes `Webhook`-type actions may POST to. A
-    /// request URL must start with at least one listed prefix.
-    /// **Deny-by-default**: unset or empty means no Webhook action can
-    /// execute at all.
+    /// Allowlist of URL prefixes any action may send an outbound HTTP
+    /// request to. A request URL must start with at least one listed prefix.
+    /// **Deny-by-default**: unset or empty means no outbound request is
+    /// permitted at all.
+    ///
+    /// This governs `Webhook`-type actions *and* the `/builtin/web/*`
+    /// built-ins (`http_request`, `http_stream_start`, `open_url`) — which is
+    /// why it is no longer named for webhooks.
     ///
     /// ```json
-    /// "allowed_webhook_base_urls": ["https://hooks.example.com"]
+    /// "allowed_base_urls": ["https://hooks.example.com"]
     /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_base_urls: Option<Vec<String>>,
+
+    /// Former name of [`Self::allowed_base_urls`], still read so an existing
+    /// `solx-config.json` keeps working. Unioned with the current field by
+    /// `merged_base_urls`, exactly as `mcp_exclude` is unioned into
+    /// `tool_exclude`. Nothing writes it: the mutators fold it into
+    /// `allowed_base_urls` and drop it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_webhook_base_urls: Option<Vec<String>>,
 

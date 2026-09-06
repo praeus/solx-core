@@ -129,16 +129,19 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
         "entity_get_document" => entity::doc_get(params, &ctx.docs).await,
         "entity_delete_document" => entity::doc_delete(params, &ctx.docs).await,
         "entity_list_documents" => entity::doc_list(params, &ctx.docs).await,
+        "entity_list_document_paths" => entity::doc_paths(params, &ctx.docs).await,
 
         "entity_save_type" => entity::type_save(params, &ctx.types).await,
         "entity_get_type" => entity::type_get(params, &ctx.types).await,
         "entity_delete_type" => entity::type_delete(params, &ctx.types).await,
         "entity_list_types" => entity::type_list(params, &ctx.types).await,
+        "entity_list_type_paths" => entity::type_paths(params, &ctx.types).await,
 
         "entity_save_action" => entity::action_save(params, &ctx.actions).await,
         "entity_get_action" => entity::action_get(params, &ctx.actions, &ctx.config).await,
         "entity_delete_action" => entity::action_delete(params, &ctx.actions).await,
         "entity_list_actions" => entity::action_list(params, &ctx.actions).await,
+        "entity_list_action_paths" => entity::action_paths(params, &ctx.actions).await,
 
         // ── search ───────────────────────────────────────────────────────
         "search_documents" => entity::search_documents(params, &ctx.docs).await,
@@ -164,7 +167,7 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
         "set_env" => env::set_env(params, &ctx.config),
 
         // ── HTTP ─────────────────────────────────────────────────────────
-        "http_request" => http::http_request(params).await,
+        "http_request" => http::http_request(params, &ctx.config).await,
 
         // ── HTTP streaming ──────────────────────────────────────────────
         "http_stream_start" => http_stream::start(params, &ctx.config).await,
@@ -172,7 +175,7 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
         "http_stream_close" => http_stream::close(params).await,
 
         // ── system integration ────────────────────────────────────────────
-        "open_url" => open_url::open_url(params).await,
+        "open_url" => open_url::open_url(params, &ctx.config).await,
 
         // ── secrets (per-caller scoped) ──────────────────────────────────
         "get_secret" => secrets::get_secret(params, ctx.caller.as_ref()).await,
@@ -348,6 +351,12 @@ mod tests {
         );
         let files: Arc<dyn FileStore> = Arc::new(solx_files::LocalFileStore::new(dir.path().join("files")));
         let cfg = Arc::new(solx_config::ConfigService::open_in(dir.path()).unwrap());
+        // Every HTTP fixture below binds a random port on 127.0.0.1, and
+        // outbound requests are gated by `crate::net::check_outbound_url`.
+        // Granting the loopback prefix once here keeps the gate real
+        // everywhere else while letting the fixtures reach their own servers;
+        // a test that wants to exercise a *denial* clears this first.
+        cfg.set_allowed_base_urls(vec!["http://127.0.0.1:".into()]).unwrap();
         let actions_concrete = Arc::new(
             crate::LocalActionManager::open(
                 &dir.path().join("actions.db"),
@@ -1253,6 +1262,79 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.contains("timeout_secs must be > 0"), "{err}");
+    }
+
+    // ── the outbound gate on /builtin/web/* ───────────────────────────────
+    //
+    // `check_outbound_url` has its own unit tests in `crate::net`; these are
+    // about it actually being wired into each dispatch arm, which is the part
+    // that was missing and made `http_request` an open egress proxy.
+
+    /// Clear the loopback grant `test_ctx` seeds, so the gate is live.
+    fn deny_everything(ctx: &InternalCtx) {
+        ctx.config.set_allowed_base_urls(vec![]).unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_request_refuses_an_unlisted_url() {
+        let (_d, ctx) = test_ctx(None).await;
+        let (base, server) = start_echo_server().await;
+        deny_everything(&ctx);
+        let err = run_internal("http_request", &json!({"url": format!("{base}/ok")}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(err.contains("allowed_base_urls"), "{err}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn http_stream_start_refuses_an_unlisted_url() {
+        let (_d, ctx) = test_ctx(None).await;
+        let (base, server) = start_stream_server(vec![r#"{"n":1}"#.to_string()]).await;
+        deny_everything(&ctx);
+        let err = run_internal("http_stream_start", &json!({"url": format!("{base}/s")}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(err.contains("allowed_base_urls"), "{err}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn open_url_refuses_an_unlisted_url() {
+        let (_d, ctx) = test_ctx(None).await;
+        deny_everything(&ctx);
+        let err = run_internal("open_url", &json!({"url": "https://example.com/"}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(err.contains("allowed_base_urls"), "{err}");
+    }
+
+    /// A scheme with no host has nothing for a prefix to constrain, so it is
+    /// refused outright — `open_url` hands the URL to a real browser session.
+    #[tokio::test]
+    async fn open_url_refuses_non_http_schemes_however_wide_the_allowlist() {
+        let (_d, ctx) = test_ctx(None).await;
+        ctx.config
+            .set_allowed_base_urls(vec!["about:".into(), "file:///".into(), "javascript:".into()])
+            .unwrap();
+        for url in ["about:blank", "file:///etc/passwd", "javascript:alert(1)"] {
+            let err = run_internal("open_url", &json!({ "url": url }), &ctx).await.unwrap_err();
+            assert!(err.contains("http:// or https://"), "{url}: {err}");
+        }
+    }
+
+    /// The gate must run before any connection is attempted. Port 1 has
+    /// nothing listening, so a check that ran too late would surface a
+    /// connection error instead.
+    #[tokio::test]
+    async fn a_denied_url_is_refused_without_attempting_a_connection() {
+        let (_d, ctx) = test_ctx(None).await;
+        deny_everything(&ctx);
+        let err = run_internal("http_request", &json!({"url": "http://127.0.0.1:1/"}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(err.contains("allowed_base_urls"), "{err}");
+        assert!(!err.contains("http request failed"), "{err}");
     }
 
     // ── http_stream_start / poll / close ──────────────────────────────────

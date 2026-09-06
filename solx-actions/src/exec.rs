@@ -262,16 +262,9 @@ pub async fn run_webhook(
 
     // Deny-by-default, checked before anything else — including the console
     // log line below, so a denied webhook leaves no trace of the attempt
-    // beyond the returned error. The URL must start with one of the
-    // configured prefixes; an unset or empty allowlist rejects every URL.
-    let allowlist = cfg.allowed_webhook_base_urls();
-    if !allowlist.iter().any(|base| url.starts_with(base.as_str())) {
-        return Err(SolxError::Exec(format!(
-            "webhook URL '{url}' does not match any prefix in solx-config.json's \
-             'allowed_webhook_base_urls' allowlist; add a matching prefix there to \
-             allow this webhook to run"
-        )));
-    }
+    // beyond the returned error. Shared with the `/builtin/web/*` built-ins
+    // so there is exactly one implementation of the gate; see `crate::net`.
+    crate::net::check_outbound_url(cfg, url)?;
 
     let method = webhook_method_label(action_config);
     let started = std::time::Instant::now();
@@ -762,6 +755,9 @@ mod tests {
         }
         async fn list(&self, _opts: solx_surface::query::ListOptions) -> Result<solx_surface::query::Page<solx_surface::entities::Action>> {
             panic!("stub ActionManager::list should not be called by these tests")
+        }
+        async fn paths(&self, _opts: solx_surface::query::ListOptions) -> Result<solx_surface::query::Page<solx_surface::query::PathFacet>> {
+            panic!("stub ActionManager::paths should not be called by these tests")
         }
         async fn search(&self, _query: solx_surface::query::ActionSearchQuery) -> Result<solx_surface::query::Page<solx_surface::entities::Action>> {
             panic!("stub ActionManager::search should not be called by these tests")

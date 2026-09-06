@@ -35,10 +35,22 @@ ever hold a *pointer* to an out-of-band, human-approved definition. Where a
 registered definition specifies `cwd`, that wins over the invoking action's
 own config: the allowlist author decides where an approved command runs.
 
-**Webhook actions are prefix-allowlisted.** A `webhook` action's resolved URL
-must start with an entry in `allowed_webhook_base_urls`. Denied attempts are
-rejected before the console's start log is written, so a refused call leaves
-no trace beyond the error.
+**Outbound HTTP is prefix-allowlisted.** Every URL solx fetches on a caller's
+behalf must start with an entry in `allowed_base_urls`: a `webhook` action's
+resolved URL, and the URL given to `/builtin/web/http_request`,
+`/builtin/web/stream/start` or `/builtin/web/open_url`. All four share one
+check (`solx-actions::net::check_outbound_url`), applied before any
+connection is opened — so a denied webhook leaves no trace beyond the error,
+and a denied built-in makes no request at all. `open_url` additionally
+refuses any scheme but `http`/`https`, since `file:`/`javascript:`/`about:`
+carry no host for a prefix to constrain and it hands the URL to the user's
+real browser session.
+
+The `/builtin/web/*` built-ins were ungated until this check was extracted
+and shared; before that, anything able to exec an action — a WASM guest, an
+MCP client, a widget with a bearer token — could use `http_request` as an
+unrestricted egress proxy. The former config key `allowed_webhook_base_urls`
+is still read, and unioned in, so an existing config keeps working.
 
 Both allowlists are **deny-by-default**. An empty or absent allowlist denies
 everything rather than allowing everything.
@@ -57,8 +69,8 @@ deliberately: anyone holding `server_token` can already execute command
 actions, so gating it there would buy nothing and would break the CLI in
 remote mode.
 
-**Packages declare their grants.** A package's `package.json` lists the
-`command_actions` and `allowed_webhook_base_urls` it needs. Install grants
+**Packages declare their grants.** A package's `solx-package.json` lists the
+`command_actions` and `allowed_base_urls` it needs. Install grants
 exactly those and records them on the installed-package row; uninstall
 revokes exactly those, unless another installed package also declares the
 same key or prefix. A collision between packages is a logged warning, not a
@@ -118,8 +130,8 @@ for the reasoning behind each and the intended direction.
   command something can trigger. Register the specific commands you need, not
   wrappers that take arbitrary arguments.
 - **Read a package's manifest before installing it.** The `command_actions`
-  and `allowed_webhook_base_urls` blocks are a complete list of the shell
-  access and outbound hosts it's asking for.
+  and `allowed_base_urls` blocks in `solx-package.json` are a complete list
+  of the shell access and outbound hosts it's asking for.
 - **Scope MCP catalogues.** `SOLX_MCP_PATH_PREFIX` limits an MCP instance to
   one path subtree. Give a model the smallest catalogue that does its job
   rather than every action you own.

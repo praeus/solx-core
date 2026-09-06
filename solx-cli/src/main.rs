@@ -58,7 +58,17 @@ enum Commands {
     /// Fetch an entity.
     Get { entity: Entity, reference: String },
     /// Delete an entity.
-    Delete { entity: Entity, reference: String },
+    Delete {
+        entity: Entity,
+        reference: String,
+        /// Treat a missing entity as success instead of an error. Teardown
+        /// scripts (a package's `uninstall.solx`) run statement-by-statement
+        /// and abort on the first failure, so without this a single entity an
+        /// older package version never registered leaves the package
+        /// half-torn-down.
+        #[arg(long = "if-exists")]
+        if_exists: bool,
+    },
     /// Execute an action.
     Exec {
         /// Action reference `/path/name`.
@@ -105,7 +115,7 @@ enum Commands {
         #[arg(short = 'f', long)]
         file: Option<String>,
     },
-    /// Install a package directory (package.json + install.solx).
+    /// Install a package directory (solx-package.json + install.solx).
     InstallPackage { path: String },
     /// Uninstall a package by name.
     UninstallPackage { name: String },
@@ -231,7 +241,9 @@ async fn run_command(app: &Arc<App>, command: Commands, piped: Option<Value>) ->
             file,
         } => handle_save(app, entity, reference, json, type_ref, file, piped).await,
         Commands::Get { entity, reference } => handle_get(app, entity, reference).await,
-        Commands::Delete { entity, reference } => handle_delete(app, entity, reference).await,
+        Commands::Delete { entity, reference, if_exists } => {
+            handle_delete(app, entity, reference, if_exists).await
+        }
         Commands::Exec { reference, json, no_console } => {
             handle_exec(app, reference, json, piped, no_console).await
         }
@@ -360,19 +372,36 @@ async fn handle_get(app: &Arc<App>, entity: Entity, reference: String) -> Result
     }
 }
 
-async fn handle_delete(app: &Arc<App>, entity: Entity, reference: String) -> Result<Value> {
-    if let Entity::File = entity {
-        app.files().delete(&reference).await.map_err(to_anyhow)?;
+async fn handle_delete(
+    app: &Arc<App>,
+    entity: Entity,
+    reference: String,
+    if_exists: bool,
+) -> Result<Value> {
+    let outcome = if let Entity::File = entity {
+        app.files().delete(&reference).await
     } else {
         let (path, name) = split_ref(&reference).map_err(to_anyhow)?;
         match entity {
-            Entity::Doc => app.docs().delete(&path, &name).await.map_err(to_anyhow)?,
-            Entity::Action => app.actions().delete(&path, &name).await.map_err(to_anyhow)?,
-            Entity::Type => app.types().delete(&path, &name).await.map_err(to_anyhow)?,
+            Entity::Doc => app.docs().delete(&path, &name).await,
+            Entity::Action => app.actions().delete(&path, &name).await,
+            Entity::Type => app.types().delete(&path, &name).await,
             Entity::File => unreachable!(),
         }
+    };
+    match outcome {
+        Ok(()) => Ok(serde_json::json!({
+            "deleted": true,
+            "message": format!("deleted '{reference}'"),
+        })),
+        // `--if-exists`: a missing entity is not a failure, so a teardown
+        // script keeps going instead of aborting half-done.
+        Err(SolxError::NotFound(_)) if if_exists => Ok(serde_json::json!({
+            "deleted": false,
+            "message": format!("'{reference}' not found; skipped"),
+        })),
+        Err(e) => Err(to_anyhow(e)),
     }
-    Ok(serde_json::json!({ "message": format!("deleted '{reference}'") }))
 }
 
 async fn handle_exec(

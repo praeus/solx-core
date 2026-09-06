@@ -16,6 +16,7 @@ mod exec;
 pub mod internal;
 pub mod loopback;
 mod mask;
+pub mod net;
 pub mod script;
 mod seed;
 pub mod secrets;
@@ -38,7 +39,7 @@ use solx_surface::error::{Result, SolxError};
 use solx_surface::internal_actions::{ActionExecutor, InternalActionRegistry};
 use solx_surface::managers::{ActionManager, DocManager, FileStore, TypeManager};
 use solx_surface::path::{full_ref, normalize_path, validate_name};
-use solx_surface::query::{ActionSearchQuery, ListOptions, ListSchema, Page};
+use solx_surface::query::{ActionSearchQuery, ListOptions, ListSchema, Page, PathFacet, SortOrder};
 use tokio::task::AbortHandle;
 use uuid::Uuid;
 
@@ -703,6 +704,43 @@ impl ActionManager for LocalActionManager {
         Ok(Page::new(items, total, limit, offset))
     }
 
+    async fn paths(&self, opts: ListOptions) -> Result<Page<PathFacet>> {
+        let conn = self.db.connect().await?;
+        let limit = opts.limit_or(DEFAULT_LIMIT);
+        let offset = opts.offset_or_zero();
+
+        let q = opts.to_sql(LIST_SCHEMA)?;
+        let binds: Vec<libsql::Value> =
+            q.binds.iter().cloned().map(libsql::Value::from).collect();
+        let dir = match opts.sort_order {
+            SortOrder::Desc => "DESC",
+            SortOrder::Asc => "ASC",
+        };
+
+        let total = {
+            let sql = format!("SELECT COUNT(DISTINCT path) FROM actions{}", q.where_clause);
+            let mut rows = conn.query(&sql, binds.clone()).await.map_err(map_db)?;
+            rows.next()
+                .await
+                .map_err(map_db)?
+                .map(|r| r.get::<i64>(0).unwrap_or(0))
+                .unwrap_or(0) as usize
+        };
+
+        let sql = format!(
+            "SELECT path, COUNT(*) FROM actions{} GROUP BY path ORDER BY path {dir} LIMIT {limit} OFFSET {offset}",
+            q.where_clause
+        );
+        let mut rows = conn.query(&sql, binds).await.map_err(map_db)?;
+        let mut items = Vec::new();
+        while let Some(row) = rows.next().await.map_err(map_db)? {
+            let path: String = row.get(0).map_err(map_db)?;
+            let count: i64 = row.get(1).map_err(map_db)?;
+            items.push(PathFacet { path, count: count as usize });
+        }
+        Ok(Page::new(items, total, limit, offset))
+    }
+
     /// Free-text search over `path`/`name`/`caption`/`description`/
     /// `category`/`phrases`, composed with the same `path_prefix`/
     /// `filter_field`/date filters as [`Self::list`] (rendered once via
@@ -1262,6 +1300,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn paths_groups_by_path_with_counts() {
+        let (_d, _c, m) = setup().await;
+        seed_list_fixtures(&m).await;
+
+        // /tools has two actions, /other has one -- `paths` groups by path,
+        // so `total` counts distinct paths, not rows.
+        let page = m
+            .paths(ListOptions { path_prefix: Some("/tools".into()), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].path, "/tools");
+        assert_eq!(page.items[0].count, 2);
+    }
+
+    #[tokio::test]
     async fn search_matches_caption_via_fts() {
         let (_d, _c, m) = setup().await;
         seed_list_fixtures(&m).await;
@@ -1506,11 +1561,9 @@ mod tests {
         .unwrap();
     }
 
-    /// Appends `prefix` to the `allowed_webhook_base_urls` allowlist.
+    /// Appends `prefix` to the `allowed_base_urls` allowlist.
     fn allow_webhook_prefix(cfg: &ConfigService, prefix: &str) {
-        let mut list = cfg.allowed_webhook_base_urls();
-        list.push(prefix.to_string());
-        cfg.set_allowed_webhook_base_urls(list).unwrap();
+        cfg.add_allowed_base_url(prefix).unwrap();
     }
 
     fn cfg_with_secret(key: &str) -> Value {
@@ -1889,7 +1942,7 @@ mod tests {
         .unwrap();
 
         let err = m.exec("/tools", "hook", serde_json::json!({})).await.unwrap_err();
-        assert!(err.to_string().contains("allowed_webhook_base_urls"), "{err}");
+        assert!(err.to_string().contains("allowed_base_urls"), "{err}");
 
         let entries = m.console().read("/tools/hook", None, 10).await.unwrap().entries;
         assert!(entries.is_empty(), "{entries:?}");

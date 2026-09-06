@@ -46,6 +46,12 @@ pub(super) async fn doc_list(params: &Value, docs: &Arc<dyn DocManager>) -> Resu
     to_value(&page)
 }
 
+pub(super) async fn doc_paths(params: &Value, docs: &Arc<dyn DocManager>) -> Result<Value, String> {
+    let opts: ListOptions = parse_input(params)?;
+    let page = docs.paths(opts).await.map_err(|e| e.to_string())?;
+    to_value(&page)
+}
+
 // ── type CRUD ────────────────────────────────────────────────────────────────
 
 pub(super) async fn type_save(params: &Value, types: &Arc<dyn TypeManager>) -> Result<Value, String> {
@@ -73,13 +79,32 @@ pub(super) async fn type_list(params: &Value, types: &Arc<dyn TypeManager>) -> R
     to_value(&page)
 }
 
+pub(super) async fn type_paths(params: &Value, types: &Arc<dyn TypeManager>) -> Result<Value, String> {
+    let opts: ListOptions = parse_input(params)?;
+    let page = types.paths(opts).await.map_err(|e| e.to_string())?;
+    to_value(&page)
+}
+
 // ── action CRUD ──────────────────────────────────────────────────────────────
 //
 // `action_save` / `action_delete` apply the executable-action guard that
 // closes MCP/guest/script routes to creating, modifying, or removing
-// Command and Webhook actions. The same check is performed by the CLI,
-// MCP, and HTTP surfaces — see `super::guard_executable_action` for the
-// shared helper.
+// Command and Webhook actions — see `super::guard_executable_action`.
+//
+// The guard lives *here*, on the built-in, rather than in the managers,
+// because this built-in is the only route to action creation those callers
+// have: a WASM guest imports nothing but `action-exec`, a `.solx` script
+// composes actions, and an MCP client calls action rows. Everything they can
+// do arrives through this function.
+//
+// The CLI and the HTTP surface deliberately do **not** go through it, and so
+// are not guarded. Both call `ActionManager::save` directly, which is what
+// lets `solx save action` register a Command, and equally what lets
+// solx-web's action editor and solx-quickjs write rows over
+// `PUT /actions/{ref}`. That is the intended posture, not an oversight:
+// holding `server_token` already makes a caller a CLI-equivalent admin, so
+// there is nothing left for a guard on that route to protect. See
+// SECURITY.md — "Treat a solx instance as running with your own privileges."
 
 pub(super) async fn action_save(params: &Value, actions: &Arc<dyn ActionManager>) -> Result<Value, String> {
     let name = require_str(params, "name")?;
@@ -154,6 +179,12 @@ pub(super) async fn action_delete(params: &Value, actions: &Arc<dyn ActionManage
 pub(super) async fn action_list(params: &Value, actions: &Arc<dyn ActionManager>) -> Result<Value, String> {
     let opts: ListOptions = parse_input(params)?;
     let page = actions.list(opts).await.map_err(|e| e.to_string())?;
+    to_value(&page)
+}
+
+pub(super) async fn action_paths(params: &Value, actions: &Arc<dyn ActionManager>) -> Result<Value, String> {
+    let opts: ListOptions = parse_input(params)?;
+    let page = actions.paths(opts).await.map_err(|e| e.to_string())?;
     to_value(&page)
 }
 

@@ -1,23 +1,32 @@
 //! `solx-packages` — install/uninstall solx packages.
 //!
-//! A package is a directory containing `package.json` (at least `name`, and a
-//! `version`) and an `install.solx` script (and optionally `uninstall.solx`).
+//! A package is a directory containing `solx-package.json` (at least `name`,
+//! and a `version`) and an `install.solx` script (and optionally
+//! `uninstall.solx`).
+//!
+//! The manifest used to be `package.json`, which is npm's file. Most package
+//! directories here are Rust or wasm and were never node projects, so a
+//! `package.json` in them misled every tool that saw one; the directories that
+//! *are* node projects now keep the two manifests apart instead of overloading
+//! shared keys like `name` and `version`, whose rules differ between the two.
+//! `package.json` is still read as a fallback (with a warning) so third-party
+//! packages keep installing.
 //! Installation runs the script through [`solx_scripts`] against the CLI's
 //! command runner, then records the package in `solx-config.json`.
 //!
 //! ## Command/Webhook allowlist grants
 //!
-//! `solx-actions/src/exec.rs`'s `Command`/`Webhook` allowlist is
-//! deny-by-default (see `docs/next-steps.md` §1): a Command action's
-//! `fn_name` must be a key registered in `command_actions`, and a Webhook
-//! action's URL must match a prefix in `allowed_webhook_base_urls`. A
-//! package that itself registers such actions in its `install.solx` needs
-//! its own entries granted, or every one of its actions is unusable the
-//! moment it's installed.
+//! solx's outbound allowlists are deny-by-default (see `docs/next-steps.md`
+//! §1): a Command action's `fn_name` must be a key registered in
+//! `command_actions`, and any outbound URL — a Webhook action's, or one
+//! handed to a `/builtin/web/*` built-in — must match a prefix in
+//! `allowed_base_urls`. A package that registers such actions in its
+//! `install.solx`, or that reaches the network from a wasm guest, needs its
+//! own entries granted, or it is unusable the moment it's installed.
 //!
-//! `package.json` may declare `command_actions` and
-//! `allowed_webhook_base_urls` in the exact same shape as
-//! `solx-config.json` itself (see [`solx_config::CommandDef`]).
+//! `solx-package.json` may declare `command_actions` and `allowed_base_urls`
+//! in the exact same shape as `solx-config.json` itself (see
+//! [`solx_config::CommandDef`]).
 //! [`install_package`] grants every declared entry into the global
 //! allowlist before running `install.solx` (so the script — or a later
 //! `verify.solx` — can exec the package's own actions), and records exactly
@@ -35,7 +44,7 @@
 //! Existing packages predating this feature (or a manifest with neither
 //! field) are simply not affected — reinstalling is how they pick up
 //! allowlist grants, exactly as before this feature existed for anything
-//! else in `package.json`.
+//! else in the manifest.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -56,25 +65,50 @@ pub struct InstallOutcome {
     pub warnings: Vec<String>,
 }
 
-/// A `package.json`'s allowlist declarations, parsed once and reused for
-/// both granting (install) and the `InstalledPackage.granted_*` record.
+/// The manifest filename, and the npm-owned name still accepted as a
+/// fallback so packages written before the split keep installing.
+const MANIFEST: &str = "solx-package.json";
+const MANIFEST_LEGACY: &str = "package.json";
+
+/// A manifest's allowlist declarations, parsed once and reused for both
+/// granting (install) and the `InstalledPackage.granted_*` record.
 struct Grants {
     commands: HashMap<String, CommandDef>,
-    webhook_prefixes: Vec<String>,
+    base_urls: Vec<String>,
 }
 
-fn parse_grants(meta: &serde_json::Value) -> Result<Grants> {
+fn parse_grants(meta: &serde_json::Value, file: &str) -> Result<Grants> {
     let commands: HashMap<String, CommandDef> = match meta.get("command_actions") {
         Some(v) if !v.is_null() => serde_json::from_value(v.clone())
-            .map_err(|e| SolxError::Invalid(format!("package.json 'command_actions': {e}")))?,
+            .map_err(|e| SolxError::Invalid(format!("{file} 'command_actions': {e}")))?,
         _ => HashMap::new(),
     };
-    let webhook_prefixes: Vec<String> = match meta.get("allowed_webhook_base_urls") {
-        Some(v) if !v.is_null() => serde_json::from_value(v.clone())
-            .map_err(|e| SolxError::Invalid(format!("package.json 'allowed_webhook_base_urls': {e}")))?,
-        _ => Vec::new(),
+    // `allowed_webhook_base_urls` is the former spelling, still read for the
+    // same reason the config key is — see `solx_config`'s `merged_base_urls`.
+    let (key, raw) = match meta.get("allowed_base_urls") {
+        Some(v) if !v.is_null() => ("allowed_base_urls", Some(v)),
+        _ => match meta.get("allowed_webhook_base_urls") {
+            Some(v) if !v.is_null() => ("allowed_webhook_base_urls", Some(v)),
+            _ => ("allowed_base_urls", None),
+        },
     };
-    Ok(Grants { commands, webhook_prefixes })
+    let base_urls: Vec<String> = match raw {
+        Some(v) => serde_json::from_value(v.clone())
+            .map_err(|e| SolxError::Invalid(format!("{file} '{key}': {e}")))?,
+        None => Vec::new(),
+    };
+    Ok(Grants { commands, base_urls })
+}
+
+/// Locate the package manifest, preferring [`MANIFEST`]. Returns the path,
+/// its filename (for error messages), and whether the legacy name was used.
+fn manifest_path(dir: &Path) -> (std::path::PathBuf, &'static str, bool) {
+    let current = dir.join(MANIFEST);
+    if current.exists() {
+        (current, MANIFEST, false)
+    } else {
+        (dir.join(MANIFEST_LEGACY), MANIFEST_LEGACY, true)
+    }
 }
 
 /// Install the package at `dir`: grant its declared allowlist entries, run
@@ -84,7 +118,7 @@ pub async fn install_package(
     config: &ConfigService,
     dir: &Path,
 ) -> Result<InstallOutcome> {
-    let meta_path = dir.join("package.json");
+    let (meta_path, meta_file, legacy_manifest) = manifest_path(dir);
     let install_path = dir.join("install.solx");
 
     let meta_str = std::fs::read_to_string(&meta_path)
@@ -94,20 +128,35 @@ pub async fn install_package(
         .get("name")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| SolxError::Invalid("package.json missing 'name'".into()))?
+        .ok_or_else(|| SolxError::Invalid(format!("{meta_file} missing 'name'")))?
         .to_string();
     let version = meta
         .get("version")
         .and_then(|v| v.as_str())
         .unwrap_or("0.0.0")
         .to_string();
-    let grants = parse_grants(&meta)?;
+    let grants = parse_grants(&meta, meta_file)?;
+
+    let mut warnings = Vec::new();
+    if legacy_manifest {
+        let msg = format!(
+            concat!(
+                "package '{name}' has no {manifest}; read its manifest from ",
+                "{legacy} instead. Rename it: {legacy} is npm's file, and ",
+                "solx will stop falling back to it."
+            ),
+            name = name,
+            manifest = MANIFEST,
+            legacy = MANIFEST_LEGACY
+        );
+        tracing::warn!("{msg}");
+        warnings.push(msg);
+    }
 
     // Grant before running the script, so install.solx (or a later
     // verify.solx) can exec the package's own Command/Webhook actions.
     // Collisions with a *different* installed package are warned about,
     // not fatal — see the module doc.
-    let mut warnings = Vec::new();
     let others: Vec<InstalledPackage> =
         config.list_packages().into_iter().filter(|p| p.name != name).collect();
 
@@ -122,18 +171,17 @@ pub async fn install_package(
         }
         config.register_command(key, def.clone())?;
     }
-    for prefix in &grants.webhook_prefixes {
-        if let Some(owner) =
-            others.iter().find(|p| p.granted_webhook_prefixes.iter().any(|p| p == prefix))
+    for prefix in &grants.base_urls {
+        if let Some(owner) = others.iter().find(|p| p.granted_base_urls.iter().any(|p| p == prefix))
         {
             let msg = format!(
-                "webhook prefix '{prefix}' was granted by package '{}'; now also granted to '{name}'",
+                "base URL prefix '{prefix}' was granted by package '{}'; now also granted to '{name}'",
                 owner.name
             );
             tracing::warn!("{msg}");
             warnings.push(msg);
         }
-        config.add_allowed_webhook_base_url(prefix)?;
+        config.add_allowed_base_url(prefix)?;
     }
 
     let script = std::fs::read_to_string(&install_path)
@@ -151,7 +199,7 @@ pub async fn install_package(
             .into_owned(),
         installed_at: chrono::Utc::now().to_rfc3339(),
         granted_commands: grants.commands.into_keys().collect(),
-        granted_webhook_prefixes: grants.webhook_prefixes,
+        granted_base_urls: grants.base_urls,
     };
     config.register_package(pkg.clone())?;
     Ok(InstallOutcome { package: pkg, warnings })
@@ -188,9 +236,9 @@ pub async fn uninstall_package(
             config.deregister_command(key)?;
         }
     }
-    for prefix in &pkg.granted_webhook_prefixes {
-        if !others.iter().any(|p| p.granted_webhook_prefixes.iter().any(|p| p == prefix)) {
-            config.remove_allowed_webhook_base_url(prefix)?;
+    for prefix in &pkg.granted_base_urls {
+        if !others.iter().any(|p| p.granted_base_urls.iter().any(|p| p == prefix)) {
+            config.remove_allowed_base_url(prefix)?;
         }
     }
 

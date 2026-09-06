@@ -36,6 +36,57 @@ fn merged_exclude(cfg: &SolxConfig) -> Vec<ToolRule> {
     rules
 }
 
+/// The outbound-host allowlist: `allowed_base_urls` plus anything still
+/// under the former `allowed_webhook_base_urls` key. Same shape and same
+/// reasoning as [`merged_exclude`] — an existing config keeps working
+/// without a migration pass over the file.
+fn merged_base_urls(cfg: &SolxConfig) -> Vec<String> {
+    let mut list = cfg.allowed_base_urls.clone().unwrap_or_default();
+    for prefix in cfg.allowed_webhook_base_urls.clone().unwrap_or_default() {
+        if !list.iter().any(|p| *p == prefix) {
+            list.push(prefix);
+        }
+    }
+    list
+}
+
+/// Read both spellings out of a raw config object, current first.
+///
+/// The mutators below work on the raw JSON rather than a [`SolxConfig`], so
+/// they cannot lean on [`merged_base_urls`]. Pairing this with
+/// [`write_base_urls`] is what keeps a legacy config from ending up with its
+/// grants split across two keys.
+fn read_base_urls(obj: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    let mut list: Vec<String> = obj
+        .get(KEY_BASE_URLS)
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let legacy: Vec<String> = obj
+        .get(KEY_BASE_URLS_LEGACY)
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    for prefix in legacy {
+        if !list.iter().any(|p| *p == prefix) {
+            list.push(prefix);
+        }
+    }
+    list
+}
+
+/// Write the allowlist under the current key and drop the legacy one, so a
+/// config converges on a single key the first time it is mutated.
+fn write_base_urls(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    list: Vec<String>,
+) -> Result<()> {
+    obj.insert(KEY_BASE_URLS.into(), serde_json::to_value(list)?);
+    obj.remove(KEY_BASE_URLS_LEGACY);
+    Ok(())
+}
+
+const KEY_BASE_URLS: &str = "allowed_base_urls";
+const KEY_BASE_URLS_LEGACY: &str = "allowed_webhook_base_urls";
+
 const CONFIG_FILE: &str = "solx-config.json";
 
 /// Default port `solx-server` binds on `127.0.0.1` when `server_port` isn't
@@ -423,10 +474,11 @@ impl ConfigService {
         })
     }
 
-    /// URL prefixes a `Webhook` action's `fn_name` must start with.
-    /// Deny-by-default: unset or empty means no URL is permitted.
-    pub fn allowed_webhook_base_urls(&self) -> Vec<String> {
-        self.snapshot().allowed_webhook_base_urls.unwrap_or_default()
+    /// URL prefixes an outbound request must start with — a `Webhook`
+    /// action's `fn_name`, or the URL handed to one of the `/builtin/web/*`
+    /// built-ins. Deny-by-default: unset or empty means no URL is permitted.
+    pub fn allowed_base_urls(&self) -> Vec<String> {
+        merged_base_urls(&self.snapshot())
     }
 
     /// The configured tool-catalogue exclusion rules: `tool_exclude` plus
@@ -451,9 +503,9 @@ impl ConfigService {
         ToolPolicy::new(hidden, cfg.tool_destructive.clone().unwrap_or_default())
     }
 
-    /// Replace the webhook base-URL allowlist wholesale.
-    pub fn set_allowed_webhook_base_urls(&self, list: Vec<String>) -> Result<()> {
-        self.set("allowed_webhook_base_urls", serde_json::to_value(list)?)
+    /// Replace the outbound base-URL allowlist wholesale.
+    pub fn set_allowed_base_urls(&self, list: Vec<String>) -> Result<()> {
+        self.mutate(|obj| write_base_urls(obj, list))
     }
 
     /// Remove a single `command_actions` entry. No-op if `key` isn't present.
@@ -471,31 +523,23 @@ impl ConfigService {
         })
     }
 
-    /// Append `prefix` to the webhook allowlist if not already present.
-    pub fn add_allowed_webhook_base_url(&self, prefix: &str) -> Result<()> {
+    /// Append `prefix` to the outbound allowlist if not already present.
+    pub fn add_allowed_base_url(&self, prefix: &str) -> Result<()> {
         self.mutate(|obj| {
-            let mut list: Vec<String> = obj
-                .get("allowed_webhook_base_urls")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
+            let mut list = read_base_urls(obj);
             if !list.iter().any(|p| p == prefix) {
                 list.push(prefix.to_string());
             }
-            obj.insert("allowed_webhook_base_urls".into(), serde_json::to_value(list)?);
-            Ok(())
+            write_base_urls(obj, list)
         })
     }
 
-    /// Remove a single webhook base-URL prefix. No-op if not present.
-    pub fn remove_allowed_webhook_base_url(&self, prefix: &str) -> Result<()> {
+    /// Remove a single outbound base-URL prefix. No-op if not present.
+    pub fn remove_allowed_base_url(&self, prefix: &str) -> Result<()> {
         self.mutate(|obj| {
-            let mut list: Vec<String> = obj
-                .get("allowed_webhook_base_urls")
-                .and_then(|v| serde_json::from_value(v.clone()).ok())
-                .unwrap_or_default();
+            let mut list = read_base_urls(obj);
             list.retain(|p| p != prefix);
-            obj.insert("allowed_webhook_base_urls".into(), serde_json::to_value(list)?);
-            Ok(())
+            write_base_urls(obj, list)
         })
     }
 
@@ -606,7 +650,7 @@ mod tests {
             path: "/p".into(),
             installed_at: "now".into(),
             granted_commands: vec![],
-            granted_webhook_prefixes: vec![],
+            granted_base_urls: vec![],
         })
         .unwrap();
         assert_eq!(cfg.list_packages().len(), 1);
@@ -621,7 +665,7 @@ mod tests {
 
         // Deny-by-default: nothing registered yet.
         assert!(cfg.command_actions().is_empty());
-        assert!(cfg.allowed_webhook_base_urls().is_empty());
+        assert!(cfg.allowed_base_urls().is_empty());
 
         cfg.register_command(
             "compress-pdf",
@@ -635,9 +679,62 @@ mod tests {
         let map = cfg.command_actions();
         assert_eq!(map["compress-pdf"].command, "gs -o out.pdf in.pdf");
 
-        cfg.set_allowed_webhook_base_urls(vec!["https://hooks.example.com".into()])
+        cfg.set_allowed_base_urls(vec!["https://hooks.example.com".into()])
             .unwrap();
-        assert_eq!(cfg.allowed_webhook_base_urls(), vec!["https://hooks.example.com".to_string()]);
+        assert_eq!(cfg.allowed_base_urls(), vec!["https://hooks.example.com".to_string()]);
+    }
+
+    /// A config written before the rename must keep working untouched — the
+    /// same guarantee `mcp_exclude` gets from `merged_exclude`.
+    #[test]
+    fn legacy_webhook_key_is_still_read_and_unions_with_the_current_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ConfigService::open_in(dir.path()).unwrap();
+
+        cfg.set("allowed_webhook_base_urls", serde_json::json!(["https://legacy.example.com/"]))
+            .unwrap();
+        assert_eq!(cfg.allowed_base_urls(), vec!["https://legacy.example.com/".to_string()]);
+
+        cfg.set("allowed_base_urls", serde_json::json!(["https://current.example.com/"]))
+            .unwrap();
+        let merged = cfg.allowed_base_urls();
+        assert!(merged.contains(&"https://current.example.com/".to_string()));
+        assert!(merged.contains(&"https://legacy.example.com/".to_string()));
+    }
+
+    /// The mutators read raw JSON rather than a typed snapshot, so the legacy
+    /// key has to be folded in and dropped by hand. If it isn't, grants split
+    /// across two keys and `remove` fails to revoke.
+    #[test]
+    fn mutating_folds_the_legacy_key_into_the_current_one_and_drops_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ConfigService::open_in(dir.path()).unwrap();
+
+        cfg.set("allowed_webhook_base_urls", serde_json::json!(["https://legacy.example.com/"]))
+            .unwrap();
+        cfg.add_allowed_base_url("https://added.example.com/").unwrap();
+
+        let snap = cfg.snapshot();
+        assert!(snap.allowed_webhook_base_urls.is_none(), "legacy key should be gone");
+        let current = snap.allowed_base_urls.unwrap();
+        assert!(current.contains(&"https://legacy.example.com/".to_string()));
+        assert!(current.contains(&"https://added.example.com/".to_string()));
+
+        // The fold is what makes this revoke reach a legacy-written prefix.
+        cfg.remove_allowed_base_url("https://legacy.example.com/").unwrap();
+        assert_eq!(cfg.allowed_base_urls(), vec!["https://added.example.com/".to_string()]);
+    }
+
+    /// Package rows recorded before the rename must still deserialize, or
+    /// `uninstall_package` revokes nothing.
+    #[test]
+    fn installed_package_reads_the_legacy_granted_field_name() {
+        let row: InstalledPackage = serde_json::from_value(serde_json::json!({
+            "name": "solx-example",
+            "granted_webhook_prefixes": ["https://legacy.example.com/"],
+        }))
+        .unwrap();
+        assert_eq!(row.granted_base_urls, vec!["https://legacy.example.com/".to_string()]);
     }
 
     #[test]

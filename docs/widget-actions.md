@@ -69,10 +69,16 @@ bearer token is the gate, so a browser page can drive all of it directly.
 
 ---
 
-## 3. Mounting one (the solx-web half — still to be built)
+## 3. Mounting one (the solx-web half — implemented)
+
+Built as `solx-packages/solx-widgets` (a shared TS toolkit, not an
+installable solx package) plus the first real widget content package,
+`solx-packages/solx-agent`. See `solx-widgets/README.md` for the full
+contract; summary of how each step below landed:
 
 1. After an `exec`, check `action.resultTypeRef ===
    '/builtin/types/WidgetDescriptor'`; if so, treat `result` as a descriptor.
+   (`solx-web/web/src/components/ActionRunner.tsx`'s `isWidgetDescriptor`.)
 2. Fetch the bundle. `@solx/http`'s `files.get(relPath): Promise<Uint8Array>`
    already does this. It is a fetch rather than a `<script src>` because
    `GET /files/{path}` requires the bearer header, which a script tag cannot
@@ -83,14 +89,33 @@ bearer token is the gate, so a browser page can drive all of it directly.
    try { await import(/* @vite-ignore */ url); } finally { URL.revokeObjectURL(url); }
    ```
    Dedupe by `bin_name` so a bundle is imported once per page.
+   (`solx-widgets/src/host/mountWidget.ts`.)
 3. `document.createElement(d.tag_name)`, assign `el.fields = d.fields`, and
    inject a scoped client so the element can call back in — a `connectHttp`
    façade narrowed to what the widget should reach.
+   (`mountWidget.ts` also assigns `el.solxClient`; `solx-widgets/src/wrap/defineReactWidget.tsx`
+   threads it through React context, read via `useSolxWidgetClient()` from
+   `solx-widgets/src/wrap/SolxWidgetContext.tsx`. Currently scoped to just
+   `{ actions: { exec(path, name, params?) } }` — the one capability asked
+   for so far; additive, so more can be exposed later.
+   Worth being explicit: this is an ergonomic/discoverable API, not a new
+   security boundary. A widget bundle mounts into a shadow root, not an
+   iframe, so it runs in the same JS realm as its host and could already
+   reach the host's own token/storage directly if it wanted to — consistent
+   with the existing "packages are trusted" posture in
+   `solx-packages/README.md`'s Security section, not a regression.)
 4. The widget invokes actions for everything else. For long-running work,
    `/builtin/action/start` then `/builtin/action/poll` with `wait_secs`.
 
 Bundles are expected to be self-contained single-file ESM: a blob URL has no
 useful base, so relative imports inside the bundle will not resolve.
+(`solx-widgets/src/build/widgetViteConfig.ts` produces exactly that shape,
+including injecting CSS at runtime rather than emitting a separate asset —
+needed for the same reason. React itself also needs `define:
+{ "process.env.NODE_ENV": ... }` set explicitly in that config: a blob-URL
+bundle never runs through Vite's own app-build replacement of
+`process.env.NODE_ENV`, so an unreplaced reference throws `process is not
+defined` in the browser, which has no such global.)
 
 ---
 

@@ -61,8 +61,10 @@ here, so the boundaries are explicit:
   string, only a pointer to an out-of-band, admin-approved definition. An
   unregistered key is refused, including when the allowlist is entirely
   unset.
-- **Deny-by-default webhook allowlist.** A `webhook` action's URL must match
-  a prefix in `allowed_webhook_base_urls`.
+- **Deny-by-default outbound allowlist.** Every outbound URL — a `webhook`
+  action's, and any handed to `/builtin/web/http_request`,
+  `/builtin/web/stream/start` or `/builtin/web/open_url` — must match a
+  prefix in `allowed_base_urls`. One check, in `solx-actions::net`.
 - **Guests cannot self-grant.** `entity_save_action` refuses to create,
   modify, or delete `command` and `webhook` actions. That built-in is the
   only route to action creation available to an MCP client, a WASM guest, or
@@ -157,6 +159,28 @@ cargo run -p solx-mcp            # or stdio
 `solx-server`'s bearer token lives in `solx-config.json` as `server_token`,
 generated on first start. See [solx-cli/examples/](solx-cli/examples/) for
 runnable end-to-end scripts covering each action kind.
+
+### Check the running server is not stale
+
+If you copy the built binaries somewhere on your `PATH` rather than running
+them out of `target/release`, the copy can fall behind the source silently.
+That failure mode is nasty: a stale `solx-server` still accepts requests,
+still writes rows, and still answers plausibly — using code paths the source
+no longer has. One that predated the FTS5 conversion kept its own Tantivy
+index, so its own searches worked while nothing else could see what it wrote.
+
+`/health` is unauthenticated and reports what the binary was built from:
+
+```sh
+curl -s http://127.0.0.1:8766/health
+# {"status":"ok","version":"0.1.0","commit":"364077aac950","commit_date":"..."}
+
+git rev-parse --short=12 HEAD    # must match `commit`
+```
+
+A `-dirty` suffix means it was built from a tree with uncommitted changes, so
+the commit alone does not describe it. If `commit` disagrees with `HEAD`,
+rebuild and redeploy before trusting anything the server tells you.
 
 ## Storage
 

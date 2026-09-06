@@ -11,6 +11,7 @@
 use std::process::Command;
 
 use serde_json::{json, Value};
+use solx_config::ConfigService;
 
 use super::require_str;
 
@@ -19,11 +20,15 @@ use super::require_str;
 /// `url` must be a non-empty string. The launch runs detached and the
 /// function returns immediately — the caller does **not** wait for the
 /// browser to close.
-pub(super) async fn open_url(params: &Value) -> Result<Value, String> {
+pub(super) async fn open_url(params: &Value, cfg: &ConfigService) -> Result<Value, String> {
     let url = require_str(params, "url")?;
     if url.trim().is_empty() {
         return Err("open_url: 'url' must not be empty".into());
     }
+    // Gated like every other outbound path. This one hands the URL to the
+    // user's real browser session, so `file:`/`javascript:`/`about:` are
+    // refused outright rather than prefix-matched — see `crate::net`.
+    crate::net::check_outbound_url(cfg, url).map_err(|e| e.to_string())?;
 
     let (program, args): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
         ("open", vec![url])

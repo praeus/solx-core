@@ -32,6 +32,12 @@ use tower_http::cors::CorsLayer;
 
 use state::AppState;
 
+/// What this binary was built from. Stamped by `build.rs` and reported by
+/// `/health`, because a stale server is otherwise indistinguishable from a
+/// current one until something behaves impossibly.
+pub const BUILD_COMMIT: &str = env!("SOLX_BUILD_COMMIT");
+pub const BUILD_COMMIT_DATE: &str = env!("SOLX_BUILD_COMMIT_DATE");
+
 /// Build the full router: an unauthenticated `/health`, plus every data
 /// route behind the bearer-auth middleware.
 ///
@@ -50,7 +56,20 @@ pub fn build_router(state: AppState) -> Router {
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_bearer));
 
     Router::new()
-        .route("/health", get(|| async { "ok" }))
+        // Stays unauthenticated, and deliberately reports only what the
+        // binary was built from -- enough to spot a stale server, nothing
+        // about the data it holds.
+        .route(
+            "/health",
+            get(|| async {
+                axum::Json(serde_json::json!({
+                    "status": "ok",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "commit": BUILD_COMMIT,
+                    "commit_date": BUILD_COMMIT_DATE,
+                }))
+            }),
+        )
         .merge(protected)
         .layer(CorsLayer::permissive())
         .with_state(state)

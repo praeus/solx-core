@@ -74,6 +74,9 @@ fn registry() -> &'static Mutex<Registry> {
 
 pub(super) async fn start(params: &Value, config: &Arc<ConfigService>) -> Result<Value, String> {
     let url = require_str(params, "url")?.to_string();
+    // Before the request is sent, so a denied URL opens no connection and
+    // registers no stream. Same gate webhook actions and `http_request` use.
+    crate::net::check_outbound_url(config, &url).map_err(|e| e.to_string())?;
     let method = params
         .get("method")
         .and_then(Value::as_str)

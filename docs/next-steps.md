@@ -146,6 +146,45 @@ workflow requested.
   the actual (previously-built) `solx-omniparse-process-file.exe` returned
   `success: true`.
 
+### Later: the allowlist widened past webhooks, and was renamed
+
+The design above gated `webhook` *action rows* only, and the check lived
+inline in `run_webhook`. That left `/builtin/web/http_request`,
+`/builtin/web/stream/start` and `/builtin/web/open_url` completely ungated —
+an unrestricted, CORS-free egress proxy for anything that could exec an
+action (a WASM guest, an MCP client, a widget holding a bearer token). Since
+`http_request` is exactly how a wasm guest is *supposed* to reach the network
+(the guest world imports no sockets), that was the hole in the middle of the
+deny-by-default story.
+
+The check is now `solx-actions/src/net.rs`'s `check_outbound_url`, called by
+all four. Consequences worth recording:
+
+- The config key is `allowed_base_urls` — it is no longer webhook-specific.
+  `allowed_webhook_base_urls` is still read and unioned in
+  (`merged_base_urls`), the same treatment `mcp_exclude` gets from
+  `merged_exclude`, so an existing config keeps working. The accessor and
+  mutators renamed to match, and `InstalledPackage.granted_webhook_prefixes`
+  became `granted_base_urls` with a serde alias — without the alias, rows
+  written before the rename read as empty and uninstall revokes nothing.
+- `open_url` refuses any scheme but `http`/`https`, whatever the allowlist
+  says: `file:`/`javascript:`/`about:` carry no host for a prefix to
+  constrain, and it hands the URL to the user's real browser session.
+- Packages reaching the network from a guest now need grants of their own.
+  `solx-ollama` broke outright without one (it is the only path to Ollama);
+  `solx-livejournal`'s hotlinked userpic fetch degrades gracefully, being
+  best-effort already; `solx-google` needed `accounts.google.com` for
+  `open_url`, and lost the `open_url about:blank` in its login script's
+  missing-credentials guard, which the scheme check now refuses (the
+  `missing_client_id` result it returns already reports the problem).
+
+The package manifest was renamed in the same pass: `solx-package.json`, not
+`package.json`. Most package directories are Rust or wasm and were never node
+projects, so npm's filename in them misled every tool that saw one, and the
+directories that *are* node projects were about to have to overload `name`
+and `version`, whose rules differ between the two. `package.json` is still
+read as a fallback, with a warning.
+
 ---
 
 ## 2. Secrets masking review (solx-core) — do alongside #1

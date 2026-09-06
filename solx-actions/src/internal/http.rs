@@ -8,17 +8,24 @@
 //! by default and keeps the caller in control of the success/failure
 //! definition.
 //!
+//! The destination is gated by the same outbound allowlist webhook actions
+//! use (`crate::net::check_outbound_url`). Without it this built-in is an
+//! unrestricted, CORS-free egress proxy for anything that can exec an action.
+//!
 //! Body encoding follows the same `utf8`/`base64` convention as `file_put`
 //! and `file_get`. For methods that have no semantic body (`GET`, `HEAD`),
 //! reqwest itself drops the body — we don't pre-empt that.
 
 use base64::Engine as _;
 use serde_json::{json, Value};
+use solx_config::ConfigService;
 
 use super::require_str;
 
-pub(super) async fn http_request(params: &Value) -> Result<Value, String> {
+pub(super) async fn http_request(params: &Value, cfg: &ConfigService) -> Result<Value, String> {
     let url = require_str(params, "url")?;
+    // Before the client is built, so a denied URL opens no connection at all.
+    crate::net::check_outbound_url(cfg, &url).map_err(|e| e.to_string())?;
 
     let method = params
         .get("method")

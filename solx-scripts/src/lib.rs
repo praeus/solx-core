@@ -18,6 +18,17 @@
 //!   [`strip_comments`]). A `#` inside a single- or double-quoted substring
 //!   (e.g. a URL fragment in a JSON body) is left alone — only an unquoted
 //!   `#` starts a comment. There's no block-comment form.
+//! - **A literal `'` or `"` inside a quoted argument needs `'` / `\"`.**
+//!   [`strip_comments`], [`split_respecting_quotes`] and [`tokenize_stage`]
+//!   all honor the escape: inside a single-quoted argument (almost always a
+//!   `--json '{...}'` body), write `'` to get a literal apostrophe without
+//!   ending the argument. Getting this wrong is silent and severe rather than
+//!   a parse error: an *unescaped* `'` ends the argument right there, and
+//!   everything after it on the line becomes bare, unrelated tokens that
+//!   still form a syntactically valid (but wrong) statement. This is exactly
+//!   what broke an early package's `install.solx`. JSON itself never needs a
+//!   `'` escaped, so the unescaped text that reaches `serde_json` is valid
+//!   either way — the concern is purely the `.solx` layer around it.
 //! - **Every statement needs its own `;`, including control-flow keywords.**
 //!   Newlines are cosmetic — only `;` separates statements. `if $x == null`
 //!   followed by a newline and `$y = ...` on the next line is one merged
@@ -357,6 +368,45 @@ mod tests {
     fn quote_aware_tokenize() {
         let toks = tokenize_stage(r#"save doc /a --json '{"x": 1}'"#);
         assert_eq!(toks, vec!["save", "doc", "/a", "--json", r#"{"x": 1}"#]);
+    }
+
+    #[test]
+    fn tokenize_unescapes_a_quote_inside_the_matching_quote_kind() {
+        // `\'` inside single quotes and `\"` inside double quotes are literal
+        // quote characters, not delimiters -- this is what lets a JSON body
+        // wrapped in single quotes contain a real apostrophe.
+        let toks = tokenize_stage(r#"save doc /a --json '{"text":"can\'t stop"}'"#);
+        assert_eq!(
+            toks,
+            vec!["save", "doc", "/a", "--json", r#"{"text":"can't stop"}"#]
+        );
+    }
+
+    #[tokio::test]
+    async fn escaped_apostrophe_does_not_truncate_the_rest_of_the_argument() {
+        // The historical failure: an *unescaped* `'` inside a single-quoted
+        // argument ends the argument on the spot, and everything after it on
+        // the line becomes bare, unrelated tokens -- silently, since the
+        // result is still a syntactically valid statement. An early
+        // package's `install.solx` broke exactly this way. This locks in
+        // that escaping fixes it: a two-statement script where the first
+        // statement's JSON embeds an escaped apostrophe still parses as two
+        // clean statements, not one mangled one.
+        let r = Recorder {
+            seen: Mutex::new(Vec::new()),
+        };
+        let src = r#"save doc /a --json '{"text":"can\'t stop"}'; save doc /b --json '{"text":"ok"}';"#;
+        execute_script(&r, src).await.unwrap();
+        let seen = r.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(
+            seen[0],
+            vec!["save", "doc", "/a", "--json", r#"{"text":"can't stop"}"#]
+        );
+        assert_eq!(
+            seen[1],
+            vec!["save", "doc", "/b", "--json", r#"{"text":"ok"}"#]
+        );
     }
 
     #[test]
