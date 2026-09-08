@@ -21,9 +21,7 @@ use solx_surface::entities::{DocLink, Document, DocumentInput, FileRef};
 use solx_surface::error::{Result, SolxError};
 use solx_surface::managers::{DocManager, TypeManager};
 use solx_surface::path::{full_ref, normalize_path, validate_name};
-use solx_surface::query::{
-    ListOptions, ListSchema, Page, PathFacet, SearchHit, SearchQuery, SearchResults, SortOrder,
-};
+use solx_surface::query::{ListOptions, ListSchema, Page, PathFacet, SearchQuery, SortOrder};
 use uuid::Uuid;
 
 use content::{flatten_strings, walk_contents};
@@ -576,7 +574,7 @@ impl DocManager for LocalDocManager {
     /// can't collide with `documents.name` — same reasoning as
     /// `solx-actions`'s `search()`. With `query.q` absent this runs the same
     /// query plan as a plain facet filter — no join, no ranking.
-    async fn search(&self, query: SearchQuery) -> Result<SearchResults> {
+    async fn search(&self, query: SearchQuery) -> Result<Page<Document>> {
         let conn = self.db.connect().await?;
         let limit = query.limit.unwrap_or(20).max(1);
         let offset = query.offset.unwrap_or(0);
@@ -638,35 +636,22 @@ impl DocManager for LocalDocManager {
                 .unwrap_or(0) as usize
         };
 
-        let rank_select = if term.is_some() { ", f.rank" } else { "" };
+        // No `score`/rank column selected: `ORDER BY f.rank` above already
+        // puts the best FTS5 match first, and returning full `Document` rows
+        // (via the same `row_to_doc` `get`/`list` already use) means a
+        // caller no longer needs a second round-trip to read a hit's actual
+        // contents — see `solx-actions::search_actions`, which took the same
+        // approach first (server-side rank order, no numeric score exposed).
         let sql = format!(
-            "SELECT d.id,d.path,d.name,d.title,d.summary,d.type_ref,d.contents,d.author,d.pub_date,d.confidence,d.links,d.files,d.created_at,d.updated_at{rank_select} \
+            "SELECT d.id,d.path,d.name,d.title,d.summary,d.type_ref,d.contents,d.author,d.pub_date,d.confidence,d.links,d.files,d.created_at,d.updated_at \
              FROM documents d{join}{where_clause}{order} LIMIT {limit} OFFSET {offset}"
         );
         let mut rows = conn.query(&sql, binds).await.map_err(map_db)?;
-        let mut hits = Vec::new();
+        let mut items = Vec::new();
         while let Some(row) = rows.next().await.map_err(map_db)? {
-            let doc = row_to_doc(&row)?;
-            // FTS5's `rank` is negative, lower = better; negate it so higher
-            // = better, matching the score convention `SearchHit.score`
-            // already promised under the old (positive, higher-is-better)
-            // Tantivy BM25 score.
-            let score = if term.is_some() {
-                -(row.get::<f64>(14).unwrap_or(0.0) as f32)
-            } else {
-                0.0
-            };
-            hits.push(SearchHit {
-                id: doc.id.to_string(),
-                path: doc.path,
-                name: doc.name,
-                title: doc.title,
-                summary: doc.summary,
-                type_ref: doc.type_ref,
-                score,
-            });
+            items.push(row_to_doc(&row)?);
         }
-        Ok(SearchResults { hits, total, limit, offset })
+        Ok(Page::new(items, total, limit, offset))
     }
 }
 
@@ -712,7 +697,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.total, 1);
-        assert_eq!(res.hits[0].name, "note");
+        assert_eq!(res.items[0].name, "note");
 
         // path-facet search
         let res2 = m
@@ -798,7 +783,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.total, 1);
-        assert_eq!(res.hits[0].name, "charles");
+        assert_eq!(res.items[0].name, "charles");
 
         let res_none = m
             .search(SearchQuery {
@@ -858,7 +843,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.total, 1);
-        assert_eq!(res.hits[0].name, "one");
+        assert_eq!(res.items[0].name, "one");
     }
 
     async fn save_doc(m: &LocalDocManager, path: &str, name: &str, body: &str) {

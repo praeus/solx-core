@@ -24,4 +24,4 @@ pub use internal_actions::{
     ActionExecutor, Caller, InternalActionHandler, InternalActionRegistry, InternalCallCtx, SeedAction,
 };
 pub use managers::{ActionManager, DocManager, FileStore, Solx, TypeManager};
-pub use query::{ListOptions, Page, PathFacet, SearchHit, SearchQuery, SearchResults, SortOrder};
+pub use query::{ListOptions, Page, PathFacet, SearchQuery, SortOrder};

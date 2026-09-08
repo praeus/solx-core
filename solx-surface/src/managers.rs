@@ -52,7 +52,7 @@ pub trait DocManager: Send + Sync {
     async fn list(&self, opts: ListOptions) -> Result<Page<Document>>;
     /// Distinct path values in use, each with a count of documents at that path.
     async fn paths(&self, opts: ListOptions) -> Result<Page<PathFacet>>;
-    async fn search(&self, query: SearchQuery) -> Result<SearchResults>;
+    async fn search(&self, query: SearchQuery) -> Result<Page<Document>>;
 }
 
 /// Action store: CRUD + execution (wasm/web/command, with oauth for web).

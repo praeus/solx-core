@@ -234,30 +234,6 @@ pub struct SearchQuery {
     pub offset: Option<usize>,
 }
 
-/// A single search hit.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SearchHit {
-    pub id: String,
-    pub path: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    pub type_ref: String,
-    pub score: f32,
-}
-
-/// Search results with the total match count for pagination.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SearchResults {
-    pub hits: Vec<SearchHit>,
-    pub total: usize,
-    pub limit: usize,
-    pub offset: usize,
-}
-
 /// Full-text query over the action catalogue (path/name/caption/description/
 /// category/phrases, via FTS5), composable with the same filters as `list`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

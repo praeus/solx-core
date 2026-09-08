@@ -4,7 +4,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use solx_surface::entities::{Document, DocumentInput};
 use solx_surface::managers::Solx;
-use solx_surface::query::{ListOptions, Page, PathFacet, SearchQuery, SearchResults};
+use solx_surface::query::{ListOptions, Page, PathFacet, SearchQuery};
 
 use crate::error::ApiError;
 use crate::routes::refs::split_url_ref;
@@ -72,7 +72,7 @@ async fn doc_paths(
 async fn search_docs(
     State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
-) -> Result<Json<SearchResults>, ApiError> {
+) -> Result<Json<Page<Document>>, ApiError> {
     let results = state.app.docs().search(query).await?;
     Ok(Json(results))
 }

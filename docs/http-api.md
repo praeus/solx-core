@@ -40,7 +40,7 @@ segment**. A name of `100% #1` becomes `100%25%20%231`.
 | `GET` | `/docs/{ref}` | — | `Document` |
 | `PUT` | `/docs/{ref}` | `DocumentInput` | `Document` |
 | `DELETE` | `/docs/{ref}` | — | `204` |
-| `GET` | `/search` | — | `SearchResults` |
+| `GET` | `/search` | — | `Page<Document>` |
 
 `PUT` is create-or-replace, so it is used for both. It always answers `200`
 with the saved entity — the underlying manager does not distinguish a create
