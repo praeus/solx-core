@@ -17,7 +17,7 @@ use solx_surface::entities::{TypeEntity, TypeInput};
 use solx_surface::error::{Result, SolxError};
 use solx_surface::managers::TypeManager;
 use solx_surface::path::{full_ref, normalize_path, split_ref, validate_name};
-use solx_surface::query::{ListOptions, ListSchema, Page};
+use solx_surface::query::{ListOptions, ListSchema, Page, PathFacet, SortOrder};
 use uuid::Uuid;
 
 use db::{map_db, Db};
@@ -255,6 +255,43 @@ impl TypeManager for LocalTypeManager {
         Ok(Page::new(items, total, limit, offset))
     }
 
+    async fn paths(&self, opts: ListOptions) -> Result<Page<PathFacet>> {
+        let conn = self.db.connect().await?;
+        let limit = opts.limit_or(DEFAULT_LIMIT);
+        let offset = opts.offset_or_zero();
+
+        let q = opts.to_sql(LIST_SCHEMA)?;
+        let binds: Vec<libsql::Value> =
+            q.binds.iter().cloned().map(libsql::Value::from).collect();
+        let dir = match opts.sort_order {
+            SortOrder::Desc => "DESC",
+            SortOrder::Asc => "ASC",
+        };
+
+        let total = {
+            let sql = format!("SELECT COUNT(DISTINCT path) FROM types{}", q.where_clause);
+            let mut rows = conn.query(&sql, binds.clone()).await.map_err(map_db)?;
+            rows.next()
+                .await
+                .map_err(map_db)?
+                .map(|r| r.get::<i64>(0).unwrap_or(0))
+                .unwrap_or(0) as usize
+        };
+
+        let sql = format!(
+            "SELECT path, COUNT(*) FROM types{} GROUP BY path ORDER BY path {dir} LIMIT {limit} OFFSET {offset}",
+            q.where_clause
+        );
+        let mut rows = conn.query(&sql, binds).await.map_err(map_db)?;
+        let mut items = Vec::new();
+        while let Some(row) = rows.next().await.map_err(map_db)? {
+            let path: String = row.get(0).map_err(map_db)?;
+            let count: i64 = row.get(1).map_err(map_db)?;
+            items.push(PathFacet { path, count: count as usize });
+        }
+        Ok(Page::new(items, total, limit, offset))
+    }
+
     async fn resolve(&self, type_ref: &str) -> Result<TypeEntity> {
         let (path, name) = split_ref(type_ref)?;
         self.get(&path, &name).await
@@ -415,5 +452,34 @@ mod tests {
 
         m.delete("/types/core", "Null").await.unwrap();
         assert!(m.get("/types/core", "Null").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn paths_groups_by_path_with_counts() {
+        let (_d, m) = mgr().await;
+        let input = || TypeInput {
+            description: None,
+            schema: Some(serde_json::json!({ "type": "string" })),
+            groups: vec![],
+        };
+        m.save("/types/custom", "Alpha", input()).await.unwrap();
+        m.save("/types/custom", "Beta", input()).await.unwrap();
+        m.save("/types/custom/nested", "Gamma", input()).await.unwrap();
+
+        let page = m
+            .paths(ListOptions {
+                path_prefix: Some("/types/custom".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        // Two distinct paths under the prefix -- /types/custom (2 rows) and
+        // /types/custom/nested (1 row) -- so `total` counts paths, not rows.
+        assert_eq!(page.total, 2);
+        let facet = page.items.iter().find(|f| f.path == "/types/custom").unwrap();
+        assert_eq!(facet.count, 2);
+        let nested = page.items.iter().find(|f| f.path == "/types/custom/nested").unwrap();
+        assert_eq!(nested.count, 1);
     }
 }

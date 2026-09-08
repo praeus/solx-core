@@ -22,6 +22,8 @@ pub trait TypeManager: Send + Sync {
     async fn get(&self, path: &str, name: &str) -> Result<TypeEntity>;
     async fn delete(&self, path: &str, name: &str) -> Result<()>;
     async fn list(&self, opts: ListOptions) -> Result<Page<TypeEntity>>;
+    /// Distinct path values in use, each with a count of types at that path.
+    async fn paths(&self, opts: ListOptions) -> Result<Page<PathFacet>>;
 
     /// Resolve a type by full reference (`/path/Name`).
     async fn resolve(&self, type_ref: &str) -> Result<TypeEntity>;
@@ -48,6 +50,8 @@ pub trait DocManager: Send + Sync {
     async fn get(&self, path: &str, name: &str) -> Result<Document>;
     async fn delete(&self, path: &str, name: &str) -> Result<()>;
     async fn list(&self, opts: ListOptions) -> Result<Page<Document>>;
+    /// Distinct path values in use, each with a count of documents at that path.
+    async fn paths(&self, opts: ListOptions) -> Result<Page<PathFacet>>;
     async fn search(&self, query: SearchQuery) -> Result<SearchResults>;
 }
 
@@ -58,6 +62,8 @@ pub trait ActionManager: Send + Sync {
     async fn get(&self, path: &str, name: &str) -> Result<Action>;
     async fn delete(&self, path: &str, name: &str) -> Result<()>;
     async fn list(&self, opts: ListOptions) -> Result<Page<Action>>;
+    /// Distinct path values in use, each with a count of actions at that path.
+    async fn paths(&self, opts: ListOptions) -> Result<Page<PathFacet>>;
     async fn search(&self, query: ActionSearchQuery) -> Result<Page<Action>>;
     async fn exec(&self, path: &str, name: &str, params: Value) -> Result<ActionExecResult>;
 }

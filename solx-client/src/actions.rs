@@ -3,7 +3,7 @@ use serde_json::Value;
 use solx_surface::entities::{Action, ActionExecResult, ActionInput};
 use solx_surface::error::Result;
 use solx_surface::managers::ActionManager;
-use solx_surface::query::{ActionSearchQuery, ListOptions, Page};
+use solx_surface::query::{ActionSearchQuery, ListOptions, Page, PathFacet};
 
 use crate::http::{collection_url, delete, entity_url, get_json, get_json_query, post_json, put_json};
 
@@ -46,6 +46,11 @@ impl ActionManager for RemoteActionManager {
 
     async fn list(&self, opts: ListOptions) -> Result<Page<Action>> {
         let url = collection_url(&self.base_url, "actions")?;
+        get_json_query(&self.http, &self.token, url, &opts).await
+    }
+
+    async fn paths(&self, opts: ListOptions) -> Result<Page<PathFacet>> {
+        let url = collection_url(&self.base_url, "actions-paths")?;
         get_json_query(&self.http, &self.token, url, &opts).await
     }
 

@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use serde::Deserialize;
 use solx_surface::entities::{Action, ActionExecResult, ActionInput};
 use solx_surface::managers::Solx;
-use solx_surface::query::{ActionSearchQuery, ListOptions, Page};
+use solx_surface::query::{ActionSearchQuery, ListOptions, Page, PathFacet};
 
 use crate::error::ApiError;
 use crate::routes::refs::split_url_ref;
@@ -31,6 +31,7 @@ pub fn router() -> Router<AppState> {
             "/actions/*ref",
             get(get_action).put(save_action).delete(delete_action).post(exec_action),
         )
+        .route("/actions-paths", get(action_paths))
         .route("/actions-search", get(search_actions))
 }
 
@@ -67,6 +68,14 @@ async fn list_actions(
     Query(opts): Query<ListOptions>,
 ) -> Result<Json<Page<Action>>, ApiError> {
     let page = state.app.actions().list(opts).await?;
+    Ok(Json(page))
+}
+
+async fn action_paths(
+    State(state): State<AppState>,
+    Query(opts): Query<ListOptions>,
+) -> Result<Json<Page<PathFacet>>, ApiError> {
+    let page = state.app.actions().paths(opts).await?;
     Ok(Json(page))
 }
 

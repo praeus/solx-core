@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use solx_surface::entities::{Document, DocumentInput};
 use solx_surface::error::Result;
 use solx_surface::managers::DocManager;
-use solx_surface::query::{ListOptions, Page, SearchQuery, SearchResults};
+use solx_surface::query::{ListOptions, Page, PathFacet, SearchQuery, SearchResults};
 
 use crate::http::{collection_url, delete, entity_url, get_json, get_json_query, put_json};
 
@@ -42,6 +42,11 @@ impl DocManager for RemoteDocManager {
 
     async fn list(&self, opts: ListOptions) -> Result<Page<Document>> {
         let url = collection_url(&self.base_url, "docs")?;
+        get_json_query(&self.http, &self.token, url, &opts).await
+    }
+
+    async fn paths(&self, opts: ListOptions) -> Result<Page<PathFacet>> {
+        let url = collection_url(&self.base_url, "docs-paths")?;
         get_json_query(&self.http, &self.token, url, &opts).await
     }
 

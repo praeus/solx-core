@@ -201,6 +201,15 @@ impl<T> Page<T> {
     }
 }
 
+/// One row of a `paths` result: a path value in use, and how many entities
+/// currently sit at exactly that path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathFacet {
+    pub path: String,
+    pub count: usize,
+}
+
 /// A full-text + faceted search query (documents).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -4,7 +4,7 @@ use solx_surface::entities::{TypeEntity, TypeInput};
 use solx_surface::error::Result;
 use solx_surface::managers::TypeManager;
 use solx_surface::path::split_ref;
-use solx_surface::query::{ListOptions, Page};
+use solx_surface::query::{ListOptions, Page, PathFacet};
 use solx_surface::wire::ValidateRequest;
 
 use crate::http::{collection_url, delete, entity_url, get_json, get_json_query, post_json, put_json};
@@ -45,6 +45,11 @@ impl TypeManager for RemoteTypeManager {
 
     async fn list(&self, opts: ListOptions) -> Result<Page<TypeEntity>> {
         let url = collection_url(&self.base_url, "types")?;
+        get_json_query(&self.http, &self.token, url, &opts).await
+    }
+
+    async fn paths(&self, opts: ListOptions) -> Result<Page<PathFacet>> {
+        let url = collection_url(&self.base_url, "types-paths")?;
         get_json_query(&self.http, &self.token, url, &opts).await
     }
 

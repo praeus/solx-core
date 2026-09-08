@@ -4,7 +4,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use solx_surface::entities::{Document, DocumentInput};
 use solx_surface::managers::Solx;
-use solx_surface::query::{ListOptions, Page, SearchQuery, SearchResults};
+use solx_surface::query::{ListOptions, Page, PathFacet, SearchQuery, SearchResults};
 
 use crate::error::ApiError;
 use crate::routes::refs::split_url_ref;
@@ -21,6 +21,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/docs", get(list_docs))
         .route("/docs/*ref", get(get_doc).put(save_doc).delete(delete_doc))
+        .route("/docs-paths", get(doc_paths))
         .route("/search", get(search_docs))
 }
 
@@ -57,6 +58,14 @@ async fn list_docs(
     Query(opts): Query<ListOptions>,
 ) -> Result<Json<Page<Document>>, ApiError> {
     let page = state.app.docs().list(opts).await?;
+    Ok(Json(page))
+}
+
+async fn doc_paths(
+    State(state): State<AppState>,
+    Query(opts): Query<ListOptions>,
+) -> Result<Json<Page<PathFacet>>, ApiError> {
+    let page = state.app.docs().paths(opts).await?;
     Ok(Json(page))
 }
 

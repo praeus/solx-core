@@ -21,7 +21,9 @@ use solx_surface::entities::{DocLink, Document, DocumentInput, FileRef};
 use solx_surface::error::{Result, SolxError};
 use solx_surface::managers::{DocManager, TypeManager};
 use solx_surface::path::{full_ref, normalize_path, validate_name};
-use solx_surface::query::{ListOptions, ListSchema, Page, SearchHit, SearchQuery, SearchResults};
+use solx_surface::query::{
+    ListOptions, ListSchema, Page, PathFacet, SearchHit, SearchQuery, SearchResults, SortOrder,
+};
 use uuid::Uuid;
 
 use content::{flatten_strings, walk_contents};
@@ -529,6 +531,43 @@ impl DocManager for LocalDocManager {
         Ok(Page::new(items, total, limit, offset))
     }
 
+    async fn paths(&self, opts: ListOptions) -> Result<Page<PathFacet>> {
+        let conn = self.db.connect().await?;
+        let limit = opts.limit_or(DEFAULT_LIMIT);
+        let offset = opts.offset_or_zero();
+
+        let q = opts.to_sql(LIST_SCHEMA)?;
+        let binds: Vec<libsql::Value> =
+            q.binds.iter().cloned().map(libsql::Value::from).collect();
+        let dir = match opts.sort_order {
+            SortOrder::Desc => "DESC",
+            SortOrder::Asc => "ASC",
+        };
+
+        let total = {
+            let sql = format!("SELECT COUNT(DISTINCT path) FROM documents{}", q.where_clause);
+            let mut rows = conn.query(&sql, binds.clone()).await.map_err(map_db)?;
+            rows.next()
+                .await
+                .map_err(map_db)?
+                .map(|r| r.get::<i64>(0).unwrap_or(0))
+                .unwrap_or(0) as usize
+        };
+
+        let sql = format!(
+            "SELECT path, COUNT(*) FROM documents{} GROUP BY path ORDER BY path {dir} LIMIT {limit} OFFSET {offset}",
+            q.where_clause
+        );
+        let mut rows = conn.query(&sql, binds).await.map_err(map_db)?;
+        let mut items = Vec::new();
+        while let Some(row) = rows.next().await.map_err(map_db)? {
+            let path: String = row.get(0).map_err(map_db)?;
+            let count: i64 = row.get(1).map_err(map_db)?;
+            items.push(PathFacet { path, count: count as usize });
+        }
+        Ok(Page::new(items, total, limit, offset))
+    }
+
     /// Free-text search over `name`/`content_text` (a schema-aware flattening
     /// of the document's title/summary/contents, see
     /// [`Self::compute_content`]), composed with `path_prefix`/`type_ref`/
@@ -913,5 +952,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.total, 16, "every concurrent write should be indexed");
+    }
+
+    #[tokio::test]
+    async fn paths_groups_by_path_with_counts() {
+        let (_d, m) = setup().await;
+        let input = || DocumentInput {
+            type_ref: Some("/types/docs/Document".into()),
+            ..Default::default()
+        };
+        m.save("/blog", "one", input()).await.unwrap();
+        m.save("/blog", "two", input()).await.unwrap();
+        m.save("/blog/drafts", "three", input()).await.unwrap();
+
+        let page = m
+            .paths(ListOptions { path_prefix: Some("/blog".into()), ..Default::default() })
+            .await
+            .unwrap();
+
+        // Two distinct paths -- /blog (2 rows) and /blog/drafts (1 row) --
+        // so `total` counts paths, not rows.
+        assert_eq!(page.total, 2);
+        let blog = page.items.iter().find(|f| f.path == "/blog").unwrap();
+        assert_eq!(blog.count, 2);
+        let drafts = page.items.iter().find(|f| f.path == "/blog/drafts").unwrap();
+        assert_eq!(drafts.count, 1);
     }
 }

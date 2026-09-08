@@ -90,6 +90,7 @@ pub fn builtin_actions() -> Vec<SeedAction> {
         a_at(DOCUMENT_PATH, "entity_get_document", "entity_get_document", "Fetch a document by path+name.", Some("EntityRefParams")),
         a_at(DOCUMENT_PATH, "entity_delete_document", "entity_delete_document", "Delete a document.", Some("EntityRefParams")),
         a_at(DOCUMENT_PATH, "entity_list_documents", "entity_list_documents", "List documents, optionally filtered by path prefix.", Some("ListParams")),
+        a_at(DOCUMENT_PATH, "entity_list_document_paths", "entity_list_document_paths", "List distinct document paths in use, with a count of documents at each, optionally filtered by path prefix.", Some("ListParams")),
         // Document legacy field ops (one field at a time)
         a_at(DOCUMENT_PATH, "get_field", "get_field", "Read one field from a document's contents.", Some("GetFieldParams")),
         a_at(DOCUMENT_PATH, "set_field", "set_field", "Write one field on a document's contents.", Some("SetFieldParams")),
@@ -103,6 +104,7 @@ pub fn builtin_actions() -> Vec<SeedAction> {
         a_at(ACTION_PATH, "entity_get_action", "entity_get_action", "Fetch an action by path+name.", Some("EntityRefParams")),
         a_at(ACTION_PATH, "entity_delete_action", "entity_delete_action", "Delete an action.", Some("EntityRefParams")),
         a_at(ACTION_PATH, "entity_list_actions", "entity_list_actions", "List actions, optionally filtered by path prefix.", Some("ListParams")),
+        a_at(ACTION_PATH, "entity_list_action_paths", "entity_list_action_paths", "List distinct action paths in use, with a count of actions at each, optionally filtered by path prefix.", Some("ListParams")),
         // Action search (a real FTS5 full-text index)
         a_at(ACTION_PATH, "search_actions", "search_actions", "Full-text + faceted search over actions.", Some("SearchActionsParams")),
         // Type CRUD
@@ -110,6 +112,7 @@ pub fn builtin_actions() -> Vec<SeedAction> {
         a_at(TYPE_PATH, "entity_get_type", "entity_get_type", "Fetch a type by path+name.", Some("EntityRefParams")),
         a_at(TYPE_PATH, "entity_delete_type", "entity_delete_type", "Delete a type.", Some("EntityRefParams")),
         a_at(TYPE_PATH, "entity_list_types", "entity_list_types", "List types, optionally filtered by path prefix.", Some("ListParams")),
+        a_at(TYPE_PATH, "entity_list_type_paths", "entity_list_type_paths", "List distinct type paths in use, with a count of types at each, optionally filtered by path prefix.", Some("ListParams")),
         // General-purpose file store (unrestricted rel_path access)
         a_at(FILE_PATH, "file_put", "file_put", "Write bytes to a rel-path under the files root.", Some("FilePutParams")),
         a_at(FILE_PATH, "file_get", "file_get", "Read bytes from a rel-path under the files root.", Some("FileGetParams")),

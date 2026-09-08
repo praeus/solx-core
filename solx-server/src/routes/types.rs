@@ -4,7 +4,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use solx_surface::entities::{TypeEntity, TypeInput};
 use solx_surface::managers::Solx;
-use solx_surface::query::{ListOptions, Page};
+use solx_surface::query::{ListOptions, Page, PathFacet};
 use solx_surface::wire::ValidateRequest;
 
 use crate::error::ApiError;
@@ -25,6 +25,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/types", get(list_types))
         .route("/types/*ref", get(get_type).put(save_type).delete(delete_type))
+        .route("/types-paths", get(type_paths))
         .route("/validate", post(validate_type))
 }
 
@@ -61,6 +62,14 @@ async fn list_types(
     Query(opts): Query<ListOptions>,
 ) -> Result<Json<Page<TypeEntity>>, ApiError> {
     let page = state.app.types().list(opts).await?;
+    Ok(Json(page))
+}
+
+async fn type_paths(
+    State(state): State<AppState>,
+    Query(opts): Query<ListOptions>,
+) -> Result<Json<Page<PathFacet>>, ApiError> {
+    let page = state.app.types().paths(opts).await?;
     Ok(Json(page))
 }
 

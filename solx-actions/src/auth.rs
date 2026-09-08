@@ -728,6 +728,9 @@ mod tests {
         async fn list(&self, _opts: ListOptions) -> solx_surface::error::Result<Page<Action>> {
             panic!("stub ActionManager::list should not be called by these tests")
         }
+        async fn paths(&self, _opts: ListOptions) -> solx_surface::error::Result<Page<solx_surface::query::PathFacet>> {
+            panic!("stub ActionManager::paths should not be called by these tests")
+        }
         async fn search(&self, _query: ActionSearchQuery) -> solx_surface::error::Result<Page<Action>> {
             panic!("stub ActionManager::search should not be called by these tests")
         }
