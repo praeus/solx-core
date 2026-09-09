@@ -64,6 +64,10 @@ pub const WEB_PATH: &str = "/builtin/web";
 /// `solx-packages/solx-ollama/docs/streaming-design.md`.
 pub const WEB_STREAM_PATH: &str = "/builtin/web/stream";
 
+/// Subdivision of the builtin namespace for running a raw solx script
+/// string immediately, without first saving it as a `Script`-typed action.
+pub const SCRIPT_PATH: &str = "/builtin/script";
+
 /// Namespace for the hand-written JSON-schema types backing built-in
 /// actions' `param_type_ref` (see `solx-types/src/seed.rs`). Shared by every
 /// `/builtin/*` subpath — `param_type_ref` doesn't need to mirror the
@@ -135,6 +139,8 @@ pub fn builtin_actions() -> Vec<SeedAction> {
         // browser; host-side streaming HTTP lives under WEB_STREAM_PATH below.
         a_at(WEB_PATH, "http_request", "http_request", "Issue an HTTP request with optional method, headers, body, and timeout.", Some("HttpRequestParams")),
         a_at(WEB_PATH, "open_url", "open_url", "Open a URL in the system browser via the platform-native handler (xdg-open / open / cmd /C start).", Some("OpenUrlParams")),
+        // Scripting — parse and run a raw solx script string immediately.
+        a_at(SCRIPT_PATH, "exec", "script_exec", "Parse and immediately run a solx script from a string, returning its result. Supports the same 'exec <path/name> [--json '<params>']' and 'json <value>' stages as a Script-typed action.", Some("ScriptExecParams")),
         // Action consoles (`/builtin/console/*`) and asynchronous actions
         // (`/builtin/action/{start,stop,poll,cancelled}`) are seeded by
         // `solx-console` itself — see `solx_console::actions::seed_actions`,

@@ -21,7 +21,8 @@ pub use entities::{
     LinkKind, TypeEntity, TypeInput,
 };
 pub use internal_actions::{
-    ActionExecutor, Caller, InternalActionHandler, InternalActionRegistry, InternalCallCtx, SeedAction,
+    ActionExecutor, Caller, CallerInfo, InternalActionHandler, InternalActionRegistry, InternalCallCtx,
+    SeedAction,
 };
 pub use managers::{ActionManager, DocManager, FileStore, Solx, TypeManager};
 pub use query::{ListOptions, Page, PathFacet, SearchQuery, SortOrder};

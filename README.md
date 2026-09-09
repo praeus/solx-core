@@ -1,10 +1,9 @@
 # solx
 
-**solx turns a database of actions into a live MCP server.** One searchable catalogue of tools — for you and your AI agents. Add a tool (WASM, CLI, REST) and it's live everywhere, no redeployment.
+**solx turns a database of actions into a live MCP/REST server.** One searchable catalogue of tools — for you and your AI agents. Add a tool (WASM, CLI, REST) and it's available to all clients (MCP, REST, Web).
 
 Register a WASM
-component, a shell command, a REST endpoint, or a script — it becomes a tool
-your LLM client can call immediately.
+component, a shell command, a REST endpoint, or a script — it becomes a tool LLM client or human user can call immediately.
 
 ```sh
 # Register an action. It's a row in a database, not a line of code.

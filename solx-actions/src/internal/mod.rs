@@ -46,6 +46,7 @@ use crate::LocalActionManager;
 pub mod doc_fields;
 pub mod entity;
 pub mod env;
+pub mod exec;
 pub mod file;
 pub mod http;
 pub mod http_stream;
@@ -108,7 +109,7 @@ impl InternalCtx {
             types: self.types.clone(),
             actions: self.actions.clone(),
             files: self.files.clone(),
-            caller: self.caller.clone(),
+            caller: self.caller.as_ref().map(Caller::info),
         }
     }
 }
@@ -176,6 +177,9 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
 
         // ── system integration ────────────────────────────────────────────
         "open_url" => open_url::open_url(params, &ctx.config).await,
+
+        // ── scripting ────────────────────────────────────────────────────
+        "script_exec" => exec::exec(params, &ctx.local, ctx.caller.as_ref()).await,
 
         // ── secrets (per-caller scoped) ──────────────────────────────────
         "get_secret" => secrets::get_secret(params, ctx.caller.as_ref()).await,

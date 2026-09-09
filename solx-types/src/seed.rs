@@ -668,6 +668,21 @@ fn builtin_action_param_types() -> Vec<SeedType> {
             }),
             groups: vec!["builtin-params"],
         },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "ScriptExecParams",
+            description: "Parse and immediately run a solx script from a string.",
+            schema: json!({
+                "type": "object",
+                "required": ["script"],
+                "properties": {
+                    "script": { "type": "string", "description": "Solx script source, e.g. \"exec /pkg/name --json '{\\\"x\\\":1}'; json $params.mode\"." },
+                    "params": { "type": "object", "description": "Seeds the script's $params variable, exactly like a Script-typed action's own exec params. Defaults to {}." },
+                    "timeout_secs": { "type": "integer", "description": "Defaults to 300." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
         // Widgets — an action that renders a UI declares this as its
         // `result_type_ref` and returns a value of this shape. There is no
         // widget runtime on the backend: the frontend fetches the bundle from

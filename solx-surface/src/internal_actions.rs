@@ -122,10 +122,50 @@ impl Caller {
     pub fn secret_key(&self, name: &str) -> Option<&str> {
         self.secrets.get(name).map(String::as_str)
     }
+
+    /// Strips the secrets map, keeping only what a pluggable (non-hard-coded)
+    /// internal-action handler is allowed to see — see [`CallerInfo`].
+    pub fn info(&self) -> CallerInfo {
+        CallerInfo {
+            action_ref: self.action_ref.clone(),
+            invocation_id: self.invocation_id.clone(),
+        }
+    }
 }
 
 /// URI form, for logs and error messages: `action://pkg/summarize`.
 impl fmt::Display for Caller {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "action://{}", self.action_ref.trim_start_matches('/'))
+    }
+}
+
+/// Non-secret identity of the calling action — everything a pluggable
+/// [`InternalActionHandler`] is allowed to see about who invoked it. Unlike
+/// [`Caller`], this type has no `secret_key` method and no secrets field to
+/// add one to later by accident: the exclusion is a compile-time fact, not
+/// just a documented convention.
+#[derive(Debug, Clone)]
+pub struct CallerInfo {
+    action_ref: String,
+    invocation_id: String,
+}
+
+impl CallerInfo {
+    /// Full reference of the calling action, e.g. `/pkg/summarize`.
+    pub fn action_ref(&self) -> &str {
+        &self.action_ref
+    }
+
+    /// Identifies this one run of `action_ref`, distinct from any other
+    /// concurrent or subsequent run.
+    pub fn invocation_id(&self) -> &str {
+        &self.invocation_id
+    }
+}
+
+/// URI form, for logs and error messages: `action://pkg/summarize`.
+impl fmt::Display for CallerInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "action://{}", self.action_ref.trim_start_matches('/'))
     }
@@ -161,7 +201,10 @@ pub struct InternalCallCtx {
     pub types: Arc<dyn TypeManager>,
     pub actions: Arc<dyn ActionManager>,
     pub files: Arc<dyn FileStore>,
-    pub caller: Option<Caller>,
+    /// The invoking action's non-secret identity only — see [`CallerInfo`].
+    /// A pluggable handler can never reach a secret key through this field,
+    /// even by accident: [`Caller`] (which can) never appears here.
+    pub caller: Option<CallerInfo>,
 }
 
 /// One internal action's implementation. Handlers are constructed with
