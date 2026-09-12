@@ -87,6 +87,12 @@ pub fn builtin_types() -> Vec<SeedType> {
 /// Parameter schemas for the built-in internal actions seeded by
 /// `solx-actions/src/seed.rs` (`param_type_ref` points at
 /// `{BUILTIN_TYPES_PATH}/{name}`).
+///
+/// Each property below documents one canonical spelling, but either
+/// camelCase or snake_case is accepted at dispatch time —
+/// `solx_actions::internal::normalize_params` aliases both before this
+/// schema is validated against, so a required property spelled the "other"
+/// way still satisfies `required` here.
 fn builtin_action_param_types() -> Vec<SeedType> {
     let path_and_name = json!({
         "path": { "type": "string", "description": "Directory-style path, e.g. /research/ai. Defaults to the root '/'." },
@@ -514,6 +520,23 @@ fn builtin_action_param_types() -> Vec<SeedType> {
                     "level": { "type": "string", "description": "Defaults to 'info'. Free-form — debug/info/warn/error/chunk are the conventional values." },
                     "message": { "type": "string" },
                     "data": { "description": "Optional structured payload, any JSON value." },
+                }
+            }),
+            groups: vec!["builtin-params"],
+        },
+        SeedType {
+            path: BUILTIN_TYPES_PATH,
+            name: "ConsoleCopyParams",
+            description: "Copy one invocation's entries from another console into the calling action's own console, renumbered into its sequence. Requires an action caller. Built for an orchestrator draining a child invocation's console without one console/print call per entry.",
+            schema: json!({
+                "type": "object",
+                "required": ["from_action_ref", "invocation_id"],
+                "properties": {
+                    "from_action_ref": { "type": "string", "description": "The source console to copy from, e.g. /packages/solx-ollama/ollama-chat. Unrestricted, like console/read and console/tail on the same console." },
+                    "invocation_id": { "type": "string", "description": "Copy only entries carrying this invocation_id - a console is identified by action_ref alone, so a console shared by concurrent callers interleaves everyone's entries." },
+                    "cursor": { "type": "integer", "description": "Inclusive lower bound on the source's seq. Pass a previous call's next_cursor to resume from where it left off. Defaults to the start of what is retained." },
+                    "limit": { "type": "integer", "description": "Defaults to 200, capped at 1000." },
+                    "label": { "type": "string", "description": "When given, prefixed onto each copied entry's message as '[label] message'." },
                 }
             }),
             groups: vec!["builtin-params"],

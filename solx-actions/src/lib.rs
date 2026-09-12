@@ -895,6 +895,23 @@ impl LocalActionManager {
         let action = self.get_unmasked(path, name).await?;
         let action_ref = full_ref(&action.path, &action.name)?;
 
+        // Internal built-ins mix two wire-key conventions (camelCase
+        // entity/search structs, snake_case raw-key handlers) — see
+        // `internal::normalize_params`. Must run *before* validation, not
+        // just before dispatch: several builtin schemas in
+        // `solx-types/src/seed.rs` declare a required property under only
+        // one spelling (`FilePutParams`' `rel_path`, `OauthAwaitParams`'
+        // `state_value`, ...), so a caller guessing the other spelling would
+        // fail validation here and never reach `run_internal` at all.
+        // Scoped to `Internal` only — Command/Webhook/Script/Wasm actions are
+        // user-authored external contracts (a webhook body, a command argv)
+        // that must never get synthesized alias keys injected into them.
+        let params = if action.action_type == Some(ActionType::Internal) {
+            internal::normalize_params(&params)
+        } else {
+            params
+        };
+
         // Validate params against the declared parameter type, if any.
         if let Some(tr) = &action.param_type_ref {
             self.types.validate(&params, tr).await?;
@@ -1568,6 +1585,22 @@ mod tests {
 
     fn cfg_with_secret(key: &str) -> Value {
         serde_json::json!({ "cwd": "/work", "secrets": { "API_TOKEN": key } })
+    }
+
+    /// Proves the aliasing chokepoint lives ahead of param-type validation,
+    /// not just ahead of dispatch: `FilePutParams` requires `rel_path`
+    /// (`solx-types/src/seed.rs`), so a `run_internal`-only fix would have
+    /// rejected this call at `self.types.validate` before ever reaching the
+    /// handler. Going through `exec` end-to-end (not `run_internal`
+    /// directly) is what exercises that ordering.
+    #[tokio::test]
+    async fn exec_accepts_camel_case_for_a_required_snake_case_builtin_param() {
+        let (_d, _c, m) = setup_wired().await;
+        let result = m
+            .exec("/builtin/file", "file_put", serde_json::json!({"relPath": "a.txt", "content": "hi"}))
+            .await
+            .unwrap();
+        assert_eq!(result.result.get("rel_path").and_then(Value::as_str), Some("a.txt"));
     }
 
     #[tokio::test]

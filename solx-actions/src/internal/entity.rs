@@ -154,10 +154,11 @@ pub(super) async fn action_get(
     to_value(&a)
 }
 
+/// Only needs to read one spelling: `run_internal` aliases `excludeHidden`
+/// and `exclude_hidden` to the same value before any handler sees `params`
+/// (see `super::normalize_params`).
 fn exclude_hidden_flag(params: &Value) -> bool {
-    ["excludeHidden", "exclude_hidden"]
-        .iter()
-        .any(|k| params.get(k).and_then(Value::as_bool) == Some(true))
+    params.get("exclude_hidden").and_then(Value::as_bool) == Some(true)
 }
 
 pub(super) async fn action_delete(params: &Value, actions: &Arc<dyn ActionManager>) -> Result<Value, String> {

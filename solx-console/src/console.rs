@@ -105,6 +105,16 @@ pub struct ReadResult {
 }
 
 #[derive(Debug, Clone)]
+pub struct CopyResult {
+    /// How many entries were actually copied — may be fewer than `limit`
+    /// asked for if fewer exist.
+    pub copied: usize,
+    /// Pass this back as the next call's `cursor` to continue copying this
+    /// invocation's *source* console from where this call left off.
+    pub next_cursor: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct ConsoleSummary {
     pub action_ref: String,
     pub created_at: String,
@@ -198,6 +208,161 @@ impl ConsoleStore {
 
         self.evict_if_over_cap(&conn, action_ref).await?;
         Ok(seq)
+    }
+
+    /// Copy one invocation's entries from `from_action_ref` into
+    /// `to_action_ref`, renumbered into the destination's own `seq` sequence,
+    /// oldest first. `to_label`, when given, is prefixed onto each copied
+    /// entry's `message` as `[label] message`.
+    ///
+    /// Built for a caller that would otherwise read a child invocation's
+    /// console and re-`print` each entry into its own one at a time — a
+    /// detached llm call that streams a response chunk-by-chunk can produce
+    /// hundreds of entries per run, and re-printing each individually costs
+    /// one round trip and one insert apiece on the *caller's* side as well as
+    /// this one. This does the whole batch as one call and one transaction.
+    ///
+    /// Filtered by `invocation_id` rather than a plain `seq` range because
+    /// `action_ref` alone identifies a console (see the module doc), so a
+    /// console shared by concurrent callers of the same action interleaves
+    /// everyone's entries — copying "everything from cursor" would pull in
+    /// entries that are not this caller's to copy.
+    ///
+    /// Deliberately copy-only, not move: deleting only one invocation's rows
+    /// out of a shared console would not be a contiguous prefix the way
+    /// [`Self::clear`]'s eviction is, and this store's `first_seq`/`dropped`
+    /// bookkeeping assumes it always is. Nothing needs deleting from the
+    /// source for the use case this exists for — draining a child's console
+    /// into the caller's own doesn't require the child's copy to disappear.
+    pub async fn copy(
+        &self,
+        from_action_ref: &str,
+        to_action_ref: &str,
+        invocation_id: &str,
+        cursor: Option<i64>,
+        limit: i64,
+        to_label: Option<&str>,
+    ) -> Result<CopyResult> {
+        let from = cursor.unwrap_or(0).max(0);
+        let limit = limit.clamp(1, 1000);
+        let conn = self.db.connect().await?;
+
+        // Read-only, and done before anything on the destination is touched:
+        // this is what lets the exact number of seq slots to claim there be
+        // known up front, in one block-claim, rather than one row at a time.
+        let mut rows = conn
+            .query(
+                "SELECT seq, ts, level, run_id, source, message, data \
+                 FROM console_entries WHERE action_ref = ?1 AND invocation_id = ?2 AND seq >= ?3 \
+                 ORDER BY seq ASC LIMIT ?4",
+                libsql::params![from_action_ref, invocation_id, from, limit],
+            )
+            .await
+            .map_err(map_db)?;
+        struct Source {
+            seq: i64,
+            ts: String,
+            level: String,
+            run_id: String,
+            source: String,
+            message: String,
+            data: String,
+        }
+        let mut sources = Vec::new();
+        while let Some(row) = rows.next().await.map_err(map_db)? {
+            sources.push(Source {
+                seq: row.get(0).map_err(map_db)?,
+                ts: row.get(1).map_err(map_db)?,
+                level: row.get(2).map_err(map_db)?,
+                run_id: row.get(3).map_err(map_db)?,
+                source: row.get(4).map_err(map_db)?,
+                message: row.get(5).map_err(map_db)?,
+                data: row.get(6).map_err(map_db)?,
+            });
+        }
+        if sources.is_empty() {
+            return Ok(CopyResult { copied: 0, next_cursor: from });
+        }
+        let next_cursor = sources.last().map(|s| s.seq + 1).unwrap_or(from);
+        let count = sources.len() as i64;
+
+        // Claim `count` seq slots on the destination in one round trip - the
+        // same atomic upsert-and-claim `print` uses for one slot at a time,
+        // generalized: `?3` (count) appears three times, all referring to the
+        // one bound value (an established pattern in this file - see
+        // `print`'s own `?2` reused for `created_at`/`last_write`). For a
+        // brand new console the INSERT branch runs with `next_seq` set to
+        // `1 + count`, so `next_seq - count` is 1, the block's start; for an
+        // existing console the ON CONFLICT branch increments `next_seq` by
+        // `count` and RETURNING reflects the *post*-update row, so
+        // `next_seq - count` is exactly the pre-update value - the first
+        // seq this call is claiming.
+        //
+        // Wrapped in an explicit transaction - the first in this crate -
+        // because unlike `print`'s single insert, a crash between claiming
+        // the block and finishing the inserts would otherwise leave a real
+        // gap in the destination's `seq` sequence (a leaked range, not a
+        // correctness bug on its own, but avoidable here for the same reason
+        // `print`'s claim-then-insert already keeps both statements right
+        // next to each other).
+        let now = Utc::now().to_rfc3339();
+        let tx = conn
+            .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
+            .await
+            .map_err(map_db)?;
+        let dest_start: i64 = {
+            let mut claim = tx
+                .query(
+                    "INSERT INTO consoles (action_ref, created_at, last_write, next_seq, first_seq, dropped) \
+                     VALUES (?1, ?2, ?2, 1 + ?3, 1, 0) \
+                     ON CONFLICT(action_ref) DO UPDATE SET \
+                         next_seq = next_seq + ?3, last_write = excluded.last_write \
+                     RETURNING next_seq - ?3",
+                    libsql::params![to_action_ref, now.clone(), count],
+                )
+                .await
+                .map_err(map_db)?;
+            claim
+                .next()
+                .await
+                .map_err(map_db)?
+                .ok_or_else(|| SolxError::Db("console seq allocation returned no row".into()))?
+                .get(0)
+                .map_err(map_db)?
+        };
+
+        for (i, entry) in sources.iter().enumerate() {
+            let dest_seq = dest_start + i as i64;
+            let message = match to_label {
+                Some(label) => format!("[{label}] {}", entry.message),
+                None => entry.message.clone(),
+            };
+            tx.execute(
+                "INSERT INTO console_entries \
+                 (action_ref, seq, ts, level, invocation_id, run_id, source, message, data) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                libsql::params![
+                    to_action_ref,
+                    dest_seq,
+                    entry.ts.clone(),
+                    entry.level.clone(),
+                    invocation_id,
+                    entry.run_id.clone(),
+                    entry.source.clone(),
+                    message,
+                    entry.data.clone(),
+                ],
+            )
+            .await
+            .map_err(map_db)?;
+        }
+        tx.commit().await.map_err(map_db)?;
+
+        // Outside the transaction and best-effort in the same sense `print`'s
+        // own call is: an eviction failure here must not undo entries that
+        // are already durably copied.
+        self.evict_if_over_cap(&conn, to_action_ref).await?;
+        Ok(CopyResult { copied: count as usize, next_cursor })
     }
 
     /// Read entries from `from_seq` (inclusive; default 0, i.e. the start of
@@ -516,6 +681,105 @@ mod tests {
         assert!(r.entries.is_empty());
         assert_eq!(r.next_cursor, 0);
         assert_eq!(r.first_seq, 0);
+    }
+
+    // ── copy ─────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn copy_renumbers_into_the_destinations_own_sequence() {
+        let (_d, store) = test_store().await;
+        // The destination already has entries of its own, so the copied ones
+        // must continue that sequence, not restart at 1.
+        store.print("/dest", "other-inv", None, "info", "guest", Some("already here".into()), None).await.unwrap();
+        for i in 0..3 {
+            store.print("/src", "inv-1", None, "info", "guest", Some(format!("m{i}")), None).await.unwrap();
+        }
+
+        let result = store.copy("/src", "/dest", "inv-1", None, 100, None).await.unwrap();
+        assert_eq!(result.copied, 3);
+        assert_eq!(result.next_cursor, 4);
+
+        let dest = store.read("/dest", None, 100).await.unwrap();
+        assert_eq!(dest.entries.len(), 4);
+        // Continues the destination's own sequence rather than colliding
+        // with or restarting from the source's.
+        assert_eq!(dest.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+        let copied: Vec<&str> = dest.entries[1..].iter().map(|e| e.message.as_deref().unwrap()).collect();
+        assert_eq!(copied, vec!["m0", "m1", "m2"]);
+        // The source is untouched - this is copy, not move.
+        let src = store.read("/src", None, 100).await.unwrap();
+        assert_eq!(src.entries.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn copy_only_touches_the_named_invocation() {
+        // A console is identified by action_ref alone, so a shared one
+        // interleaves every concurrent caller's entries. Copying "everything
+        // from cursor" would pull in entries that are not this caller's.
+        let (_d, store) = test_store().await;
+        store.print("/src", "inv-a", None, "info", "guest", Some("a1".into()), None).await.unwrap();
+        store.print("/src", "inv-b", None, "info", "guest", Some("b1".into()), None).await.unwrap();
+        store.print("/src", "inv-a", None, "info", "guest", Some("a2".into()), None).await.unwrap();
+
+        let result = store.copy("/src", "/dest", "inv-a", None, 100, None).await.unwrap();
+        assert_eq!(result.copied, 2);
+        let dest = store.read("/dest", None, 100).await.unwrap();
+        let messages: Vec<&str> = dest.entries.iter().map(|e| e.message.as_deref().unwrap()).collect();
+        assert_eq!(messages, vec!["a1", "a2"]);
+        assert!(dest.entries.iter().all(|e| e.invocation_id == "inv-a"));
+    }
+
+    #[tokio::test]
+    async fn copy_prefixes_the_message_with_a_label_when_given() {
+        let (_d, store) = test_store().await;
+        store.print("/src", "inv-1", None, "info", "guest", Some("chunk".into()), None).await.unwrap();
+
+        store.copy("/src", "/dest", "inv-1", None, 100, Some("summary")).await.unwrap();
+        let dest = store.read("/dest", None, 100).await.unwrap();
+        assert_eq!(dest.entries[0].message.as_deref(), Some("[summary] chunk"));
+    }
+
+    #[tokio::test]
+    async fn copy_resumes_from_the_returned_cursor() {
+        let (_d, store) = test_store().await;
+        for i in 0..5 {
+            store.print("/src", "inv-1", None, "info", "guest", Some(format!("m{i}")), None).await.unwrap();
+        }
+
+        let first = store.copy("/src", "/dest", "inv-1", None, 3, None).await.unwrap();
+        assert_eq!(first.copied, 3);
+        let second = store.copy("/src", "/dest", "inv-1", Some(first.next_cursor), 100, None).await.unwrap();
+        assert_eq!(second.copied, 2);
+
+        let dest = store.read("/dest", None, 100).await.unwrap();
+        let messages: Vec<&str> = dest.entries.iter().map(|e| e.message.as_deref().unwrap()).collect();
+        assert_eq!(messages, vec!["m0", "m1", "m2", "m3", "m4"]);
+    }
+
+    #[tokio::test]
+    async fn copy_of_nothing_new_copies_nothing_and_holds_the_cursor() {
+        let (_d, store) = test_store().await;
+        store.print("/src", "inv-1", None, "info", "guest", Some("m0".into()), None).await.unwrap();
+
+        let result = store.copy("/src", "/dest", "inv-1", Some(5), 100, None).await.unwrap();
+        assert_eq!(result.copied, 0);
+        assert_eq!(result.next_cursor, 5);
+        let dest = store.read("/dest", None, 100).await.unwrap();
+        assert!(dest.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn copy_preserves_level_and_data() {
+        let (_d, store) = test_store().await;
+        store
+            .print("/src", "inv-1", None, "warn", "guest", Some("m".into()), Some(json!({ "n": 1 })))
+            .await
+            .unwrap();
+
+        store.copy("/src", "/dest", "inv-1", None, 100, None).await.unwrap();
+        let dest = store.read("/dest", None, 100).await.unwrap();
+        assert_eq!(dest.entries[0].level, "warn");
+        assert_eq!(dest.entries[0].data, Some(json!({ "n": 1 })));
     }
 
     #[tokio::test]

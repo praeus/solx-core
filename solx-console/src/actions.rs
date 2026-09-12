@@ -4,13 +4,21 @@
 //! This is the reference consumer of `solx_surface::internal_actions`'
 //! plugin API.
 //!
-//! `print` and `cancelled` are the two handlers scoped to a caller: they
+//! `print` and `cancelled` are two of the handlers scoped to a caller: they
 //! always act on *the calling action's own* console/invocation, resolved
 //! from `ctx.caller` exactly the way `get_secret`/`set_secret` resolve
 //! their scope — there is no way to pass an arbitrary `action_ref`/
 //! `invocation_id` in. `read`/`tail`/`clear`/`list`/`start`/`stop`/`poll`
 //! take an explicit target and are unrestricted, which is what lets an
 //! orchestrating action watch (or manage) a child's console/invocation.
+//!
+//! `copy` is scoped on one side only: its *source* (`from_action_ref`) is an
+//! explicit, unrestricted target, no more sensitive than `read`/`tail`
+//! already being unrestricted on the same console — but its *destination* is
+//! always the calling action's own, resolved from `ctx.caller` like `print`.
+//! Without that, any action could inject fabricated entries into any other
+//! action's console just by naming it, the exact spoofing `print`'s own
+//! scoping already exists to prevent.
 
 use std::sync::Arc;
 
@@ -20,7 +28,7 @@ use solx_surface::internal_actions::{
     ActionExecutor, InternalActionHandler, InternalActionRegistry, InternalCallCtx, SeedAction,
 };
 
-use crate::console::{ConsoleStore, ReadResult};
+use crate::console::{ConsoleStore, CopyResult, ReadResult};
 use crate::invocations::InvocationStore;
 
 const CONSOLE_PATH: &str = "/builtin/console";
@@ -89,6 +97,38 @@ impl InternalActionHandler for ConsolePrint {
             .map_err(|e| e.to_string())?;
         Ok(json!({ "seq": seq }))
     }
+}
+
+struct ConsoleCopy {
+    store: Arc<ConsoleStore>,
+}
+
+#[async_trait]
+impl InternalActionHandler for ConsoleCopy {
+    async fn call(&self, params: &Value, ctx: &InternalCallCtx) -> std::result::Result<Value, String> {
+        let caller = ctx.caller.as_ref().ok_or_else(|| {
+            "console_copy has no action caller — it can only be called from within \
+             an action's own execution"
+                .to_string()
+        })?;
+
+        let from_action_ref = require_str(params, "from_action_ref")?;
+        let invocation_id = require_str(params, "invocation_id")?;
+        let cursor = params.get("cursor").and_then(Value::as_i64);
+        let limit = params.get("limit").and_then(Value::as_i64).unwrap_or(200);
+        let label = params.get("label").and_then(Value::as_str);
+
+        let result = self
+            .store
+            .copy(from_action_ref, caller.action_ref(), invocation_id, cursor, limit, label)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(copy_result_to_value(result))
+    }
+}
+
+fn copy_result_to_value(r: CopyResult) -> Value {
+    json!({ "copied": r.copied, "next_cursor": r.next_cursor })
 }
 
 struct ConsoleRead {
@@ -256,6 +296,13 @@ pub fn seed_actions() -> Vec<SeedAction> {
         },
         SeedAction {
             path: CONSOLE_PATH,
+            name: "copy",
+            fn_name: "console_copy",
+            description: "Copy one invocation's entries from another console into the calling action's own, renumbered into its sequence and optionally message-prefixed with a label. Requires an action caller — this cannot be called directly from the CLI, MCP, or HTTP. Built for an orchestrator draining a child invocation's console without one print call per entry.",
+            param_type: Some("ConsoleCopyParams"),
+        },
+        SeedAction {
+            path: CONSOLE_PATH,
             name: "read",
             fn_name: "console_read",
             description: "Read entries from an action's console, oldest first, starting at from_seq.",
@@ -323,6 +370,7 @@ pub fn plugin(
     let mut registry = InternalActionRegistry::new();
 
     registry.register(&["console_print"], Arc::new(ConsolePrint { store: console.clone() }));
+    registry.register(&["console_copy"], Arc::new(ConsoleCopy { store: console.clone() }));
     registry.register(&["console_read"], Arc::new(ConsoleRead { store: console.clone() }));
     registry.register(&["console_tail"], Arc::new(ConsoleTail { store: console.clone() }));
     registry.register(&["console_clear"], Arc::new(ConsoleClear { store: console.clone() }));

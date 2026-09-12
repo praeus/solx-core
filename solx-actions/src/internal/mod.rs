@@ -119,6 +119,7 @@ impl InternalCtx {
 /// Dispatch an internal action by `fn_name`. Returns the JSON result value
 /// (the caller wraps it in `ActionExecResult`).
 pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> Result<Value, String> {
+    let params = &normalize_params(params);
     match fn_name {
         // ── OAuth 2.0 authorization-code loopback ────────────────────────
         "oauth_start" => oauth::oauth_start(params).await,
@@ -203,6 +204,72 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
 // `helpers.rs` sibling: every submodule needs `require_str` / `path_or_root`
 // / `parse_input` / `to_value`, and a `pub(super)` flat collection keeps the
 // import line on each submodule to a single `use super::*`.
+
+/// Alias every top-level key of `params` under its opposite-case-convention
+/// spelling, so a caller need not know whether a given internal handler
+/// deserializes a `#[serde(rename_all = "camelCase")]` struct (`DocumentInput`,
+/// `ActionSearchQuery`, `ListOptions`, ...) or reads a raw snake_case key
+/// (`rel_path`, `doc_path`, `stream_id`, ...) — either spelling now reaches
+/// the same value.
+///
+/// Rules, in order of importance:
+/// * An explicit value under either spelling always wins over a *derived*
+///   alias — this only ever inserts a key that is entirely absent, so it can
+///   never clobber a caller-supplied value, and two independently meaningful
+///   keys that already coexist (e.g. `path` and `doc_path` — neither is a
+///   case variant of the other) are untouched.
+/// * Shallow only: nested values (an `http_request` body, a document's
+///   `contents`, a `links` array entry) are opaque payloads, not wire
+///   parameter names, and are never rewritten or descended into.
+/// * Idempotent: re-running this on its own output is a no-op, which is what
+///   lets both call sites (`LocalActionManager::exec_as_with_inner`, ahead of
+///   parameter-type validation, and `run_internal`, ahead of dispatch) run it
+///   without coordinating.
+pub(crate) fn normalize_params(params: &Value) -> Value {
+    let Some(obj) = params.as_object() else {
+        return params.clone();
+    };
+    let mut out = obj.clone();
+    for (key, value) in obj.iter() {
+        for alias in [to_camel_case(key), to_snake_case(key)] {
+            if alias != *key {
+                out.entry(alias).or_insert_with(|| value.clone());
+            }
+        }
+    }
+    Value::Object(out)
+}
+
+fn to_camel_case(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    let mut upper_next = false;
+    for ch in key.chars() {
+        if ch == '_' {
+            upper_next = true;
+        } else if upper_next {
+            out.extend(ch.to_uppercase());
+            upper_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn to_snake_case(key: &str) -> String {
+    let mut out = String::with_capacity(key.len() + 4);
+    for (i, ch) in key.char_indices() {
+        if ch.is_ascii_uppercase() {
+            if i != 0 {
+                out.push('_');
+            }
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
 
 pub(super) fn require_str<'a>(params: &'a Value, field: &str) -> Result<&'a str, String> {
     params
@@ -565,6 +632,86 @@ mod tests {
             .await
             .expect_err("hidden action must read back as not-found");
             assert!(err.contains("not found"), "{key}: {err}");
+        }
+    }
+
+    /// The other direction of the split: a CRUD handler that deserializes a
+    /// camelCase struct still accepts the snake_case spelling of the same
+    /// field, since `run_internal` aliases both before `parse_input` ever
+    /// sees `params`.
+    #[tokio::test]
+    async fn entity_save_document_accepts_snake_case_type_ref() {
+        let (_d, ctx) = test_ctx(None).await;
+        let saved = run_internal(
+            "entity_save_document",
+            &json!({"path": "/notes", "name": "a", "type_ref": "/types/core/Object", "contents": {}}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.get("typeRef").and_then(Value::as_str), Some("/types/core/Object"));
+    }
+
+    /// And a raw-key utility handler accepts the camelCase spelling of its
+    /// own snake_case field, for the same reason in the other direction.
+    #[tokio::test]
+    async fn file_put_accepts_camel_case_rel_path() {
+        let (_d, ctx) = test_ctx(None).await;
+        run_internal("file_put", &json!({"relPath": "notes/a.txt", "content": "hello"}), &ctx)
+            .await
+            .unwrap();
+        let got = run_internal("file_get", &json!({"rel_path": "notes/a.txt"}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(got.get("content").and_then(Value::as_str), Some("hello"));
+    }
+
+    mod normalize_params_tests {
+        use super::normalize_params;
+        use serde_json::json;
+
+        #[test]
+        fn aliases_snake_case_to_camel_case_and_back() {
+            let out = normalize_params(&json!({"rel_path": "a"}));
+            assert_eq!(out.get("relPath").and_then(|v| v.as_str()), Some("a"));
+
+            let out = normalize_params(&json!({"typeRef": "b"}));
+            assert_eq!(out.get("type_ref").and_then(|v| v.as_str()), Some("b"));
+        }
+
+        #[test]
+        fn never_overwrites_an_explicit_value_under_the_other_spelling() {
+            let out = normalize_params(&json!({"rel_path": "a", "relPath": "b"}));
+            assert_eq!(out.get("rel_path").and_then(|v| v.as_str()), Some("a"));
+            assert_eq!(out.get("relPath").and_then(|v| v.as_str()), Some("b"));
+        }
+
+        #[test]
+        fn leaves_genuinely_distinct_keys_alone() {
+            // `path` and `doc_path` are two different concepts, not case
+            // variants of one another — normalizing must not let one
+            // influence the other. `doc_path` still gets its own camelCase
+            // alias (`docPath`), but it must carry `doc_path`'s value, never
+            // `path`'s.
+            let out = normalize_params(&json!({"path": "a", "doc_path": "b"}));
+            assert_eq!(out.get("path").and_then(|v| v.as_str()), Some("a"));
+            assert_eq!(out.get("doc_path").and_then(|v| v.as_str()), Some("b"));
+            assert_eq!(out.get("docPath").and_then(|v| v.as_str()), Some("b"));
+        }
+
+        #[test]
+        fn is_shallow_and_never_touches_nested_values() {
+            let out = normalize_params(&json!({"contents": {"type_ref": "x"}}));
+            let contents = out.get("contents").unwrap();
+            assert!(contents.get("typeRef").is_none());
+            assert_eq!(contents.get("type_ref").and_then(|v| v.as_str()), Some("x"));
+        }
+
+        #[test]
+        fn is_idempotent() {
+            let once = normalize_params(&json!({"rel_path": "a", "timeoutSecs": 5}));
+            let twice = normalize_params(&once);
+            assert_eq!(once, twice);
         }
     }
 
