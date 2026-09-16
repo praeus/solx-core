@@ -18,17 +18,21 @@
 //!   [`strip_comments`]). A `#` inside a single- or double-quoted substring
 //!   (e.g. a URL fragment in a JSON body) is left alone — only an unquoted
 //!   `#` starts a comment. There's no block-comment form.
-//! - **A literal `'` or `"` inside a quoted argument needs `'` / `\"`.**
-//!   [`strip_comments`], [`split_respecting_quotes`] and [`tokenize_stage`]
-//!   all honor the escape: inside a single-quoted argument (almost always a
-//!   `--json '{...}'` body), write `'` to get a literal apostrophe without
-//!   ending the argument. Getting this wrong is silent and severe rather than
-//!   a parse error: an *unescaped* `'` ends the argument right there, and
+//! - **Wrap JSON bodies in `'''triple single quotes'''`, not `'...'`.**
+//!   Everything between `'''` and the next `'''` is taken completely raw —
+//!   no escaping of any kind — so a JSON body full of apostrophes, quotes,
+//!   or backslashes can be pasted in unmodified. This is the recommended
+//!   form for `--json '''{...}'''` bodies and condition string literals
+//!   alike; the only limitation is that the content can't itself contain the
+//!   literal 3-character sequence `'''`, which essentially never comes up.
+//!   The older single/double-quoted form (`'...'`/`"..."`) still works for
+//!   backward compatibility: a literal `'` or `"` inside one of those needs
+//!   `\'` / `\"`, and getting that wrong is silent and severe rather than a
+//!   parse error — an *unescaped* `'` ends the argument right there, and
 //!   everything after it on the line becomes bare, unrelated tokens that
 //!   still form a syntactically valid (but wrong) statement. This is exactly
-//!   what broke an early package's `install.solx`. JSON itself never needs a
-//!   `'` escaped, so the unescaped text that reaches `serde_json` is valid
-//!   either way — the concern is purely the `.solx` layer around it.
+//!   what broke an early package's `install.solx`, and is why `'''...'''` is
+//!   preferred for anything that might contain an apostrophe.
 //! - **Every statement needs its own `;`, including control-flow keywords.**
 //!   Newlines are cosmetic — only `;` separates statements. `if $x == null`
 //!   followed by a newline and `$y = ...` on the next line is one merged
@@ -109,7 +113,21 @@ pub async fn execute_script_with_vars(
     interp::exec_block(runner, &program, &mut ctx).await
 }
 
-/// Strip `#`-to-end-of-line comments, respecting single/double quoted
+/// Called with the first `'` of a possible `'''` already consumed as `ch`;
+/// if the next two characters are also `'`, consumes them and returns `true`
+/// (a full `'''` matched). Otherwise consumes nothing and returns `false`.
+fn consume_triple_quote_rest(chars: &mut std::iter::Peekable<std::str::Chars>) -> bool {
+    let mut lookahead = chars.clone();
+    if lookahead.next() == Some('\'') && lookahead.next() == Some('\'') {
+        chars.next();
+        chars.next();
+        true
+    } else {
+        false
+    }
+}
+
+/// Strip `#`-to-end-of-line comments, respecting single/double/triple quoted
 /// substrings — an unquoted `#` starts a comment, a quoted one (e.g. a URL
 /// fragment inside a JSON body) is left alone. Called once, before the
 /// `;`-split, so a comment line can sit anywhere a statement could.
@@ -117,9 +135,24 @@ pub fn strip_comments(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut in_single = false;
     let mut in_double = false;
+    let mut in_triple = false;
     let mut chars = source.chars().peekable();
 
     while let Some(ch) = chars.next() {
+        if in_triple {
+            if ch == '\'' && consume_triple_quote_rest(&mut chars) {
+                in_triple = false;
+                out.push_str("'''");
+            } else {
+                out.push(ch);
+            }
+            continue;
+        }
+        if ch == '\'' && !in_single && !in_double && consume_triple_quote_rest(&mut chars) {
+            in_triple = true;
+            out.push_str("'''");
+            continue;
+        }
         match ch {
             '\\' if in_single && chars.peek() == Some(&'\'') => {
                 out.push(ch);
@@ -183,16 +216,32 @@ pub(crate) async fn execute_pipeline(
     Ok(piped.unwrap_or(Value::Null))
 }
 
-/// Split `s` on `sep`, respecting single/double quoted substrings. `\'` inside
-/// single quotes and `\"` inside double quotes are literal quote characters.
+/// Split `s` on `sep`, respecting single/double/triple quoted substrings.
+/// `\'` inside single quotes and `\"` inside double quotes are literal quote
+/// characters; a `'''...'''` substring is taken raw, with no escaping.
 pub fn split_respecting_quotes(s: &str, sep: char) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut in_single = false;
     let mut in_double = false;
+    let mut in_triple = false;
     let mut chars = s.chars().peekable();
 
     while let Some(ch) = chars.next() {
+        if in_triple {
+            if ch == '\'' && consume_triple_quote_rest(&mut chars) {
+                in_triple = false;
+                current.push_str("'''");
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        if ch == '\'' && !in_single && !in_double && consume_triple_quote_rest(&mut chars) {
+            in_triple = true;
+            current.push_str("'''");
+            continue;
+        }
         match ch {
             '\\' if in_single && chars.peek() == Some(&'\'') => {
                 current.push(ch);
@@ -224,15 +273,29 @@ pub fn split_respecting_quotes(s: &str, sep: char) -> Vec<String> {
 }
 
 /// Tokenize a stage into argv tokens, stripping quotes. `\'`/`\"` inside the
-/// matching quote become literal quote characters.
+/// matching quote become literal quote characters; a `'''...'''` substring
+/// is taken raw (delimiters stripped, no escaping applied inside).
 pub fn tokenize_stage(s: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut in_single = false;
     let mut in_double = false;
+    let mut in_triple = false;
     let mut chars = s.chars().peekable();
 
     while let Some(ch) = chars.next() {
+        if in_triple {
+            if ch == '\'' && consume_triple_quote_rest(&mut chars) {
+                in_triple = false;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        if ch == '\'' && !in_single && !in_double && consume_triple_quote_rest(&mut chars) {
+            in_triple = true;
+            continue;
+        }
         match ch {
             '\\' if in_single && chars.peek() == Some(&'\'') => {
                 current.push(chars.next().unwrap());
@@ -396,6 +459,45 @@ mod tests {
             seen: Mutex::new(Vec::new()),
         };
         let src = r#"save doc /a --json '{"text":"can\'t stop"}'; save doc /b --json '{"text":"ok"}';"#;
+        execute_script(&r, src).await.unwrap();
+        let seen = r.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(
+            seen[0],
+            vec!["save", "doc", "/a", "--json", r#"{"text":"can't stop"}"#]
+        );
+        assert_eq!(
+            seen[1],
+            vec!["save", "doc", "/b", "--json", r#"{"text":"ok"}"#]
+        );
+    }
+
+    #[test]
+    fn triple_quoted_json_needs_no_escaping() {
+        // '''...''' is taken raw: an embedded apostrophe (or `;`/`#`/`\`)
+        // needs no escaping at all, unlike the '...'/"..." form above.
+        let toks = tokenize_stage(r#"save doc /a --json '''{"text":"can't stop; #1 \o/"}'''"#);
+        assert_eq!(
+            toks,
+            vec!["save", "doc", "/a", "--json", r#"{"text":"can't stop; #1 \o/"}"#]
+        );
+    }
+
+    #[test]
+    fn triple_quotes_protect_separators_and_comments() {
+        let stmts = split_respecting_quotes(r#"json '''a; b'''; json 'c'"#, ';');
+        assert_eq!(stmts, vec![r#"json '''a; b'''"#, r#" json 'c'"#]);
+
+        let stripped = strip_comments(r#"json '''a # not a comment'''  # a real comment"#);
+        assert_eq!(stripped, r#"json '''a # not a comment'''  "#);
+    }
+
+    #[tokio::test]
+    async fn triple_quoted_apostrophe_does_not_truncate_the_rest_of_the_argument() {
+        let r = Recorder {
+            seen: Mutex::new(Vec::new()),
+        };
+        let src = r#"save doc /a --json '''{"text":"can't stop"}'''; save doc /b --json '{"text":"ok"}';"#;
         execute_script(&r, src).await.unwrap();
         let seen = r.seen.lock().unwrap();
         assert_eq!(seen.len(), 2);

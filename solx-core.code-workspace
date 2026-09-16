@@ -28,5 +28,8 @@
 			"name": "test",
 			"path": "../test"
 		}
-	]
+	],
+	"settings": {
+		"powershell.cwd": "solx-core"
+	}
 }

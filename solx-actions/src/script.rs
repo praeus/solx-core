@@ -244,4 +244,26 @@ mod tests {
         let tokens = vec!["json".to_string(), "not-json".to_string()];
         assert!(run_json(&tokens).is_err());
     }
+
+    #[test]
+    fn triple_quoted_json_with_apostrophe_reaches_run_json() {
+        // The tokenizer strips '''...''' raw, with no escaping needed, so a
+        // JSON body with an embedded apostrophe reaches serde_json intact.
+        let tokens =
+            solx_scripts::tokenize_stage(r#"json '''{"text":"can't stop"}'''"#);
+        assert_eq!(
+            run_json(&tokens).unwrap(),
+            serde_json::json!({"text": "can't stop"})
+        );
+    }
+
+    #[test]
+    fn triple_quoted_json_with_apostrophe_reaches_exec_stage() {
+        let tokens = solx_scripts::tokenize_stage(
+            r#"exec /pkg/name --json '''{"text":"can't stop"}'''"#,
+        );
+        let (reference, json) = parse_exec_stage(&tokens).unwrap();
+        assert_eq!(reference, "/pkg/name");
+        assert_eq!(json.as_deref(), Some(r#"{"text":"can't stop"}"#));
+    }
 }

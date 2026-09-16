@@ -13,7 +13,7 @@ use std::str::Chars;
 use serde_json::Value;
 use solx_surface::error::{Result, SolxError};
 
-use crate::navigate_json_path;
+use crate::{consume_triple_quote_rest, navigate_json_path};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -112,16 +112,50 @@ fn lex(src: &str) -> Result<Vec<Token>> {
                     tokens.push(Token::Op(CompareOp::Gt));
                 }
             }
-            '\'' | '"' => {
-                let quote = c;
+            '\'' => {
+                chars.next();
+                if consume_triple_quote_rest(&mut chars) {
+                    let mut s = String::new();
+                    loop {
+                        match chars.next() {
+                            Some('\'') if consume_triple_quote_rest(&mut chars) => break,
+                            Some(ch) => s.push(ch),
+                            None => {
+                                return Err(SolxError::Invalid(format!(
+                                    "unterminated triple-quoted string literal in condition: {src}"
+                                )))
+                            }
+                        }
+                    }
+                    tokens.push(Token::Str(s));
+                } else {
+                    let mut s = String::new();
+                    loop {
+                        match chars.next() {
+                            Some('\\') if chars.peek() == Some(&'\'') => {
+                                s.push(chars.next().unwrap());
+                            }
+                            Some('\'') => break,
+                            Some(ch) => s.push(ch),
+                            None => {
+                                return Err(SolxError::Invalid(format!(
+                                    "unterminated string literal in condition: {src}"
+                                )))
+                            }
+                        }
+                    }
+                    tokens.push(Token::Str(s));
+                }
+            }
+            '"' => {
                 chars.next();
                 let mut s = String::new();
                 loop {
                     match chars.next() {
-                        Some('\\') if chars.peek() == Some(&quote) => {
+                        Some('\\') if chars.peek() == Some(&'"') => {
                             s.push(chars.next().unwrap());
                         }
-                        Some(ch) if ch == quote => break,
+                        Some('"') => break,
                         Some(ch) => s.push(ch),
                         None => {
                             return Err(SolxError::Invalid(format!(
@@ -454,6 +488,12 @@ mod tests {
         let ctx = ctx_with(&[("status", Value::String("ready".into()))]);
         assert_eq!(eval(r#"$status == "ready""#, &ctx), Value::Bool(true));
         assert_eq!(eval(r#"$status != "pending""#, &ctx), Value::Bool(true));
+    }
+
+    #[test]
+    fn compares_triple_quoted_string_with_apostrophe() {
+        let ctx = ctx_with(&[("name", Value::String("can't stop".into()))]);
+        assert_eq!(eval(r#"$name == '''can't stop'''"#, &ctx), Value::Bool(true));
     }
 
     #[test]
