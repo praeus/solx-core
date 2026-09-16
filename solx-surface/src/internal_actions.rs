@@ -14,7 +14,7 @@
 //! in [`crate::managers`] plus the calling [`Caller`], nothing crate-specific
 //! (config services, the concrete action manager, task-spawn machinery). A
 //! handler that needs something beyond that (e.g. `solx-console`'s
-//! `action_start`/`stop`/`poll`, which need to spawn and abort detached
+//! `action-start`/`stop`/`poll`, which need to spawn and abort detached
 //! tasks) takes it via constructor injection instead — see
 //! [`ActionExecutor`].
 
@@ -54,7 +54,7 @@ use crate::managers::{ActionManager, DocManager, FileStore, TypeManager};
 ///
 /// **Invariant:** a `Caller` is read-only input to secret-key resolution.
 /// No internal action may return it, or any key inside it, in its result —
-/// `get_secret` returns the decrypted *value*, never the key that unlocked
+/// `get-secret` returns the decrypted *value*, never the key that unlocked
 /// it.
 #[derive(Debug, Clone)]
 pub struct Caller {
@@ -94,8 +94,8 @@ impl Caller {
 
     /// Like [`Self::from_action`], but stamped with a caller-chosen
     /// `invocation_id` rather than a freshly minted one — used by a
-    /// detached `action_start` run, where the id has to be known *before*
-    /// execution begins so `action_stop`/`action_poll` have something to
+    /// detached `action-start` run, where the id has to be known *before*
+    /// execution begins so `action-stop`/`action-poll` have something to
     /// address.
     pub fn with_invocation(
         action_ref: impl Into<String>,
@@ -215,7 +215,7 @@ pub trait InternalActionHandler: Send + Sync {
     async fn call(&self, params: &Value, ctx: &InternalCallCtx) -> std::result::Result<Value, String>;
 }
 
-/// The seam `action_start`/`action_stop`/`action_poll` need into
+/// The seam `action-start`/`action-stop`/`action-poll` need into
 /// `solx-actions`' own detached-task orchestration, without depending on its
 /// concrete `LocalActionManager` type. Mirrors
 /// `LocalActionManager::{start_invocation,stop_invocation,poll_invocation}`

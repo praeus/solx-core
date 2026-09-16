@@ -73,7 +73,7 @@ pub struct Invocation {
 }
 
 impl Invocation {
-    /// The shape `action_start`/`action_stop`/`action_poll` all return.
+    /// The shape `action-start`/`action-stop`/`action-poll` all return.
     pub fn to_json(&self) -> Value {
         serde_json::json!({
             "invocation_id": self.invocation_id,
@@ -146,7 +146,7 @@ impl InvocationStore {
 
     /// `true` if a cancel has been requested for this invocation, `false`
     /// for both "no" and "unknown id" — the callers of this (the loopback
-    /// `/cancelled` route, `action_cancelled`) must fail closed rather than
+    /// `/cancelled` route, `action-cancelled`) must fail closed rather than
     /// ever spuriously report a cancellation.
     pub async fn is_cancelled(&self, invocation_id: &str) -> Result<bool> {
         let conn = self.db.connect().await?;

@@ -1,4 +1,4 @@
-//! HTTP request built-in: `http_request`.
+//! HTTP request built-in: `http-request`.
 //!
 //! General-purpose HTTP fetch: any method, optional headers, optional
 //! body, per-request timeout, and a structured response (status, headers,
@@ -12,8 +12,8 @@
 //! use (`crate::net::check_outbound_url`). Without it this built-in is an
 //! unrestricted, CORS-free egress proxy for anything that can exec an action.
 //!
-//! Body encoding follows the same `utf8`/`base64` convention as `file_put`
-//! and `file_get`. For methods that have no semantic body (`GET`, `HEAD`),
+//! Body encoding follows the same `utf8`/`base64` convention as `file-put`
+//! and `file-get`. For methods that have no semantic body (`GET`, `HEAD`),
 //! reqwest itself drops the body — we don't pre-empt that.
 
 use base64::Engine as _;

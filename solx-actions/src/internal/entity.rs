@@ -1,6 +1,6 @@
 //! Entity CRUD and search built-ins: documents, types, actions.
 //!
-//! The `entity_save_action` / `entity_delete_action` handlers apply the
+//! The `entity-save-action` / `entity-delete-action` handlers apply the
 //! shell-/webhook-guard that prevents an MCP tool call, a WASM guest, or a
 //! `.solx` script from creating or modifying an executable action — see
 //! [`super::guard_executable_action`] for the shared helper.
@@ -136,7 +136,7 @@ pub(super) async fn action_save(params: &Value, actions: &Arc<dyn ActionManager>
 ///
 /// Both spellings of the flag are accepted. This handler reads its params by
 /// raw key, where the convention is snake_case (`rel_path`, `stream_id`,
-/// `doc_path`), but the sibling `search_actions` deserializes an
+/// `doc_path`), but the sibling `search-actions` deserializes an
 /// `ActionSearchQuery`, which is `rename_all = "camelCase"`. One concept
 /// reached by two calls should not need two spellings from the caller, and a
 /// guest that guesses wrong would silently get an *unfiltered* answer.
@@ -200,7 +200,7 @@ pub(super) async fn search_documents(params: &Value, docs: &Arc<dyn DocManager>)
 /// Full-text (FTS5) + structured filter search over the action catalogue —
 /// `q` matches `path`/`name`/`caption`/`description`/`category`/`phrases`,
 /// ranked by relevance, and composes with the same `path_prefix`/
-/// `filter_field`/date filters as `entity_list_actions`.
+/// `filter_field`/date filters as `entity-list-actions`.
 pub(super) async fn search_actions(params: &Value, actions: &Arc<dyn ActionManager>) -> Result<Value, String> {
     let query: ActionSearchQuery = parse_input(params)?;
     let page = actions.search(query).await.map_err(|e| e.to_string())?;

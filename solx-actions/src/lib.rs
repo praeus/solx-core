@@ -47,7 +47,7 @@ use caller::Caller;
 use db::{map_db, Db};
 
 /// Whether this process is a long-lived host (`solx-server`, `solx-mcp`) —
-/// the only kind that can safely run a detached `action_start` invocation.
+/// the only kind that can safely run a detached `action-start` invocation.
 /// A `tokio::spawn`'d task is not cancelled when an axum handler future
 /// drops, which is what lets detachment survive client disconnect; but a
 /// CLI process exits the moment `exec` returns, which would kill a
@@ -131,8 +131,8 @@ pub struct LocalActionManager {
     /// Owned by `solx-console`, its own separate database file — see that
     /// crate's module docs.
     console: Arc<ConsoleStore>,
-    /// Status/cancel-flag state for `action_start`/`action_stop`/
-    /// `action_poll` — see `solx_console::invocations` for why the console
+    /// Status/cancel-flag state for `action-start`/`action-stop`/
+    /// `action-poll` — see `solx_console::invocations` for why the console
     /// alone isn't enough. Also owned by `solx-console`.
     invocations: Arc<InvocationStore>,
     /// Every `fn_name -> handler` registration contributed by an internal-
@@ -143,11 +143,11 @@ pub struct LocalActionManager {
     ///
     /// Built lazily in [`Self::set_self_ref`] rather than in [`Self::open`]:
     /// `solx_console::actions::plugin` needs an `Arc<dyn ActionExecutor>`
-    /// for `action_start`/`stop`/`poll`, which requires this manager to
+    /// for `action-start`/`stop`/`poll`, which requires this manager to
     /// already be wrapped in an `Arc` — the same reason [`Self::self_ref`]
     /// itself is a `OnceLock` rather than a plain field.
     plugin_registry: OnceLock<Arc<InternalActionRegistry>>,
-    /// Abort handles for in-flight detached (`action_start`) tasks, keyed by
+    /// Abort handles for in-flight detached (`action-start`) tasks, keyed by
     /// `invocation_id`. A field, not a process global — unlike the
     /// loopback's registry (see `solx_console::loopback`'s doc on why *that* one
     /// has to be a `OnceCell`), nothing here needs to survive across
@@ -283,7 +283,7 @@ impl LocalActionManager {
     /// error) if [`Self::set_self_ref`] hasn't been called yet — every real
     /// wiring path calls it immediately after construction, so this only
     /// matters for a test harness that skips it, in which case
-    /// `console_print`/`action_start`/etc. simply report "unknown internal
+    /// `console-print`/`action-start`/etc. simply report "unknown internal
     /// fn_name" rather than panicking.
     pub(crate) fn plugin_registry(&self) -> Arc<InternalActionRegistry> {
         self.plugin_registry.get().cloned().unwrap_or_default()
@@ -837,7 +837,7 @@ impl LocalActionManager {
     ///
     /// `caller` is `Some` only on the recursive hop: a WASM guest calling
     /// `action-exec` (see [`crate::wasm`]), which is the sole
-    /// re-entrant path into execution. It scopes `get_secret`/`set_secret`
+    /// re-entrant path into execution. It scopes `get-secret`/`set-secret`
     /// to the *calling* action's own keys.
     pub async fn exec_as(
         &self,
@@ -853,14 +853,14 @@ impl LocalActionManager {
     /// up front instead of letting one be minted at dispatch time.
     ///
     /// Only [`Self::start_invocation`] ever passes `Some` — a detached run
-    /// needs the id known *before* execution begins, so `action_stop`/
-    /// `action_poll` have something to address before the run finishes (or
+    /// needs the id known *before* execution begins, so `action-stop`/
+    /// `action-poll` have something to address before the run finishes (or
     /// even starts). `invocation_id.is_some()` doubles as "this is a
     /// detached run" for the timeout default below; every other caller goes
     /// through [`Self::exec_as`], which always passes `None`.
     ///
     /// **Why a manually boxed future, not `async fn`:** this method's
-    /// `Internal` arm can dispatch to `action_start`, whose handler calls
+    /// `Internal` arm can dispatch to `action-start`, whose handler calls
     /// [`Self::start_invocation`], which `tokio::spawn`s a task that calls
     /// back into *this very method*. An `async fn`'s return type is an
     /// anonymous, structurally-inferred generator — with that indirect
@@ -1069,7 +1069,7 @@ impl LocalActionManager {
     pub async fn start_invocation(&self, path: &str, name: &str, params: Value) -> Result<Value> {
         if !is_long_lived_host() {
             return Err(SolxError::Exec(
-                "action_start requires a long-lived host (solx-server or solx-mcp). \
+                "action-start requires a long-lived host (solx-server or solx-mcp). \
                  This process exits when exec returns, which would kill the invocation \
                  before it could be polled. Point the CLI at a running server, or use exec."
                     .into(),
@@ -1124,7 +1124,7 @@ impl LocalActionManager {
 
     /// Request that a detached invocation stop. Cooperative first: sets the
     /// flag a running Command child (via the loopback `/cancelled` route)
-    /// or a running Wasm/Script/Internal caller (via `action_cancelled`)
+    /// or a running Wasm/Script/Internal caller (via `action-cancelled`)
     /// can observe and exit on its own. If it hasn't gone terminal within
     /// `grace_secs` (default `stop_grace_secs`), the task is force-aborted —
     /// dropping the future, which reaps a Command child via the existing
@@ -1597,7 +1597,7 @@ mod tests {
     async fn exec_accepts_camel_case_for_a_required_snake_case_builtin_param() {
         let (_d, _c, m) = setup_wired().await;
         let result = m
-            .exec("/builtin/file", "file_put", serde_json::json!({"relPath": "a.txt", "content": "hi"}))
+            .exec("/builtin/file", "file-put", serde_json::json!({"relPath": "a.txt", "content": "hi"}))
             .await
             .unwrap();
         assert_eq!(result.result.get("rel_path").and_then(Value::as_str), Some("a.txt"));
@@ -1981,14 +1981,14 @@ mod tests {
         assert!(entries.is_empty(), "{entries:?}");
     }
 
-    // ── entity_save_action: no self-granting shell ───────────────────────
+    // ── entity-save-action: no self-granting shell ───────────────────────
     //
-    // These go through `exec` on `/builtin/action/entity_save_action`, which is the
+    // These go through `exec` on `/builtin/action/entity-save-action`, which is the
     // exact path an MCP tool call, a WASM guest's `action-exec`, and a
     // `.solx` script all take. A direct `m.save(...)` is the CLI's path and
     // stays allowed — that's the whole distinction being enforced.
 
-    // Only ever used for `entity_save_action`/`entity_delete_action`, which
+    // Only ever used for `entity-save-action`/`entity-delete-action`, which
     // live under `ACTION_PATH` (action-entity CRUD, alongside the async
     // start/stop/poll/cancelled actions), not the flat `/builtin` root.
     async fn exec_builtin(m: &Arc<LocalActionManager>, fn_name: &str, params: Value) -> Result<Value> {
@@ -2002,7 +2002,7 @@ mod tests {
         for ty in ["command", "webhook"] {
             let err = exec_builtin(
                 &m,
-                "entity_save_action",
+                "entity-save-action",
                 serde_json::json!({
                     "path": "/evil", "name": "shell",
                     "actionType": ty, "fnName": "rm -rf /"
@@ -2035,7 +2035,7 @@ mod tests {
 
         let err = exec_builtin(
             &m,
-            "entity_save_action",
+            "entity-save-action",
             serde_json::json!({ "path": "/tools", "name": "safe", "fnName": "rm -rf /" }),
         )
         .await
@@ -2064,7 +2064,7 @@ mod tests {
 
         let err = exec_builtin(
             &m,
-            "entity_delete_action",
+            "entity-delete-action",
             serde_json::json!({ "path": "/tools", "name": "safe" }),
         )
         .await
@@ -2080,7 +2080,7 @@ mod tests {
         let (_d, _cfg, m) = setup_wired().await;
         exec_builtin(
             &m,
-            "entity_save_action",
+            "entity-save-action",
             serde_json::json!({
                 "path": "/tools", "name": "w",
                 "actionType": "wasm", "binName": "x.wasm"
@@ -2167,7 +2167,7 @@ mod tests {
     #[tokio::test]
     async fn exec_script_reads_params_and_calls_nested_action() {
         let (_d, m, files) = setup_script().await;
-        // The bare `exec /builtin/action/entity_list_actions` (no `json`
+        // The bare `exec /builtin/action/entity-list-actions` (no `json`
         // wrapping needed) becomes the script's result directly: the callee's
         // whole ActionExecResult, JSON-encoded — same as `handle_exec` in the
         // CLI. `json`'s argument is parsed as JSON, and `tokenize_stage`
@@ -2178,7 +2178,7 @@ mod tests {
         post_script_artifact(
             &files,
             "hello.solx",
-            "if $params.go == true; exec /builtin/action/entity_list_actions; else; json '\"skipped\"'; endif",
+            "if $params.go == true; exec /builtin/action/entity-list-actions; else; json '\"skipped\"'; endif",
         )
         .await;
         m.save(
@@ -2212,7 +2212,7 @@ mod tests {
         post_script_artifact(
             &files,
             "count.solx",
-            "exec /builtin/action/entity_list_actions; exec /builtin/document/entity_list_documents",
+            "exec /builtin/action/entity-list-actions; exec /builtin/document/entity-list-documents",
         )
         .await;
         m.save(
@@ -2232,8 +2232,8 @@ mod tests {
         let entries = m.console().read("/tools/count", None, 10).await.unwrap().entries;
         assert_eq!(entries.len(), 2, "{entries:?}");
         assert_eq!(entries[0].source, "script");
-        assert_eq!(entries[0].message.as_deref(), Some("exec /builtin/action/entity_list_actions"));
-        assert_eq!(entries[1].message.as_deref(), Some("exec /builtin/document/entity_list_documents"));
+        assert_eq!(entries[0].message.as_deref(), Some("exec /builtin/action/entity-list-actions"));
+        assert_eq!(entries[1].message.as_deref(), Some("exec /builtin/document/entity-list-documents"));
         // Both stages share the one script invocation's identity.
         assert_eq!(entries[0].invocation_id, entries[1].invocation_id);
     }
@@ -2311,10 +2311,10 @@ mod tests {
     async fn exec_script_action_not_blocked_by_executable_action_guard() {
         let (_d, m, _files) = setup_script().await;
         // Unlike `command`/`webhook`, `script` may be created through the
-        // guarded `entity_save_action` built-in the same way `wasm` can.
+        // guarded `entity-save-action` built-in the same way `wasm` can.
         exec_builtin(
             &m,
-            "entity_save_action",
+            "entity-save-action",
             serde_json::json!({
                 "path": "/tools", "name": "s",
                 "actionType": "script", "binName": "x.solx"
@@ -2359,8 +2359,8 @@ mod tests {
         let doc_get = page
             .items
             .iter()
-            .find(|a| a.name == "entity_get_document")
-            .expect("entity_get_document should be seeded");
+            .find(|a| a.name == "entity-get-document")
+            .expect("entity-get-document should be seeded");
         assert!(doc_get.trusted, "seeded built-ins should be trusted");
         // Entity CRUD is dispatched natively (`internal`), not through the
         // WASM guest — see solx-actions/src/seed.rs's module docs: the WASM

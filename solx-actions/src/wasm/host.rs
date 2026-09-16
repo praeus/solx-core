@@ -9,7 +9,7 @@
 //! from the row it was handed and passes it to [`HostState::new`], and
 //! every `action-exec` call the guest makes goes through
 //! [`crate::LocalActionManager::exec_as`] carrying it. That is what scopes
-//! `get_secret`/`set_secret` to the guest's own keys. The frame is rebuilt
+//! `get-secret`/`set-secret` to the guest's own keys. The frame is rebuilt
 //! per nesting level, so a guest invoking another guest cannot reach the
 //! outer one's secrets.
 
@@ -178,7 +178,7 @@ impl sol::actions::logger::Host for HostState {
     async fn log(&mut self, message: String) {
         // Direct call into the console store rather than a synthetic
         // action-exec("/builtin/console/print", ...) round trip — this
-        // guest already *is* the caller `console_print` would resolve to,
+        // guest already *is* the caller `console-print` would resolve to,
         // so there's nothing the extra hop would add. Best-effort: a
         // console write failing must never fail the guest's log call.
         if let Err(e) = self

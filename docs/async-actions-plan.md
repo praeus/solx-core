@@ -10,7 +10,7 @@ as the deferred item; this is its "how".
 
 Status: **Done.** Everything in §1–§8 is implemented and tested — the
 `invocations` table/store, `exec_as_with`, `start`/`stop`/`poll_invocation`,
-both cancellation paths (loopback `/cancelled` and `action_cancelled`),
+both cancellation paths (loopback `/cancelled` and `action-cancelled`),
 `solx-package-log::cancelled()`, the long-lived-host gate, and the four seeded
 `/builtin/action/*` actions. §11's list is the only remaining loose thread,
 none of it blocking.
@@ -75,7 +75,7 @@ everything else.
 | Action surface | `/builtin/action/*` — internal actions, not a new manager trait. Same reasoning as the console (companion doc §3.1) |
 | Host lifetime | **Long-lived hosts only** — `solx-server`, `solx-mcp`. `solx exec` refuses, loudly |
 | `stop` semantics | Cooperative flag first, force-abort after a grace period |
-| `poll` payload | Status and result/error only. Output stays with `console_read`/`console_tail` |
+| `poll` payload | Status and result/error only. Output stays with `console-read`/`console-tail` |
 | Result persistence | Yes — `ActionExecResult`'s value is stored on the invocation row. This is new; `exec` has never persisted a result |
 | Survive process restart | **No.** An interrupted run is marked `interrupted`, not relaunched |
 | `run_id` propagation | **Future.** Still `NULL`, as in phase 1 |
@@ -264,7 +264,7 @@ on the host side.
 
 ### 5b. Wasm, Script, Internal — one more internal action
 
-`action_cancelled`, no params, caller-scoped exactly as `console_print` is
+`action-cancelled`, no params, caller-scoped exactly as `console-print` is
 (`internal/console.rs:18-27`): it resolves `ctx.caller.invocation_id()` and
 hard-errors with the same message shape when there is no caller. Returns
 `{"cancelled": bool}`.
@@ -311,11 +311,11 @@ A `static LONG_LIVED: AtomicBool` in `solx-actions` with a public
 `set_long_lived_host(bool)`, called once in each of `solx-server/src/main.rs`
 and `solx-mcp/src/main.rs`.
 
-`action_start` refuses otherwise, with a message naming the fix rather than
+`action-start` refuses otherwise, with a message naming the fix rather than
 just the symptom:
 
 ```
-action_start requires a long-lived host (solx-server or solx-mcp).
+action-start requires a long-lived host (solx-server or solx-mcp).
 This process exits when exec returns, which would kill the invocation
 before it could be polled. Point the CLI at a running server, or use exec.
 ```
@@ -333,10 +333,10 @@ New `solx-actions/src/internal/invocation.rs`, dispatched from the table at
 `internal/mod.rs:97-168`:
 
 ```rust
-"action_start"     => invocation::start(params, ctx).await,
-"action_stop"      => invocation::stop(params, ctx).await,
-"action_poll"      => invocation::poll(params, ctx).await,
-"action_cancelled" => invocation::cancelled(ctx.caller.as_ref(), &ctx.invocations).await,
+"action-start"     => invocation::start(params, ctx).await,
+"action-stop"      => invocation::stop(params, ctx).await,
+"action-poll"      => invocation::poll(params, ctx).await,
+"action-cancelled" => invocation::cancelled(ctx.caller.as_ref(), &ctx.invocations).await,
 ```
 
 Seed rows in `solx-actions/src/seed.rs` under a new
@@ -360,7 +360,7 @@ modifying* executable actions, not invoking them. So `start` needs no new
 guard — it is `exec` with a different return shape.
 
 **`stop` and `poll` take an arbitrary `invocation_id` and are unrestricted**,
-the same call that makes `console_read`/`console_tail` unrestricted so an
+the same call that makes `console-read`/`console-tail` unrestricted so an
 orchestrator can watch a child (`internal/console.rs:5-9`).
 
 One obligation is inherited and worth restating, because nothing enforces it
@@ -424,7 +424,7 @@ Mirror `console/mod.rs`'s test style — tempdir, `Db::open`,
   unknown tokens are 401; a registration built with `invocations: None` reports
   `false`; a dropped registration's token stops working (extend the existing
   test)
-- **`internal/invocation.rs`** — `action_cancelled` errors with no caller;
+- **`internal/invocation.rs`** — `action-cancelled` errors with no caller;
   `poll` of an unknown id is `NotFound`; `start` errors when the host is not
   long-lived
 - **`solx-package-log`** — `cancelled()` returns `false` against a dead URL
@@ -439,7 +439,7 @@ With `solx-server` running:
    each iteration and logging progress
 2. `POST /actions/exec` → `/builtin/action/start`; note `invocation_id` and
    `console_seq_start`
-3. `console_read` from `console_seq_start` shows progress accruing while the
+3. `console-read` from `console_seq_start` shows progress accruing while the
    HTTP request that started it has long since returned — this is the actual
    detachment assertion
 4. `/builtin/action/stop` → `poll` shows `cancelling`, then `cancelled` within a

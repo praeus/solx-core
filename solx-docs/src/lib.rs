@@ -640,7 +640,7 @@ impl DocManager for LocalDocManager {
         // puts the best FTS5 match first, and returning full `Document` rows
         // (via the same `row_to_doc` `get`/`list` already use) means a
         // caller no longer needs a second round-trip to read a hit's actual
-        // contents — see `solx-actions::search_actions`, which took the same
+        // contents — see `solx-actions::search-actions`, which took the same
         // approach first (server-side rank order, no numeric score exposed).
         let sql = format!(
             "SELECT d.id,d.path,d.name,d.title,d.summary,d.type_ref,d.contents,d.author,d.pub_date,d.confidence,d.links,d.files,d.created_at,d.updated_at \

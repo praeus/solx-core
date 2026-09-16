@@ -23,7 +23,7 @@ use super::require_str;
 pub(super) async fn open_url(params: &Value, cfg: &ConfigService) -> Result<Value, String> {
     let url = require_str(params, "url")?;
     if url.trim().is_empty() {
-        return Err("open_url: 'url' must not be empty".into());
+        return Err("open-url: 'url' must not be empty".into());
     }
     // Gated like every other outbound path. This one hands the URL to the
     // user's real browser session, so `file:`/`javascript:`/`about:` are
@@ -52,7 +52,7 @@ pub(super) async fn open_url(params: &Value, cfg: &ConfigService) -> Result<Valu
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|e| format!("open_url: failed to launch '{program}': {e}"))?;
+        .map_err(|e| format!("open-url: failed to launch '{program}': {e}"))?;
 
     Ok(json!({ "opened": true, "url": url }))
 }

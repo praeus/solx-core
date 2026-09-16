@@ -1,11 +1,11 @@
 //! Document field ops:
 //!
-//! * `get_field` / `set_field` — read or write a single **top-level** key
-//!   in `contents`. `set_field` is a shallow merge, so other fields are
+//! * `get-field` / `set-field` — read or write a single **top-level** key
+//!   in `contents`. `set-field` is a shallow merge, so other fields are
 //!   preserved.
-//! * `get_field_at_path` / `set_field_at_path` — read or write a nested
+//! * `get-field-at-path` / `set-field-at-path` — read or write a nested
 //!   value via a `/`-separated JSON path
-//!   (e.g. `metadata/tags/0`). `set_field_at_path` with `create: true`
+//!   (e.g. `metadata/tags/0`). `set-field-at-path` with `create: true`
 //!   synthesizes missing parent containers (objects for non-numeric
 //!   segments, arrays for numeric ones, padded with `null`).
 //!
@@ -230,7 +230,7 @@ pub(super) async fn set_field_at_path(params: &Value, docs: &Arc<dyn DocManager>
     let path_exists = value_at_path(&existing.contents, &segments).is_ok();
     if path_exists {
         set_at_path(&mut existing.contents, &segments, value)
-            .map_err(|e| format!("set_field_at_path: {e}"))?;
+            .map_err(|e| format!("set-field-at-path: {e}"))?;
     } else {
         if !create {
             return Err(format!(
@@ -242,7 +242,7 @@ pub(super) async fn set_field_at_path(params: &Value, docs: &Arc<dyn DocManager>
         // numeric segments) wherever the path is missing.
         create_missing_parents(&mut existing.contents, &segments)?;
         set_at_path(&mut existing.contents, &segments, value)
-            .map_err(|e| format!("set_field_at_path after create: {e}"))?;
+            .map_err(|e| format!("set-field-at-path after create: {e}"))?;
     }
 
     let input = document_input_from(&existing);

@@ -87,18 +87,18 @@ pub struct SolxConfig {
 
     /// Environment-store allowlist: guest key -> system/process env var
     /// name to read. Only keys listed here are ever visible via the
-    /// `get_env` built-in action — callers never see the raw process
+    /// `get-env` built-in action — callers never see the raw process
     /// environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_mappings: Option<HashMap<String, String>>,
 
     /// Persisted environment-store variables, `namespace -> key -> value`.
-    /// Written by the `set_env` built-in when called with `persist: true`,
+    /// Written by the `set-env` built-in when called with `persist: true`,
     /// and loaded back into the store at startup, so a variable survives a
     /// restart. Distinct from `env_mappings`, which is a read-only allowlist
     /// over the *system* environment and is never written here.
     ///
-    /// **Plaintext.** Anything sensitive belongs in `get_secret`/`set_secret`,
+    /// **Plaintext.** Anything sensitive belongs in `get-secret`/`set-secret`,
     /// which are encrypted and held in the OS credential manager. Delete a
     /// variable by removing it from this map.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,13 +129,13 @@ pub struct SolxConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub console_ttl_days: Option<i64>,
 
-    /// Wall-clock ceiling for a detached (`action_start`) invocation with no
+    /// Wall-clock ceiling for a detached (`action-start`) invocation with no
     /// `action_config.timeout_secs` of its own. Defaults to 86400 (24h) —
     /// deliberately much larger than `exec`'s 300s default, since a detached
     /// run is expected to outlive any one caller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_timeout_secs: Option<u64>,
-    /// How long `action_stop` waits for cooperative exit (the running
+    /// How long `action-stop` waits for cooperative exit (the running
     /// action noticing `cancel_requested` and returning on its own) before
     /// force-aborting the task. Defaults to 10.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -180,7 +180,7 @@ pub struct SolxConfig {
     /// permitted at all.
     ///
     /// This governs `Webhook`-type actions *and* the `/builtin/web/*`
-    /// built-ins (`http_request`, `http_stream_start`, `open_url`) — which is
+    /// built-ins (`http-request`, `http-stream-start`, `open-url`) — which is
     /// why it is no longer named for webhooks.
     ///
     /// ```json
@@ -237,7 +237,7 @@ pub struct SolxConfig {
     ///
     /// ```json
     /// "tool_destructive": [
-    ///   { "path": "/builtin/document", "actions": ["entity_delete_document"] }
+    ///   { "path": "/builtin/document", "actions": ["entity-delete-document"] }
     /// ]
     /// ```
     ///
@@ -296,7 +296,7 @@ impl ToolRule {
 ///
 /// **Both decisions union their inputs, and nothing subtracts.** Config rules
 /// are a floor that a row cannot lower: anything that can call
-/// `entity_save_action` can rewrite a row's `capabilities` (the executable-
+/// `entity-save-action` can rewrite a row's `capabilities` (the executable-
 /// action guard protects Command and Webhook *rows*, not the tags on a Script
 /// or Wasm one), so a tag alone would be a flag the flagged party can remove.
 #[derive(Debug, Clone, Default)]
@@ -456,7 +456,7 @@ mod tests {
     fn removing_the_tag_cannot_unhide_what_config_hid() {
         // The whole reason config is a floor rather than the only input:
         // a row's capabilities are writable by anything that can call
-        // entity_save_action.
+        // entity-save-action.
         let policy = ToolPolicy::new(vec![ToolRule { path: "/packages/x".into(), actions: None }], vec![]);
         assert!(policy.is_hidden(&action("/packages/x", "y", &["totally-safe"], None)));
     }
@@ -474,10 +474,10 @@ mod tests {
     fn destructive_unions_tag_and_config() {
         let policy = ToolPolicy::new(
             vec![],
-            vec![ToolRule { path: "/builtin/document".into(), actions: Some(vec!["entity_delete_document".into()]) }],
+            vec![ToolRule { path: "/builtin/document".into(), actions: Some(vec!["entity-delete-document".into()]) }],
         );
-        assert!(policy.is_destructive(&action("/builtin/document", "entity_delete_document", &[], Some(ActionType::Internal))));
-        assert!(!policy.is_destructive(&action("/builtin/document", "entity_get_document", &[], Some(ActionType::Internal))));
+        assert!(policy.is_destructive(&action("/builtin/document", "entity-delete-document", &[], Some(ActionType::Internal))));
+        assert!(!policy.is_destructive(&action("/builtin/document", "entity-get-document", &[], Some(ActionType::Internal))));
         assert!(policy.is_destructive(&action("/packages/x", "wipe", &[CAP_DESTRUCTIVE], Some(ActionType::Wasm))));
     }
 

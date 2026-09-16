@@ -281,7 +281,7 @@ impl ServerHandler for SolxMcpServer {
             "Every action in the solx actions database is surfaced here as a tool. \
              Documents, types, actions-as-data, search, and general file-store access \
              are all reached through those actions (e.g. entity_new_document, \
-             search_documents, file_put) — there is no separate CRUD tool layer."
+             search-documents, file-put) — there is no separate CRUD tool layer."
                 .to_string(),
         );
         info

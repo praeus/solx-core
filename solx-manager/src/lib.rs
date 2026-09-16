@@ -1,8 +1,8 @@
 //! Wires the solx manager implementations together — the same sequence
 //! `solx-cli`'s `App::build()` used to do inline. Extracted so `solx-mcp`
 //! (and any other future long-lived consumer) gets identical, correct
-//! wiring for free: seeding the built-in `get_env`/`set_env` environment
-//! store before any `get_env` call, and the `set_self_ref` dance
+//! wiring for free: seeding the built-in `get-env`/`set-env` environment
+//! store before any `get-env` call, and the `set_self_ref` dance
 //! `LocalActionManager` needs for recursive WASM/internal action-exec
 //! calls, are both easy to silently get wrong in a second, duplicated
 //! copy, and neither failure mode shows up until the corresponding feature
@@ -105,13 +105,13 @@ impl App {
     /// Today's exact wiring, unchanged: open the three local databases and
     /// the local file store, wire `LocalActionManager`'s self-reference.
     async fn wire_local(config: Arc<ConfigService>) -> Result<Arc<Self>> {
-        // Seed the built-in `get_env`/`set_env` environment store once at
+        // Seed the built-in `get-env`/`set-env` environment store once at
         // startup (decoupled from any single exec() call — see
         // internal::init_env_mappings).
         solx_actions::internal::init_env_mappings(
             config.snapshot().env_mappings.unwrap_or_default(),
         );
-        // Then load variables persisted by `set_env { persist: true }`, so a
+        // Then load variables persisted by `set-env { persist: true }`, so a
         // resume cursor (or any other durable variable) survives a restart.
         // Ordering matters: these win over an `env_mappings` key of the same
         // name, since they were written deliberately rather than mirrored

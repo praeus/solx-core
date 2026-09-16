@@ -396,7 +396,7 @@ fn builtin_action_param_types() -> Vec<SeedType> {
                     },
                     "persist": {
                         "type": "boolean",
-                        "description": "Also write the variable to solx-config.json under env_vars, so it survives a restart. Persistence is sticky: once a variable is persisted, later writes keep updating the config even without this flag. Stored in plaintext — use set_secret for anything sensitive. Remove a persisted variable by deleting it from solx-config.json."
+                        "description": "Also write the variable to solx-config.json under env_vars, so it survives a restart. Persistence is sticky: once a variable is persisted, later writes keep updating the config even without this flag. Stored in plaintext — use set-secret for anything sensitive. Remove a persisted variable by deleting it from solx-config.json."
                     }
                 }
             }),

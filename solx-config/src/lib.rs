@@ -358,7 +358,7 @@ impl ConfigService {
         }
     }
 
-    /// Grace period `action_stop` waits for cooperative exit before
+    /// Grace period `action-stop` waits for cooperative exit before
     /// force-aborting. Defaults to 10 when unset or non-positive.
     pub fn stop_grace_secs(&self) -> u64 {
         match self.snapshot().stop_grace_secs {
@@ -435,7 +435,7 @@ impl ConfigService {
 
     /// Persist `value` under `namespace`/`key`, creating the namespace if
     /// needed. Goes through the same cross-process `mutate()` lock as every
-    /// other config write, so concurrent `set_env` calls can't lose an entry
+    /// other config write, so concurrent `set-env` calls can't lose an entry
     /// by read-modify-writing a stale snapshot.
     pub fn set_env_var(&self, namespace: &str, key: &str, value: &str) -> Result<()> {
         self.mutate(|obj| {

@@ -1,4 +1,4 @@
-//! `script_exec` — parse and immediately run a raw solx script string,
+//! `script-exec` — parse and immediately run a raw solx script string,
 //! reusing the same `solx-scripts` interpreter and `exec`/`json` stage
 //! grammar as a stored `Script`-typed action (see `crate::script`).
 //!
@@ -25,7 +25,7 @@ use super::require_str;
 /// HTTP route rather than nested inside another action's `exec` stage or a
 /// WASM guest's recursive `action-exec`. Used only for console-log
 /// attribution; a `None` config gives it no secret keys to resolve, exactly
-/// like calling `get_secret` with no action caller at all.
+/// like calling `get-secret` with no action caller at all.
 const ANON_CALLER_REF: &str = "/builtin/script/exec";
 
 /// Run `params.script` immediately and return its result. `params.params`
@@ -34,7 +34,7 @@ const ANON_CALLER_REF: &str = "/builtin/script/exec";
 /// through this action behaves identically once saved as one.
 ///
 /// Nested `exec` stages inside the script run as `caller` when this call has
-/// one (a script action or WASM guest invoking `script_exec` recursively),
+/// one (a script action or WASM guest invoking `script-exec` recursively),
 /// so they reach exactly the same secrets that caller could reach directly —
 /// otherwise they run as the caller-less identity above.
 pub(super) async fn exec(
@@ -62,7 +62,7 @@ pub(super) async fn exec(
 
     tokio::time::timeout(budget, run)
         .await
-        .map_err(|_| "script_exec: script timed out".to_string())?
+        .map_err(|_| "script-exec: script timed out".to_string())?
         .map_err(|e| e.to_string())
 }
 

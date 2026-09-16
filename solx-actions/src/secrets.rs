@@ -26,7 +26,7 @@
 //!
 //! ## Test seams
 //!
-//! Tests inject a fake loader via [`set_secret_loader_for_tests`] so
+//! Tests inject a fake loader via [`set-secret_loader_for_tests`] so
 //! they do not require a real OS credential manager (and so they can
 //! cover the keyring-failure path deterministically). The default
 //! loader is the real `keyring::Entry::get_password`.
@@ -183,7 +183,7 @@ pub async fn load_keyring_with_test_override(r: &KeyringRef) -> Result<String, S
 // fields. Every value is additionally encrypted with a caller-supplied
 // 32-byte key before being written to the OS credential manager, and
 // that key lives in the calling action's own `action_config.secrets`
-// map (see `internal::secrets::get_secret`/`set_secret`) — so reading a secret
+// map (see `internal::secrets::get-secret`/`set-secret`) — so reading a secret
 // back out requires both a keyring hit *and* possession of the
 // matching key. The host never hands a key to a guest itself; it only
 // ever looks one up from the config of the action that is currently

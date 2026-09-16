@@ -3,10 +3,10 @@
 //! One check, shared by every path that can make solx reach the network on a
 //! caller's behalf: `Webhook`-type actions (`exec::run_webhook`) and the
 //! `/builtin/web/*` built-ins (`internal::http`, `internal::http_stream`,
-//! `internal::open_url`).
+//! `internal::open-url`).
 //!
 //! It used to live inline in `run_webhook` and cover only webhook rows, which
-//! left `http_request` as an unrestricted egress proxy reachable by any WASM
+//! left `http-request` as an unrestricted egress proxy reachable by any WASM
 //! guest, MCP client or widget holding a bearer token — the deny-by-default
 //! posture the README advertises with a hole straight through it. Extracting
 //! it is what lets all four call it, and keeping it in one place is what stops

@@ -63,8 +63,8 @@ async fn tools_list_and_call_tool_round_trip_over_http() -> anyhow::Result<()> {
     // Owned (not `&str` borrowed from `tools`): `CallToolRequestParams::new`
     // takes `impl Into<Cow<'static, str>>`, which a borrow scoped to this
     // function can't satisfy.
-    let put_name = names.iter().find(|n| n.contains("file_put")).expect("a file_put tool should exist").to_string();
-    let get_name = names.iter().find(|n| n.contains("file_get")).expect("a file_get tool should exist").to_string();
+    let put_name = names.iter().find(|n| n.contains("file-put")).expect("a file-put tool should exist").to_string();
+    let get_name = names.iter().find(|n| n.contains("file-get")).expect("a file-get tool should exist").to_string();
 
     let put = client
         .call_tool(CallToolRequestParams::new(put_name).with_arguments(
@@ -122,7 +122,7 @@ async fn call_tool_streams_console_entries_as_progress_notifications_over_http()
     app.files()
         .put(
             &solx_files::shared_action_file_path("count.solx"),
-            b"exec /builtin/action/entity_list_actions; exec /builtin/document/entity_list_documents".to_vec(),
+            b"exec /builtin/action/entity-list-actions; exec /builtin/document/entity-list-documents".to_vec(),
         )
         .await?;
     app.actions()
@@ -149,7 +149,7 @@ async fn call_tool_streams_console_entries_as_progress_notifications_over_http()
     assert!(!received.is_empty(), "expected at least one progress notification over HTTP/SSE");
     let messages: Vec<String> = received.iter().filter_map(|p| p.message.clone()).collect();
     assert!(
-        messages.iter().any(|m| m.contains("exec /builtin/action/entity_list_actions")),
+        messages.iter().any(|m| m.contains("exec /builtin/action/entity-list-actions")),
         "expected a progress message naming the first stage, got: {messages:?}"
     );
 

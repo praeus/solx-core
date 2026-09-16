@@ -74,7 +74,7 @@ CREATE INDEX IF NOT EXISTS idx_console_entries_invocation \
 /// [`TAIL_POLL_INTERVAL`]/[`MAX_TAIL_WAIT_SECS`] rather than defining a
 /// second set of long-poll constants.
 pub const TAIL_POLL_INTERVAL: Duration = Duration::from_millis(250);
-/// Ceiling on `tail`'s `wait_secs`, mirroring `oauth_await`'s timeout clamp —
+/// Ceiling on `tail`'s `wait_secs`, mirroring `oauth-await`'s timeout clamp —
 /// an internal action call should never block indefinitely.
 pub const MAX_TAIL_WAIT_SECS: u64 = 60;
 /// Evict at least this fraction of the cap at once, so a console pinned at

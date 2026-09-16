@@ -68,8 +68,8 @@ fn log_dir_slug(action_ref: &str) -> String {
 /// process, HTTP routes included.
 ///
 /// `invocation_id` is minted by the caller (`exec_as_with`), not here — a
-/// detached `action_start` run needs the id fixed *before* execution begins
-/// so `action_stop`/`action_poll` have something to address.
+/// detached `action-start` run needs the id fixed *before* execution begins
+/// so `action-stop`/`action-poll` have something to address.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_command(
     cfg: &ConfigService,

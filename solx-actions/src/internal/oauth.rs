@@ -3,14 +3,14 @@
 //!
 //! Three modes drive the loopback:
 //!
-//! * `oauth_start` — binds `127.0.0.1:{port}` (default `8765`), generates a
+//! * `oauth-start` — binds `127.0.0.1:{port}` (default `8765`), generates a
 //!   random `state_value` (CSRF token), registers a pending
 //!   `oneshot::Receiver` for the callback. Returns the `port`,
 //!   `redirect_uri`, and `state_value`.
-//! * `oauth_await` — blocks until the registered loopback for
+//! * `oauth-await` — blocks until the registered loopback for
 //!   `state_value` receives the provider's redirect (or until the loopback
 //!   is stopped). Returns the captured `code` / `error`.
-//! * `oauth_stop` — triggers graceful shutdown of the loopback for
+//! * `oauth-stop` — triggers graceful shutdown of the loopback for
 //!   `state_value` and drops the inbox receiver.
 
 use std::collections::HashMap;
@@ -68,7 +68,7 @@ fn inbox_drop(state_value: &str) {
 
 /// Test-only: pub(super) so the test module in `mod.rs` can drive
 /// callback / receiver reordering without going through an actual
-/// `oauth_start`. Not exposed outside the crate.
+/// `oauth-start`. Not exposed outside the crate.
 #[cfg(test)]
 pub(super) fn test_inbox_put(state_value: String, rx: oneshot::Receiver<LoopbackResult>) {
     inbox_put(state_value, rx);
@@ -94,7 +94,7 @@ pub(super) fn test_generate_state_value() -> String {
     generate_state_value()
 }
 
-// ── oauth_start ──────────────────────────────────────────────────────────────
+// ── oauth-start ──────────────────────────────────────────────────────────────
 
 pub(super) async fn oauth_start(params: &Value) -> Result<Value, String> {
     let port = params
@@ -105,7 +105,7 @@ pub(super) async fn oauth_start(params: &Value) -> Result<Value, String> {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
 
     // Bind eagerly, before registering any state, so a port-in-use failure
-    // (e.g. a second `oauth_start` on the default port before the first is
+    // (e.g. a second `oauth-start` on the default port before the first is
     // stopped) surfaces immediately as an `Err` here — rather than being
     // silently swallowed inside the spawned server task, which would leave
     // behind a `"started": true` state_value that can never actually
@@ -155,7 +155,7 @@ pub(super) async fn oauth_start(params: &Value) -> Result<Value, String> {
     }))
 }
 
-// ── oauth_await ──────────────────────────────────────────────────────────────
+// ── oauth-await ──────────────────────────────────────────────────────────────
 
 pub(super) async fn oauth_await(params: &Value) -> Result<Value, String> {
     let state_value = params
@@ -167,7 +167,7 @@ pub(super) async fn oauth_await(params: &Value) -> Result<Value, String> {
     let timeout_secs = params.get("timeout_secs").and_then(Value::as_u64);
 
     // Take the receiver out of the inbox up front. On timeout we put it
-    // back (see below) so a subsequent `oauth_await` call for the same
+    // back (see below) so a subsequent `oauth-await` call for the same
     // state_value can still succeed if the callback arrives later — the
     // underlying loopback listener keeps running independently of this
     // call.
@@ -199,7 +199,7 @@ pub(super) async fn oauth_await(params: &Value) -> Result<Value, String> {
                     return Err(format!(
                         "oauth callback timed out after {secs}s for state_value \
                          '{state_value}'; the loopback is still running and a later \
-                         oauth_await call for the same state_value may still succeed"
+                         oauth-await call for the same state_value may still succeed"
                     ));
                 }
             }
@@ -237,7 +237,7 @@ pub(super) async fn oauth_await(params: &Value) -> Result<Value, String> {
     Ok(Value::Object(obj))
 }
 
-// ── oauth_stop ───────────────────────────────────────────────────────────────
+// ── oauth-stop ───────────────────────────────────────────────────────────────
 
 pub(super) async fn oauth_stop(params: &Value) -> Result<Value, String> {
     let state_value = require_str(params, "state_value")?.to_string();

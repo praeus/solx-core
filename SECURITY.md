@@ -37,26 +37,26 @@ own config: the allowlist author decides where an approved command runs.
 
 **Outbound HTTP is prefix-allowlisted.** Every URL solx fetches on a caller's
 behalf must start with an entry in `allowed_base_urls`: a `webhook` action's
-resolved URL, and the URL given to `/builtin/web/http_request`,
-`/builtin/web/stream/start` or `/builtin/web/open_url`. All four share one
+resolved URL, and the URL given to `/builtin/web/http-request`,
+`/builtin/web/stream/start` or `/builtin/web/open-url`. All four share one
 check (`solx-actions::net::check_outbound_url`), applied before any
 connection is opened — so a denied webhook leaves no trace beyond the error,
-and a denied built-in makes no request at all. `open_url` additionally
+and a denied built-in makes no request at all. `open-url` additionally
 refuses any scheme but `http`/`https`, since `file:`/`javascript:`/`about:`
 carry no host for a prefix to constrain and it hands the URL to the user's
 real browser session.
 
 The `/builtin/web/*` built-ins were ungated until this check was extracted
 and shared; before that, anything able to exec an action — a WASM guest, an
-MCP client, a widget with a bearer token — could use `http_request` as an
+MCP client, a widget with a bearer token — could use `http-request` as an
 unrestricted egress proxy. The former config key `allowed_webhook_base_urls`
 is still read, and unioned in, so an existing config keeps working.
 
 Both allowlists are **deny-by-default**. An empty or absent allowlist denies
 everything rather than allowing everything.
 
-**Guests cannot grant themselves execution.** `entity_save_action` and
-`entity_delete_action` refuse to create, modify, or delete `command` and
+**Guests cannot grant themselves execution.** `entity-save-action` and
+`entity-delete-action` refuse to create, modify, or delete `command` and
 `webhook` actions. That built-in is the only route to action creation
 available to an MCP client, a WASM guest, or a `.solx` script, since MCP has
 no separate CRUD layer. The check reads the *stored* row, not just the
@@ -76,7 +76,7 @@ revokes exactly those, unless another installed package also declares the
 same key or prefix. A collision between packages is a logged warning, not a
 silent overwrite.
 
-**Secrets are scoped to the calling action.** `get_secret`/`set_secret`
+**Secrets are scoped to the calling action.** `get-secret`/`set-secret`
 resolve only against the *calling* action's own `action_config.secrets` map.
 The caller is threaded host-side and never serialized, so a client cannot
 spoof it.

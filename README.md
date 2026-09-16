@@ -41,7 +41,7 @@ CLI, HTTP, MCP, JS, web UI — gets all of them at once.
 ## Paths
 
 Documents, actions, and types share a single directory-style namespace: a
-flat store keyed by `path` + `name`. `/builtin/document/search_documents`,
+flat store keyed by `path` + `name`. `/builtin/document/search-documents`,
 `/packages/solx-google/gmail-send`, `/weather/forecast`.
 
 The namespace is also the access control for tool catalogues. Set
@@ -61,10 +61,10 @@ here, so the boundaries are explicit:
   unregistered key is refused, including when the allowlist is entirely
   unset.
 - **Deny-by-default outbound allowlist.** Every outbound URL — a `webhook`
-  action's, and any handed to `/builtin/web/http_request`,
-  `/builtin/web/stream/start` or `/builtin/web/open_url` — must match a
+  action's, and any handed to `/builtin/web/http-request`,
+  `/builtin/web/stream/start` or `/builtin/web/open-url` — must match a
   prefix in `allowed_base_urls`. One check, in `solx-actions::net`.
-- **Guests cannot self-grant.** `entity_save_action` refuses to create,
+- **Guests cannot self-grant.** `entity-save-action` refuses to create,
   modify, or delete `command` and `webhook` actions. That built-in is the
   only route to action creation available to an MCP client, a WASM guest, or
   a `.solx` script — so a model or a package's code cannot grant itself shell
@@ -74,7 +74,7 @@ here, so the boundaries are explicit:
   allowlist entries it needs; install grants exactly those and records them,
   uninstall revokes exactly those (unless another installed package also
   declares them).
-- **Secrets are scoped and masked.** `get_secret`/`set_secret` resolve only
+- **Secrets are scoped and masked.** `get-secret`/`set-secret` resolve only
   against the *calling* action's own `action_config.secrets`. Reads through
   `ActionManager::get`/`list` redact `action_config.secrets` and `auth`, so
   keys never cross the HTTP boundary or reach an MCP client — and writes run

@@ -327,7 +327,7 @@ where
 /// Serve the loopback on an already-bound listener until `shutdown` is
 /// triggered. Lets the caller bind synchronously first — so a port-in-use
 /// failure surfaces immediately as an `Err`, rather than being discovered
-/// only inside a spawned server task (see `crate::internal::oauth_start`,
+/// only inside a spawned server task (see `crate::internal::oauth-start`,
 /// which binds eagerly and only spawns the long-running server after a
 /// successful bind).
 pub async fn serve_loopback_with_shutdown_on<F>(

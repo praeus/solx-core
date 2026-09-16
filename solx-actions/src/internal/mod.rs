@@ -17,12 +17,12 @@
 //! * [`entity`] — CRUD and search over documents, types, and actions
 //!   (including the executable-action guard)
 //! * [`file`] — file-store and recursive directory operations
-//! * [`doc_fields`] — flat (`get_field`/`set_field`) and path-style
-//!   (`get_field_at_path`/`set_field_at_path`) document field ops
-//! * [`http`] — generic HTTP request (`http_request`)
-//! * [`env`] — the in-process environment store (`get_env`/`set_env`) and
+//! * [`doc_fields`] — flat (`get-field`/`set-field`) and path-style
+//!   (`get-field-at-path`/`set-field-at-path`) document field ops
+//! * [`http`] — generic HTTP request (`http-request`)
+//! * [`env`] — the in-process environment store (`get-env`/`set-env`) and
 //!   the `init_env_mappings`/`init_persisted_env` startup hooks
-//! * [`secrets`] — the per-caller `get_secret`/`set_secret`
+//! * [`secrets`] — the per-caller `get-secret`/`set-secret`
 //! * [`oauth`] — the OAuth 2.0 authorization-code loopback controllers
 //!   and their registry/inbox state
 //!
@@ -72,7 +72,7 @@ pub struct InternalCtx {
     pub types: Arc<dyn TypeManager>,
     pub actions: Arc<dyn ActionManager>,
     pub files: Arc<dyn FileStore>,
-    /// Needed by `set_env` to write persisted variables through to
+    /// Needed by `set-env` to write persisted variables through to
     /// `SolxConfig.env_vars`. Every other built-in handler reaches its
     /// state through the managers above.
     pub config: Arc<solx_config::ConfigService>,
@@ -91,7 +91,7 @@ pub struct InternalCtx {
     pub action_config: Option<Value>,
     /// The action that *invoked* this one, when there is one. Set only on
     /// the recursive hop from a WASM guest; `None` for the CLI, MCP, and
-    /// HTTP, none of which are actions. `get_secret`/`set_secret` scope to
+    /// HTTP, none of which are actions. `get-secret`/`set-secret` scope to
     /// this — see [`crate::caller`] for why it can't be spoofed.
     ///
     /// **Invariant:** read-only input to key resolution. No handler may
@@ -122,69 +122,69 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
     let params = &normalize_params(params);
     match fn_name {
         // ── OAuth 2.0 authorization-code loopback ────────────────────────
-        "oauth_start" => oauth::oauth_start(params).await,
-        "oauth_await" => oauth::oauth_await(params).await,
-        "oauth_stop" => oauth::oauth_stop(params).await,
+        "oauth-start" => oauth::oauth_start(params).await,
+        "oauth-await" => oauth::oauth_await(params).await,
+        "oauth-stop" => oauth::oauth_stop(params).await,
 
         // ── entity CRUD ──────────────────────────────────────────────────
-        "entity_save_document" => entity::doc_save(params, &ctx.docs).await,
-        "entity_get_document" => entity::doc_get(params, &ctx.docs).await,
-        "entity_delete_document" => entity::doc_delete(params, &ctx.docs).await,
-        "entity_list_documents" => entity::doc_list(params, &ctx.docs).await,
-        "entity_list_document_paths" => entity::doc_paths(params, &ctx.docs).await,
+        "entity-save-document" => entity::doc_save(params, &ctx.docs).await,
+        "entity-get-document" => entity::doc_get(params, &ctx.docs).await,
+        "entity-delete-document" => entity::doc_delete(params, &ctx.docs).await,
+        "entity-list-documents" => entity::doc_list(params, &ctx.docs).await,
+        "entity-list-document-paths" => entity::doc_paths(params, &ctx.docs).await,
 
-        "entity_save_type" => entity::type_save(params, &ctx.types).await,
-        "entity_get_type" => entity::type_get(params, &ctx.types).await,
-        "entity_delete_type" => entity::type_delete(params, &ctx.types).await,
-        "entity_list_types" => entity::type_list(params, &ctx.types).await,
-        "entity_list_type_paths" => entity::type_paths(params, &ctx.types).await,
+        "entity-save-type" => entity::type_save(params, &ctx.types).await,
+        "entity-get-type" => entity::type_get(params, &ctx.types).await,
+        "entity-delete-type" => entity::type_delete(params, &ctx.types).await,
+        "entity-list-types" => entity::type_list(params, &ctx.types).await,
+        "entity-list-type-paths" => entity::type_paths(params, &ctx.types).await,
 
-        "entity_save_action" => entity::action_save(params, &ctx.actions).await,
-        "entity_get_action" => entity::action_get(params, &ctx.actions, &ctx.config).await,
-        "entity_delete_action" => entity::action_delete(params, &ctx.actions).await,
-        "entity_list_actions" => entity::action_list(params, &ctx.actions).await,
-        "entity_list_action_paths" => entity::action_paths(params, &ctx.actions).await,
+        "entity-save-action" => entity::action_save(params, &ctx.actions).await,
+        "entity-get-action" => entity::action_get(params, &ctx.actions, &ctx.config).await,
+        "entity-delete-action" => entity::action_delete(params, &ctx.actions).await,
+        "entity-list-actions" => entity::action_list(params, &ctx.actions).await,
+        "entity-list-action-paths" => entity::action_paths(params, &ctx.actions).await,
 
         // ── search ───────────────────────────────────────────────────────
-        "search_documents" => entity::search_documents(params, &ctx.docs).await,
-        "search_actions" => entity::search_actions(params, &ctx.actions).await,
+        "search-documents" => entity::search_documents(params, &ctx.docs).await,
+        "search-actions" => entity::search_actions(params, &ctx.actions).await,
 
         // ── file store ───────────────────────────────────────────────────
-        "file_put" => file::file_put(params, &ctx.files).await,
-        "file_get" => file::file_get(params, &ctx.files).await,
-        "file_delete" => file::file_delete(params, &ctx.files).await,
-        "file_list" => file::file_list(params, &ctx.files).await,
-        "file_copy" => file::file_copy(params, &ctx.files).await,
-        "dir_copy" => file::dir_copy(params, &ctx.files).await,
-        "dir_delete" => file::dir_delete(params, &ctx.files).await,
+        "file-put" => file::file_put(params, &ctx.files).await,
+        "file-get" => file::file_get(params, &ctx.files).await,
+        "file-delete" => file::file_delete(params, &ctx.files).await,
+        "file-list" => file::file_list(params, &ctx.files).await,
+        "file-copy" => file::file_copy(params, &ctx.files).await,
+        "dir-copy" => file::dir_copy(params, &ctx.files).await,
+        "dir-delete" => file::dir_delete(params, &ctx.files).await,
 
         // ── document field ops (flat and path-style) ─────────────────────
-        "get_field" => doc_fields::get_field(params, &ctx.docs).await,
-        "set_field" => doc_fields::set_field(params, &ctx.docs).await,
-        "get_field_at_path" => doc_fields::get_field_at_path(params, &ctx.docs).await,
-        "set_field_at_path" => doc_fields::set_field_at_path(params, &ctx.docs).await,
+        "get-field" => doc_fields::get_field(params, &ctx.docs).await,
+        "set-field" => doc_fields::set_field(params, &ctx.docs).await,
+        "get-field-at-path" => doc_fields::get_field_at_path(params, &ctx.docs).await,
+        "set-field-at-path" => doc_fields::set_field_at_path(params, &ctx.docs).await,
 
         // ── environment store ────────────────────────────────────────────
-        "get_env" => Ok(env::get_env(params)),
-        "set_env" => env::set_env(params, &ctx.config),
+        "get-env" => Ok(env::get_env(params)),
+        "set-env" => env::set_env(params, &ctx.config),
 
         // ── HTTP ─────────────────────────────────────────────────────────
-        "http_request" => http::http_request(params, &ctx.config).await,
+        "http-request" => http::http_request(params, &ctx.config).await,
 
         // ── HTTP streaming ──────────────────────────────────────────────
-        "http_stream_start" => http_stream::start(params, &ctx.config).await,
-        "http_stream_poll" => http_stream::poll(params).await,
-        "http_stream_close" => http_stream::close(params).await,
+        "http-stream-start" => http_stream::start(params, &ctx.config).await,
+        "http-stream-poll" => http_stream::poll(params).await,
+        "http-stream-close" => http_stream::close(params).await,
 
         // ── system integration ────────────────────────────────────────────
-        "open_url" => open_url::open_url(params, &ctx.config).await,
+        "open-url" => open_url::open_url(params, &ctx.config).await,
 
         // ── scripting ────────────────────────────────────────────────────
-        "script_exec" => exec::exec(params, &ctx.local, ctx.caller.as_ref()).await,
+        "script-exec" => exec::exec(params, &ctx.local, ctx.caller.as_ref()).await,
 
         // ── secrets (per-caller scoped) ──────────────────────────────────
-        "get_secret" => secrets::get_secret(params, ctx.caller.as_ref()).await,
-        "set_secret" => secrets::set_secret(params, ctx.caller.as_ref()).await,
+        "get-secret" => secrets::get_secret(params, ctx.caller.as_ref()).await,
+        "set-secret" => secrets::set_secret(params, ctx.caller.as_ref()).await,
 
         // ── everything else: consult the plugin registry ──────────────────
         // Action consoles (`console_*`) and asynchronous actions
@@ -218,7 +218,7 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
 ///   never clobber a caller-supplied value, and two independently meaningful
 ///   keys that already coexist (e.g. `path` and `doc_path` — neither is a
 ///   case variant of the other) are untouched.
-/// * Shallow only: nested values (an `http_request` body, a document's
+/// * Shallow only: nested values (an `http-request` body, a document's
 ///   `contents`, a `links` array entry) are opaque payloads, not wire
 ///   parameter names, and are never rewritten or descended into.
 /// * Idempotent: re-running this on its own output is a no-op, which is what
@@ -469,14 +469,14 @@ mod tests {
     #[tokio::test]
     async fn oauth_await_missing_state_value_errors() {
         let (_d, ctx) = test_ctx(None).await;
-        let err = run_internal("oauth_await", &json!({}), &ctx).await.unwrap_err();
+        let err = run_internal("oauth-await", &json!({}), &ctx).await.unwrap_err();
         assert!(err.contains("missing required param: state_value"), "{err}");
     }
 
     #[tokio::test]
     async fn oauth_await_unknown_state_value_errors() {
         let (_d, ctx) = test_ctx(None).await;
-        let err = run_internal("oauth_await", &json!({"state_value": "nope"}), &ctx)
+        let err = run_internal("oauth-await", &json!({"state_value": "nope"}), &ctx)
             .await
             .unwrap_err();
         assert!(err.contains("no loopback registered"), "{err}");
@@ -496,7 +496,7 @@ mod tests {
         );
 
         let v = run_internal(
-            "oauth_await",
+            "oauth-await",
             &json!({"state_value": "test-state"}),
             &ctx,
         )
@@ -524,7 +524,7 @@ mod tests {
             },
         );
 
-        let v = run_internal("oauth_await", &json!({"state_value": "denied"}), &ctx)
+        let v = run_internal("oauth-await", &json!({"state_value": "denied"}), &ctx)
             .await
             .unwrap();
 
@@ -542,14 +542,14 @@ mod tests {
     #[tokio::test]
     async fn oauth_stop_missing_state_value_errors() {
         let (_d, ctx) = test_ctx(None).await;
-        let err = run_internal("oauth_stop", &json!({}), &ctx).await.unwrap_err();
+        let err = run_internal("oauth-stop", &json!({}), &ctx).await.unwrap_err();
         assert!(err.contains("missing required param: state_value"), "{err}");
     }
 
     #[tokio::test]
     async fn oauth_stop_unknown_state_value_succeeds_with_message() {
         let (_d, ctx) = test_ctx(None).await;
-        let v = run_internal("oauth_stop", &json!({"state_value": "never-registered"}), &ctx)
+        let v = run_internal("oauth-stop", &json!({"state_value": "never-registered"}), &ctx)
             .await
             .unwrap();
         assert_eq!(v.get("stopped").and_then(Value::as_bool), Some(false));
@@ -559,7 +559,7 @@ mod tests {
     async fn entity_document_crud_honors_path() {
         let (_d, ctx) = test_ctx(None).await;
         let created = run_internal(
-            "entity_save_document",
+            "entity-save-document",
             &json!({"path": "/research/ai", "name": "note", "typeRef": "/types/core/Object", "contents": {"a": 1}}),
             &ctx,
         )
@@ -569,7 +569,7 @@ mod tests {
 
         // Wrong path must not find it — this is exactly the bug being fixed.
         let missing = run_internal(
-            "entity_get_document",
+            "entity-get-document",
             &json!({"path": "/wrong", "name": "note"}),
             &ctx,
         )
@@ -577,7 +577,7 @@ mod tests {
         assert!(missing.is_err(), "expected not-found for the wrong path");
 
         let fetched = run_internal(
-            "entity_get_document",
+            "entity-get-document",
             &json!({"path": "/research/ai", "name": "note"}),
             &ctx,
         )
@@ -586,7 +586,7 @@ mod tests {
         assert_eq!(fetched.get("name").and_then(Value::as_str), Some("note"));
 
         let deleted = run_internal(
-            "entity_delete_document",
+            "entity-delete-document",
             &json!({"path": "/research/ai", "name": "note"}),
             &ctx,
         )
@@ -598,15 +598,15 @@ mod tests {
     /// Both spellings of the flag reach the same check.
     ///
     /// The two halves of the catalogue filter are reached by different
-    /// handlers with different param conventions — `search_actions`
-    /// deserializes a camelCase `ActionSearchQuery`, `entity_get_action`
+    /// handlers with different param conventions — `search-actions`
+    /// deserializes a camelCase `ActionSearchQuery`, `entity-get-action`
     /// reads raw snake_case keys. A caller that guessed wrong would get an
     /// *unfiltered* answer with no error, so both are accepted.
     #[tokio::test]
     async fn entity_get_action_accepts_either_spelling_of_exclude_hidden() {
         let (_d, ctx) = test_ctx(None).await;
         run_internal(
-            "entity_save_action",
+            "entity-save-action",
             &json!({
                 "path": "/tools",
                 "name": "secret",
@@ -619,13 +619,13 @@ mod tests {
         .unwrap();
 
         // Without the flag it reads back normally.
-        run_internal("entity_get_action", &json!({"path": "/tools", "name": "secret"}), &ctx)
+        run_internal("entity-get-action", &json!({"path": "/tools", "name": "secret"}), &ctx)
             .await
             .unwrap();
 
         for key in ["excludeHidden", "exclude_hidden"] {
             let err = run_internal(
-                "entity_get_action",
+                "entity-get-action",
                 &json!({"path": "/tools", "name": "secret", key: true}),
                 &ctx,
             )
@@ -643,7 +643,7 @@ mod tests {
     async fn entity_save_document_accepts_snake_case_type_ref() {
         let (_d, ctx) = test_ctx(None).await;
         let saved = run_internal(
-            "entity_save_document",
+            "entity-save-document",
             &json!({"path": "/notes", "name": "a", "type_ref": "/types/core/Object", "contents": {}}),
             &ctx,
         )
@@ -657,10 +657,10 @@ mod tests {
     #[tokio::test]
     async fn file_put_accepts_camel_case_rel_path() {
         let (_d, ctx) = test_ctx(None).await;
-        run_internal("file_put", &json!({"relPath": "notes/a.txt", "content": "hello"}), &ctx)
+        run_internal("file-put", &json!({"relPath": "notes/a.txt", "content": "hello"}), &ctx)
             .await
             .unwrap();
-        let got = run_internal("file_get", &json!({"rel_path": "notes/a.txt"}), &ctx)
+        let got = run_internal("file-get", &json!({"rel_path": "notes/a.txt"}), &ctx)
             .await
             .unwrap();
         assert_eq!(got.get("content").and_then(Value::as_str), Some("hello"));
@@ -719,18 +719,18 @@ mod tests {
     async fn search_documents_and_search_actions_work() {
         let (_d, ctx) = test_ctx(None).await;
         run_internal(
-            "entity_save_document",
+            "entity-save-document",
             &json!({"path": "/notes", "name": "a", "typeRef": "/types/core/Object", "contents": {}, "title": "Hello world"}),
             &ctx,
         )
         .await
         .unwrap();
-        let results = run_internal("search_documents", &json!({"q": "Hello"}), &ctx)
+        let results = run_internal("search-documents", &json!({"q": "Hello"}), &ctx)
             .await
             .unwrap();
         assert!(results.get("total").and_then(Value::as_u64).unwrap_or(0) >= 1);
 
-        let actions = run_internal("search_actions", &json!({"pathPrefix": "/"}), &ctx)
+        let actions = run_internal("search-actions", &json!({"pathPrefix": "/"}), &ctx)
             .await
             .unwrap();
         assert!(actions.get("total").and_then(Value::as_u64).unwrap_or(0) >= 1);
@@ -740,43 +740,43 @@ mod tests {
     async fn file_put_get_list_delete_roundtrip() {
         let (_d, ctx) = test_ctx(None).await;
         run_internal(
-            "file_put",
+            "file-put",
             &json!({"rel_path": "notes/a.txt", "content": "hello"}),
             &ctx,
         )
         .await
         .unwrap();
 
-        let got = run_internal("file_get", &json!({"rel_path": "notes/a.txt"}), &ctx)
+        let got = run_internal("file-get", &json!({"rel_path": "notes/a.txt"}), &ctx)
             .await
             .unwrap();
         assert_eq!(got.get("content").and_then(Value::as_str), Some("hello"));
 
-        let listed = run_internal("file_list", &json!({"prefix": "notes"}), &ctx)
+        let listed = run_internal("file-list", &json!({"prefix": "notes"}), &ctx)
             .await
             .unwrap();
         assert!(listed.get("files").and_then(Value::as_array).map(|a| !a.is_empty()).unwrap_or(false));
 
-        run_internal("file_delete", &json!({"rel_path": "notes/a.txt"}), &ctx)
+        run_internal("file-delete", &json!({"rel_path": "notes/a.txt"}), &ctx)
             .await
             .unwrap();
-        assert!(run_internal("file_get", &json!({"rel_path": "notes/a.txt"}), &ctx).await.is_err());
+        assert!(run_internal("file-get", &json!({"rel_path": "notes/a.txt"}), &ctx).await.is_err());
     }
 
     #[tokio::test]
     async fn file_copy_and_dir_copy_work() {
         let (_d, ctx) = test_ctx(None).await;
-        run_internal("file_put", &json!({"rel_path": "src/a.txt", "content": "a"}), &ctx).await.unwrap();
-        run_internal("file_put", &json!({"rel_path": "src/sub/b.txt", "content": "b"}), &ctx).await.unwrap();
+        run_internal("file-put", &json!({"rel_path": "src/a.txt", "content": "a"}), &ctx).await.unwrap();
+        run_internal("file-put", &json!({"rel_path": "src/sub/b.txt", "content": "b"}), &ctx).await.unwrap();
 
-        run_internal("file_copy", &json!({"source": "src/a.txt", "dest": "dst/a.txt"}), &ctx)
+        run_internal("file-copy", &json!({"source": "src/a.txt", "dest": "dst/a.txt"}), &ctx)
             .await
             .unwrap();
-        let copied = run_internal("file_get", &json!({"rel_path": "dst/a.txt"}), &ctx).await.unwrap();
+        let copied = run_internal("file-get", &json!({"rel_path": "dst/a.txt"}), &ctx).await.unwrap();
         assert_eq!(copied.get("content").and_then(Value::as_str), Some("a"));
 
-        run_internal("dir_copy", &json!({"source": "src", "dest": "dst2"}), &ctx).await.unwrap();
-        let copied_nested = run_internal("file_get", &json!({"rel_path": "dst2/sub/b.txt"}), &ctx)
+        run_internal("dir-copy", &json!({"source": "src", "dest": "dst2"}), &ctx).await.unwrap();
+        let copied_nested = run_internal("file-get", &json!({"rel_path": "dst2/sub/b.txt"}), &ctx)
             .await
             .unwrap();
         assert_eq!(copied_nested.get("content").and_then(Value::as_str), Some("b"));
@@ -786,34 +786,34 @@ mod tests {
     async fn get_field_and_set_field_round_trip() {
         let (_d, ctx) = test_ctx(None).await;
         run_internal(
-            "entity_save_document",
+            "entity-save-document",
             &json!({"name": "note", "typeRef": "/types/core/Object", "contents": {"a": 1}}),
             &ctx,
         )
         .await
         .unwrap();
 
-        let a = run_internal("get_field", &json!({"name": "note", "field": "a"}), &ctx).await.unwrap();
+        let a = run_internal("get-field", &json!({"name": "note", "field": "a"}), &ctx).await.unwrap();
         assert_eq!(a, Value::from(1));
 
-        run_internal("set_field", &json!({"name": "note", "field": "b", "value": "two"}), &ctx)
+        run_internal("set-field", &json!({"name": "note", "field": "b", "value": "two"}), &ctx)
             .await
             .unwrap();
-        let b = run_internal("get_field", &json!({"name": "note", "field": "b"}), &ctx).await.unwrap();
+        let b = run_internal("get-field", &json!({"name": "note", "field": "b"}), &ctx).await.unwrap();
         assert_eq!(b, Value::String("two".into()));
         // The untouched field must survive the shallow-merge write.
-        let a_again = run_internal("get_field", &json!({"name": "note", "field": "a"}), &ctx).await.unwrap();
+        let a_again = run_internal("get-field", &json!({"name": "note", "field": "a"}), &ctx).await.unwrap();
         assert_eq!(a_again, Value::from(1));
     }
 
     #[tokio::test]
     async fn get_env_set_env_round_trip() {
         let (_d, ctx) = test_ctx(None).await;
-        let missing = run_internal("get_env", &json!({"key": "SOLX_TEST_NOPE"}), &ctx).await.unwrap();
+        let missing = run_internal("get-env", &json!({"key": "SOLX_TEST_NOPE"}), &ctx).await.unwrap();
         assert_eq!(missing.get("value").cloned(), Some(Value::Null));
 
-        run_internal("set_env", &json!({"key": "SOLX_TEST_KEY", "value": "hi"}), &ctx).await.unwrap();
-        let got = run_internal("get_env", &json!({"key": "SOLX_TEST_KEY"}), &ctx).await.unwrap();
+        run_internal("set-env", &json!({"key": "SOLX_TEST_KEY", "value": "hi"}), &ctx).await.unwrap();
+        let got = run_internal("get-env", &json!({"key": "SOLX_TEST_KEY"}), &ctx).await.unwrap();
         assert_eq!(got.get("value").and_then(Value::as_str), Some("hi"));
     }
 
@@ -824,16 +824,16 @@ mod tests {
         let (_d, ctx) = test_ctx(None).await;
         let set = |ns: &str, v: &str| json!({"namespace": ns, "key": "cursor", "value": v});
 
-        run_internal("set_env", &set("ns_iso_a", "alpha"), &ctx).await.unwrap();
-        run_internal("set_env", &set("ns_iso_b", "beta"), &ctx).await.unwrap();
+        run_internal("set-env", &set("ns_iso_a", "alpha"), &ctx).await.unwrap();
+        run_internal("set-env", &set("ns_iso_b", "beta"), &ctx).await.unwrap();
 
-        let a = run_internal("get_env", &json!({"namespace": "ns_iso_a", "key": "cursor"}), &ctx).await.unwrap();
-        let b = run_internal("get_env", &json!({"namespace": "ns_iso_b", "key": "cursor"}), &ctx).await.unwrap();
+        let a = run_internal("get-env", &json!({"namespace": "ns_iso_a", "key": "cursor"}), &ctx).await.unwrap();
+        let b = run_internal("get-env", &json!({"namespace": "ns_iso_b", "key": "cursor"}), &ctx).await.unwrap();
         assert_eq!(a.get("value").and_then(Value::as_str), Some("alpha"));
         assert_eq!(b.get("value").and_then(Value::as_str), Some("beta"));
 
         // A namespace nobody wrote to resolves to null, not to another's value.
-        let miss = run_internal("get_env", &json!({"namespace": "ns_iso_c", "key": "cursor"}), &ctx).await.unwrap();
+        let miss = run_internal("get-env", &json!({"namespace": "ns_iso_c", "key": "cursor"}), &ctx).await.unwrap();
         assert_eq!(miss.get("value").cloned(), Some(Value::Null));
     }
 
@@ -846,7 +846,7 @@ mod tests {
         let cfg = solx_config::ConfigService::open_in(dir.path()).unwrap();
 
         let res = run_internal(
-            "set_env",
+            "set-env",
             &json!({"namespace": "ns_sticky", "key": "cursor", "value": "/?skip=10", "persist": true}),
             &ctx,
         )
@@ -860,7 +860,7 @@ mod tests {
 
         // No `persist` this time — the config entry must still advance.
         let res = run_internal(
-            "set_env",
+            "set-env",
             &json!({"namespace": "ns_sticky", "key": "cursor", "value": "/?skip=20"}),
             &ctx,
         )
@@ -874,7 +874,7 @@ mod tests {
 
         // A different key in the same namespace stays ephemeral unless asked.
         run_internal(
-            "set_env",
+            "set-env",
             &json!({"namespace": "ns_sticky", "key": "scratch", "value": "x"}),
             &ctx,
         )
@@ -894,12 +894,12 @@ mod tests {
         vars.insert("ns_reload".to_string(), ns);
         init_persisted_env(vars);
 
-        let got = run_internal("get_env", &json!({"namespace": "ns_reload", "key": "cursor"}), &ctx).await.unwrap();
+        let got = run_internal("get-env", &json!({"namespace": "ns_reload", "key": "cursor"}), &ctx).await.unwrap();
         assert_eq!(got.get("value").and_then(Value::as_str), Some("/?skip=90"));
 
         // Reloaded variables are persistent, so a plain write still writes through.
         let res = run_internal(
-            "set_env",
+            "set-env",
             &json!({"namespace": "ns_reload", "key": "cursor", "value": "/?skip=100"}),
             &ctx,
         )
@@ -911,15 +911,15 @@ mod tests {
     /// The CLI, MCP, and the HTTP route all reach these built-ins with no
     /// action caller, so neither can resolve a key — this is the denial that
     /// keeps a model from reading an action's secrets by calling
-    /// `/builtin/secrets/get_secret` directly.
+    /// `/builtin/secrets/get-secret` directly.
     #[tokio::test]
     async fn secrets_are_refused_without_an_action_caller() {
         let (_d, ctx) = test_ctx(None).await;
         assert!(ctx.caller.is_none());
 
-        let err = run_internal("get_secret", &json!({"name": "FOO"}), &ctx).await.unwrap_err();
+        let err = run_internal("get-secret", &json!({"name": "FOO"}), &ctx).await.unwrap_err();
         assert!(err.contains("no action caller"), "{err}");
-        let err = run_internal("set_secret", &json!({"name": "FOO", "value": "x"}), &ctx)
+        let err = run_internal("set-secret", &json!({"name": "FOO", "value": "x"}), &ctx)
             .await
             .unwrap_err();
         assert!(err.contains("no action caller"), "{err}");
@@ -937,14 +937,14 @@ mod tests {
         ));
 
         crate::secrets::set_secret_backend_for_tests(Some(fake_secret_backend()));
-        run_internal("set_secret", &json!({"name": "FOO", "value": "s3cret"}), &ctx)
+        run_internal("set-secret", &json!({"name": "FOO", "value": "s3cret"}), &ctx)
             .await
             .unwrap();
-        let got = run_internal("get_secret", &json!({"name": "FOO"}), &ctx).await.unwrap();
+        let got = run_internal("get-secret", &json!({"name": "FOO"}), &ctx).await.unwrap();
         assert_eq!(got.get("value").and_then(Value::as_str), Some("s3cret"));
 
         // A secret the caller has no key for stays out of reach.
-        let err = run_internal("get_secret", &json!({"name": "BAR"}), &ctx).await.unwrap_err();
+        let err = run_internal("get-secret", &json!({"name": "BAR"}), &ctx).await.unwrap_err();
         assert!(err.contains("no key configured"), "{err}");
         assert!(err.contains("action://pkg/foo"), "{err}");
         crate::secrets::set_secret_backend_for_tests(None);
@@ -959,7 +959,7 @@ mod tests {
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
-    /// Regression test for the receiver-loss bug: a timed-out `oauth_await`
+    /// Regression test for the receiver-loss bug: a timed-out `oauth-await`
     /// must put the receiver back so a later call for the same
     /// `state_value` can still succeed once the callback arrives. Uses
     /// `timeout_secs: 0` so the timeout branch always wins deterministically
@@ -971,7 +971,7 @@ mod tests {
         oauth::test_inbox_put("retry-state".into(), rx);
 
         let err = run_internal(
-            "oauth_await",
+            "oauth-await",
             &json!({"state_value": "retry-state", "timeout_secs": 0}),
             &ctx,
         )
@@ -989,23 +989,23 @@ mod tests {
             error_description: None,
         });
 
-        let v = run_internal("oauth_await", &json!({"state_value": "retry-state"}), &ctx)
+        let v = run_internal("oauth-await", &json!({"state_value": "retry-state"}), &ctx)
             .await
             .unwrap();
         assert_eq!(v.get("code").and_then(Value::as_str), Some("late-code"));
     }
 
-    /// Regression test for the silent-bind-failure bug: `oauth_start` must
+    /// Regression test for the silent-bind-failure bug: `oauth-start` must
     /// surface a port-in-use error as an `Err`, not return `"started": true`
     /// for a listener that never actually bound.
     #[tokio::test]
     async fn oauth_start_surfaces_bind_failure() {
         let (_d, ctx) = test_ctx(None).await;
-        // Occupy a port first so the real bind inside oauth_start fails.
+        // Occupy a port first so the real bind inside oauth-start fails.
         let blocker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = blocker.local_addr().unwrap().port();
 
-        let err = run_internal("oauth_start", &json!({"port": port}), &ctx)
+        let err = run_internal("oauth-start", &json!({"port": port}), &ctx)
             .await
             .unwrap_err();
         assert!(
@@ -1016,22 +1016,22 @@ mod tests {
         drop(blocker);
     }
 
-    // ── dir_delete ────────────────────────────────────────────────────────
+    // ── dir-delete ────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn dir_delete_recursively_removes_tree() {
         let (_d, ctx) = test_ctx(None).await;
-        run_internal("file_put", &json!({"rel_path": "tree/a.txt", "content": "a"}), &ctx)
+        run_internal("file-put", &json!({"rel_path": "tree/a.txt", "content": "a"}), &ctx)
             .await
             .unwrap();
-        run_internal("file_put", &json!({"rel_path": "tree/sub/b.txt", "content": "b"}), &ctx)
+        run_internal("file-put", &json!({"rel_path": "tree/sub/b.txt", "content": "b"}), &ctx)
             .await
             .unwrap();
-        run_internal("file_put", &json!({"rel_path": "tree/sub/deeper/c.txt", "content": "c"}), &ctx)
+        run_internal("file-put", &json!({"rel_path": "tree/sub/deeper/c.txt", "content": "c"}), &ctx)
             .await
             .unwrap();
 
-        let v = run_internal("dir_delete", &json!({"rel_path": "tree"}), &ctx)
+        let v = run_internal("dir-delete", &json!({"rel_path": "tree"}), &ctx)
             .await
             .unwrap();
         let deleted = v.get("deleted").and_then(Value::as_array).expect("deleted array");
@@ -1041,45 +1041,45 @@ mod tests {
         assert!(deleted.iter().any(|e| e.as_str() == Some("tree/sub/deeper/c.txt")));
 
         // Confirm the subtree is gone (list is empty for the prefix).
-        let listed = run_internal("file_list", &json!({"prefix": "tree"}), &ctx)
+        let listed = run_internal("file-list", &json!({"prefix": "tree"}), &ctx)
             .await
             .unwrap();
         let files = listed.get("files").and_then(Value::as_array).cloned().unwrap_or_default();
-        assert!(files.is_empty(), "expected no files under 'tree' after dir_delete, got {files:?}");
+        assert!(files.is_empty(), "expected no files under 'tree' after dir-delete, got {files:?}");
     }
 
     #[tokio::test]
     async fn dir_delete_does_not_delete_siblings() {
         let (_d, ctx) = test_ctx(None).await;
-        run_internal("file_put", &json!({"rel_path": "keep/x.txt", "content": "k"}), &ctx)
+        run_internal("file-put", &json!({"rel_path": "keep/x.txt", "content": "k"}), &ctx)
             .await
             .unwrap();
-        run_internal("file_put", &json!({"rel_path": "drop/y.txt", "content": "d"}), &ctx)
+        run_internal("file-put", &json!({"rel_path": "drop/y.txt", "content": "d"}), &ctx)
             .await
             .unwrap();
 
-        run_internal("dir_delete", &json!({"rel_path": "drop"}), &ctx)
+        run_internal("dir-delete", &json!({"rel_path": "drop"}), &ctx)
             .await
             .unwrap();
 
         // The keep/x.txt must survive.
-        let still = run_internal("file_get", &json!({"rel_path": "keep/x.txt"}), &ctx)
+        let still = run_internal("file-get", &json!({"rel_path": "keep/x.txt"}), &ctx)
             .await
             .unwrap();
         assert_eq!(still.get("content").and_then(Value::as_str), Some("k"));
         // And the drop subtree is gone.
-        assert!(run_internal("file_get", &json!({"rel_path": "drop/y.txt"}), &ctx)
+        assert!(run_internal("file-get", &json!({"rel_path": "drop/y.txt"}), &ctx)
             .await
             .is_err());
     }
 
-    // ── get_field_at_path / set_field_at_path ─────────────────────────────
+    // ── get-field-at-path / set-field-at-path ─────────────────────────────
 
     #[tokio::test]
     async fn get_field_at_path_reads_nested_value() {
         let (_d, ctx) = test_ctx(None).await;
         run_internal(
-            "entity_save_document",
+            "entity-save-document",
             &json!({
                 "name": "doc",
                 "typeRef": "/types/core/Object",
@@ -1094,14 +1094,14 @@ mod tests {
         .unwrap();
 
         // Object key.
-        let v = run_internal("get_field_at_path", &json!({"name": "doc", "path": "metadata"}), &ctx)
+        let v = run_internal("get-field-at-path", &json!({"name": "doc", "path": "metadata"}), &ctx)
             .await
             .unwrap();
         assert_eq!(v.get("tags").and_then(Value::as_array).map(|a| a.len()), Some(2));
 
         // Nested object key.
         let v = run_internal(
-            "get_field_at_path",
+            "get-field-at-path",
             &json!({"name": "doc", "path": "metadata/tags"}),
             &ctx,
         )
@@ -1114,7 +1114,7 @@ mod tests {
 
         // Array index.
         let v = run_internal(
-            "get_field_at_path",
+            "get-field-at-path",
             &json!({"name": "doc", "path": "metadata/tags/1"}),
             &ctx,
         )
@@ -1123,14 +1123,14 @@ mod tests {
         assert_eq!(v, Value::from("beta"));
 
         // Top-level scalar.
-        let v = run_internal("get_field_at_path", &json!({"name": "doc", "path": "score"}), &ctx)
+        let v = run_internal("get-field-at-path", &json!({"name": "doc", "path": "score"}), &ctx)
             .await
             .unwrap();
         assert_eq!(v, Value::from(7));
 
         // Missing path -> null (not an error).
         let v = run_internal(
-            "get_field_at_path",
+            "get-field-at-path",
             &json!({"name": "doc", "path": "metadata/missing"}),
             &ctx,
         )
@@ -1143,7 +1143,7 @@ mod tests {
     async fn set_field_at_path_overwrites_existing_path() {
         let (_d, ctx) = test_ctx(None).await;
         run_internal(
-            "entity_save_document",
+            "entity-save-document",
             &json!({
                 "name": "doc",
                 "typeRef": "/types/core/Object",
@@ -1155,14 +1155,14 @@ mod tests {
         .unwrap();
 
         run_internal(
-            "set_field_at_path",
+            "set-field-at-path",
             &json!({"name": "doc", "path": "metadata/tags/1", "value": "B"}),
             &ctx,
         )
         .await
         .unwrap();
         let tags = run_internal(
-            "get_field_at_path",
+            "get-field-at-path",
             &json!({"name": "doc", "path": "metadata/tags"}),
             &ctx,
         )
@@ -1174,7 +1174,7 @@ mod tests {
         );
 
         // The untouched top-level field must survive.
-        let score = run_internal("get_field_at_path", &json!({"name": "doc", "path": "score"}), &ctx)
+        let score = run_internal("get-field-at-path", &json!({"name": "doc", "path": "score"}), &ctx)
             .await
             .unwrap();
         assert_eq!(score, Value::from(1));
@@ -1184,7 +1184,7 @@ mod tests {
     async fn set_field_at_path_errors_without_create() {
         let (_d, ctx) = test_ctx(None).await;
         run_internal(
-            "entity_save_document",
+            "entity-save-document",
             &json!({
                 "name": "doc",
                 "typeRef": "/types/core/Object",
@@ -1196,7 +1196,7 @@ mod tests {
         .unwrap();
 
         let err = run_internal(
-            "set_field_at_path",
+            "set-field-at-path",
             &json!({"name": "doc", "path": "metadata/foo", "value": "bar"}),
             &ctx,
         )
@@ -1210,7 +1210,7 @@ mod tests {
     async fn set_field_at_path_creates_missing_parents() {
         let (_d, ctx) = test_ctx(None).await;
         run_internal(
-            "entity_save_document",
+            "entity-save-document",
             &json!({
                 "name": "doc",
                 "typeRef": "/types/core/Object",
@@ -1223,7 +1223,7 @@ mod tests {
 
         // Object key under object key.
         run_internal(
-            "set_field_at_path",
+            "set-field-at-path",
             &json!({
                 "name": "doc",
                 "path": "metadata/foo",
@@ -1234,7 +1234,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let v = run_internal("get_field_at_path", &json!({"name": "doc", "path": "metadata/foo"}), &ctx)
+        let v = run_internal("get-field-at-path", &json!({"name": "doc", "path": "metadata/foo"}), &ctx)
             .await
             .unwrap();
         assert_eq!(v, Value::from("bar"));
@@ -1242,7 +1242,7 @@ mod tests {
         // Numeric segment into an existing object creates an array and
         // pads with null up to the requested index.
         run_internal(
-            "set_field_at_path",
+            "set-field-at-path",
             &json!({
                 "name": "doc",
                 "path": "arr/2",
@@ -1253,7 +1253,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let arr = run_internal("get_field_at_path", &json!({"name": "doc", "path": "arr"}), &ctx)
+        let arr = run_internal("get-field-at-path", &json!({"name": "doc", "path": "arr"}), &ctx)
             .await
             .unwrap();
         let arr = arr.as_array().expect("array");
@@ -1263,7 +1263,7 @@ mod tests {
         assert_eq!(arr[1], Value::Null);
     }
 
-    // ── http_request ──────────────────────────────────────────────────────
+    // ── http-request ──────────────────────────────────────────────────────
 
     /// Spin up a single-shot HTTP echo server on a random local port and
     /// return its base URL plus a `JoinHandle` for the server task. The
@@ -1336,7 +1336,7 @@ mod tests {
         let (_d, ctx) = test_ctx(None).await;
         let (base, server) = start_echo_server().await;
         let v = run_internal(
-            "http_request",
+            "http-request",
             &json!({"url": format!("{base}/ok"), "method": "GET"}),
             &ctx,
         )
@@ -1362,7 +1362,7 @@ mod tests {
         let (_d, ctx) = test_ctx(None).await;
         let (base, server) = start_echo_server().await;
         let v = run_internal(
-            "http_request",
+            "http-request",
             &json!({
                 "url": format!("{base}/ok"),
                 "method": "POST",
@@ -1389,7 +1389,7 @@ mod tests {
         // Crucial difference from the old `fetch_html`: a 503 is *not* an
         // error — the response is returned and the caller decides.
         let v = run_internal(
-            "http_request",
+            "http-request",
             &json!({"url": format!("{base}/bad")}),
             &ctx,
         )
@@ -1406,7 +1406,7 @@ mod tests {
     async fn http_request_rejects_zero_timeout() {
         let (_d, ctx) = test_ctx(None).await;
         let err = run_internal(
-            "http_request",
+            "http-request",
             &json!({"url": "http://127.0.0.1:1/", "timeout_secs": 0}),
             &ctx,
         )
@@ -1419,7 +1419,7 @@ mod tests {
     //
     // `check_outbound_url` has its own unit tests in `crate::net`; these are
     // about it actually being wired into each dispatch arm, which is the part
-    // that was missing and made `http_request` an open egress proxy.
+    // that was missing and made `http-request` an open egress proxy.
 
     /// Clear the loopback grant `test_ctx` seeds, so the gate is live.
     fn deny_everything(ctx: &InternalCtx) {
@@ -1431,7 +1431,7 @@ mod tests {
         let (_d, ctx) = test_ctx(None).await;
         let (base, server) = start_echo_server().await;
         deny_everything(&ctx);
-        let err = run_internal("http_request", &json!({"url": format!("{base}/ok")}), &ctx)
+        let err = run_internal("http-request", &json!({"url": format!("{base}/ok")}), &ctx)
             .await
             .unwrap_err();
         assert!(err.contains("allowed_base_urls"), "{err}");
@@ -1443,7 +1443,7 @@ mod tests {
         let (_d, ctx) = test_ctx(None).await;
         let (base, server) = start_stream_server(vec![r#"{"n":1}"#.to_string()]).await;
         deny_everything(&ctx);
-        let err = run_internal("http_stream_start", &json!({"url": format!("{base}/s")}), &ctx)
+        let err = run_internal("http-stream-start", &json!({"url": format!("{base}/s")}), &ctx)
             .await
             .unwrap_err();
         assert!(err.contains("allowed_base_urls"), "{err}");
@@ -1454,14 +1454,14 @@ mod tests {
     async fn open_url_refuses_an_unlisted_url() {
         let (_d, ctx) = test_ctx(None).await;
         deny_everything(&ctx);
-        let err = run_internal("open_url", &json!({"url": "https://example.com/"}), &ctx)
+        let err = run_internal("open-url", &json!({"url": "https://example.com/"}), &ctx)
             .await
             .unwrap_err();
         assert!(err.contains("allowed_base_urls"), "{err}");
     }
 
     /// A scheme with no host has nothing for a prefix to constrain, so it is
-    /// refused outright — `open_url` hands the URL to a real browser session.
+    /// refused outright — `open-url` hands the URL to a real browser session.
     #[tokio::test]
     async fn open_url_refuses_non_http_schemes_however_wide_the_allowlist() {
         let (_d, ctx) = test_ctx(None).await;
@@ -1469,7 +1469,7 @@ mod tests {
             .set_allowed_base_urls(vec!["about:".into(), "file:///".into(), "javascript:".into()])
             .unwrap();
         for url in ["about:blank", "file:///etc/passwd", "javascript:alert(1)"] {
-            let err = run_internal("open_url", &json!({ "url": url }), &ctx).await.unwrap_err();
+            let err = run_internal("open-url", &json!({ "url": url }), &ctx).await.unwrap_err();
             assert!(err.contains("http:// or https://"), "{url}: {err}");
         }
     }
@@ -1481,14 +1481,14 @@ mod tests {
     async fn a_denied_url_is_refused_without_attempting_a_connection() {
         let (_d, ctx) = test_ctx(None).await;
         deny_everything(&ctx);
-        let err = run_internal("http_request", &json!({"url": "http://127.0.0.1:1/"}), &ctx)
+        let err = run_internal("http-request", &json!({"url": "http://127.0.0.1:1/"}), &ctx)
             .await
             .unwrap_err();
         assert!(err.contains("allowed_base_urls"), "{err}");
         assert!(!err.contains("http request failed"), "{err}");
     }
 
-    // ── http_stream_start / poll / close ──────────────────────────────────
+    // ── http-stream-start / poll / close ──────────────────────────────────
 
     /// Spin up an HTTP server that answers `/stream` with a chunked-encoding
     /// response emitting `lines` (each already newline-terminated or not —
@@ -1563,7 +1563,7 @@ mod tests {
         .await;
 
         let v = run_internal(
-            "http_stream_start",
+            "http-stream-start",
             &json!({"url": format!("{base}/stream")}),
             &ctx,
         )
@@ -1585,7 +1585,7 @@ mod tests {
         .await;
 
         let started = run_internal(
-            "http_stream_start",
+            "http-stream-start",
             &json!({"url": format!("{base}/stream")}),
             &ctx,
         )
@@ -1600,7 +1600,7 @@ mod tests {
         let mut cursor = 0i64;
         for _ in 0..50 {
             let v = run_internal(
-                "http_stream_poll",
+                "http-stream-poll",
                 &json!({"stream_id": stream_id, "cursor": cursor, "wait_secs": 2}),
                 &ctx,
             )
@@ -1618,7 +1618,7 @@ mod tests {
         assert_eq!(chunks[1].get("n").and_then(Value::as_i64), Some(2));
         assert_eq!(chunks[2].get("n").and_then(Value::as_i64), Some(3));
 
-        run_internal("http_stream_close", &json!({"stream_id": stream_id}), &ctx)
+        run_internal("http-stream-close", &json!({"stream_id": stream_id}), &ctx)
             .await
             .unwrap();
         server.abort();
@@ -1630,7 +1630,7 @@ mod tests {
         let (base, server) = start_stream_server(vec![r#"{"n":1}"#.to_string()]).await;
 
         let started = run_internal(
-            "http_stream_start",
+            "http-stream-start",
             &json!({"url": format!("{base}/stream")}),
             &ctx,
         )
@@ -1639,7 +1639,7 @@ mod tests {
         let stream_id = started.get("stream_id").and_then(Value::as_str).unwrap();
 
         let v = run_internal(
-            "http_stream_poll",
+            "http-stream-poll",
             &json!({"stream_id": stream_id, "wait_secs": 2}),
             &ctx,
         )
@@ -1649,7 +1649,7 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].get("n").and_then(Value::as_i64), Some(1));
 
-        run_internal("http_stream_close", &json!({"stream_id": stream_id}), &ctx)
+        run_internal("http-stream-close", &json!({"stream_id": stream_id}), &ctx)
             .await
             .unwrap();
         server.abort();
@@ -1658,7 +1658,7 @@ mod tests {
     #[tokio::test]
     async fn http_stream_poll_unknown_stream_id_errors() {
         let (_d, ctx) = test_ctx(None).await;
-        let err = run_internal("http_stream_poll", &json!({"stream_id": "nope"}), &ctx)
+        let err = run_internal("http-stream-poll", &json!({"stream_id": "nope"}), &ctx)
             .await
             .unwrap_err();
         assert!(err.contains("no stream registered"), "{err}");
@@ -1670,7 +1670,7 @@ mod tests {
         let (base, server) = start_stream_server(vec![r#"{"n":1}"#.to_string()]).await;
 
         let started = run_internal(
-            "http_stream_start",
+            "http-stream-start",
             &json!({"url": format!("{base}/stream")}),
             &ctx,
         )
@@ -1678,18 +1678,18 @@ mod tests {
         .unwrap();
         let stream_id = started.get("stream_id").and_then(Value::as_str).unwrap().to_string();
 
-        let closed = run_internal("http_stream_close", &json!({"stream_id": stream_id}), &ctx)
+        let closed = run_internal("http-stream-close", &json!({"stream_id": stream_id}), &ctx)
             .await
             .unwrap();
         assert_eq!(closed.get("closed").and_then(Value::as_bool), Some(true));
 
-        let err = run_internal("http_stream_poll", &json!({"stream_id": stream_id}), &ctx)
+        let err = run_internal("http-stream-poll", &json!({"stream_id": stream_id}), &ctx)
             .await
             .unwrap_err();
         assert!(err.contains("no stream registered"), "{err}");
 
         // Closing again is a no-op, not an error.
-        let closed_again = run_internal("http_stream_close", &json!({"stream_id": stream_id}), &ctx)
+        let closed_again = run_internal("http-stream-close", &json!({"stream_id": stream_id}), &ctx)
             .await
             .unwrap();
         assert_eq!(closed_again.get("closed").and_then(Value::as_bool), Some(false));
@@ -1714,7 +1714,7 @@ mod tests {
         .await;
 
         let started = run_internal(
-            "http_stream_start",
+            "http-stream-start",
             &json!({"url": format!("{base}/stream")}),
             &ctx,
         )
@@ -1725,7 +1725,7 @@ mod tests {
         let mut last = json!({});
         for _ in 0..50 {
             last = run_internal(
-                "http_stream_poll",
+                "http-stream-poll",
                 &json!({"stream_id": stream_id, "cursor": 0, "wait_secs": 2}),
                 &ctx,
             )
@@ -1740,7 +1740,7 @@ mod tests {
             "{last:?}"
         );
 
-        run_internal("http_stream_close", &json!({"stream_id": stream_id}), &ctx)
+        run_internal("http-stream-close", &json!({"stream_id": stream_id}), &ctx)
             .await
             .unwrap();
         server.abort();
@@ -1755,7 +1755,7 @@ mod tests {
         let (base, server) = start_stream_server(vec![r#"{"n":1}"#.to_string()]).await;
 
         let started = run_internal(
-            "http_stream_start",
+            "http-stream-start",
             &json!({"url": format!("{base}/hang")}),
             &ctx,
         )
@@ -1766,7 +1766,7 @@ mod tests {
         // Poll once so the reader task starts, then don't poll again until
         // past the (patched, 1s) idle TTL.
         run_internal(
-            "http_stream_poll",
+            "http-stream-poll",
             &json!({"stream_id": stream_id, "cursor": 0}),
             &ctx,
         )
@@ -1775,7 +1775,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(1500)).await;
 
-        let v = run_internal("http_stream_poll", &json!({"stream_id": stream_id}), &ctx)
+        let v = run_internal("http-stream-poll", &json!({"stream_id": stream_id}), &ctx)
             .await
             .unwrap();
         assert_eq!(v.get("done").and_then(Value::as_bool), Some(true));
@@ -1789,13 +1789,13 @@ mod tests {
 
     /// Mirrors `secrets_are_refused_without_an_action_caller`: the CLI, MCP,
     /// and HTTP route all reach built-ins with no action caller, so
-    /// `console_print` — which always targets *the calling action's own*
+    /// `console-print` — which always targets *the calling action's own*
     /// console — has nothing to resolve.
     #[tokio::test]
     async fn console_print_is_refused_without_an_action_caller() {
         let (_d, ctx) = test_ctx(None).await;
         assert!(ctx.caller.is_none());
-        let err = run_internal("console_print", &json!({"message": "hi"}), &ctx)
+        let err = run_internal("console-print", &json!({"message": "hi"}), &ctx)
             .await
             .unwrap_err();
         assert!(err.contains("no action caller"), "{err}");
@@ -1806,12 +1806,12 @@ mod tests {
         let (_d, mut ctx) = test_ctx(None).await;
         ctx.caller = Some(Caller::from_action("/pkg/foo", None));
 
-        let v = run_internal("console_print", &json!({"message": "hello"}), &ctx)
+        let v = run_internal("console-print", &json!({"message": "hello"}), &ctx)
             .await
             .unwrap();
         assert_eq!(v.get("seq").and_then(Value::as_i64), Some(1));
 
-        let read = run_internal("console_read", &json!({"action_ref": "/pkg/foo"}), &ctx)
+        let read = run_internal("console-read", &json!({"action_ref": "/pkg/foo"}), &ctx)
             .await
             .unwrap();
         let entries = read.get("entries").and_then(Value::as_array).unwrap();
@@ -1826,12 +1826,12 @@ mod tests {
         let (_d, mut ctx) = test_ctx(None).await;
         ctx.caller = Some(Caller::from_action("/pkg/foo", None));
 
-        run_internal("console_print", &json!({"message": "a"}), &ctx).await.unwrap();
-        run_internal("console_print", &json!({"level": "warn", "message": "b"}), &ctx)
+        run_internal("console-print", &json!({"message": "a"}), &ctx).await.unwrap();
+        run_internal("console-print", &json!({"level": "warn", "message": "b"}), &ctx)
             .await
             .unwrap();
 
-        let read = run_internal("console_read", &json!({"action_ref": "/pkg/foo"}), &ctx)
+        let read = run_internal("console-read", &json!({"action_ref": "/pkg/foo"}), &ctx)
             .await
             .unwrap();
         let entries = read.get("entries").and_then(Value::as_array).unwrap();
@@ -1842,14 +1842,14 @@ mod tests {
     #[tokio::test]
     async fn console_read_requires_action_ref() {
         let (_d, ctx) = test_ctx(None).await;
-        let err = run_internal("console_read", &json!({}), &ctx).await.unwrap_err();
+        let err = run_internal("console-read", &json!({}), &ctx).await.unwrap_err();
         assert!(err.contains("missing required param: action_ref"), "{err}");
     }
 
     #[tokio::test]
     async fn console_read_of_an_unwritten_console_is_empty_not_an_error() {
         let (_d, ctx) = test_ctx(None).await;
-        let v = run_internal("console_read", &json!({"action_ref": "/never/printed"}), &ctx)
+        let v = run_internal("console-read", &json!({"action_ref": "/never/printed"}), &ctx)
             .await
             .unwrap();
         assert_eq!(v.get("entries").and_then(Value::as_array).map(Vec::len), Some(0));
@@ -1860,13 +1860,13 @@ mod tests {
         let (_d, mut ctx) = test_ctx(None).await;
         ctx.caller = Some(Caller::from_action("/pkg/foo", None));
         for i in 0..3 {
-            run_internal("console_print", &json!({"message": format!("m{i}")}), &ctx)
+            run_internal("console-print", &json!({"message": format!("m{i}")}), &ctx)
                 .await
                 .unwrap();
         }
 
         let v = run_internal(
-            "console_read",
+            "console-read",
             &json!({"action_ref": "/pkg/foo", "from_seq": 2}),
             &ctx,
         )
@@ -1884,13 +1884,13 @@ mod tests {
     async fn console_read_is_not_restricted_to_the_callers_own_console() {
         let (_d, mut ctx) = test_ctx(None).await;
         ctx.caller = Some(Caller::from_action("/pkg/child", None));
-        run_internal("console_print", &json!({"message": "child status"}), &ctx)
+        run_internal("console-print", &json!({"message": "child status"}), &ctx)
             .await
             .unwrap();
 
         // Read it back as an unrelated caller (here: no caller at all).
         ctx.caller = None;
-        let v = run_internal("console_read", &json!({"action_ref": "/pkg/child"}), &ctx)
+        let v = run_internal("console-read", &json!({"action_ref": "/pkg/child"}), &ctx)
             .await
             .unwrap();
         assert_eq!(v.get("entries").and_then(Value::as_array).map(Vec::len), Some(1));
@@ -1900,11 +1900,11 @@ mod tests {
     async fn console_tail_returns_immediately_when_entries_exist() {
         let (_d, mut ctx) = test_ctx(None).await;
         ctx.caller = Some(Caller::from_action("/pkg/foo", None));
-        run_internal("console_print", &json!({"message": "hi"}), &ctx).await.unwrap();
+        run_internal("console-print", &json!({"message": "hi"}), &ctx).await.unwrap();
         ctx.caller = None;
 
         let v = run_internal(
-            "console_tail",
+            "console-tail",
             &json!({"action_ref": "/pkg/foo", "wait_secs": 5}),
             &ctx,
         )
@@ -1918,14 +1918,14 @@ mod tests {
         let (_d, mut ctx) = test_ctx(None).await;
         ctx.caller = Some(Caller::from_action("/pkg/foo", None));
         for i in 0..3 {
-            run_internal("console_print", &json!({"message": format!("m{i}")}), &ctx)
+            run_internal("console-print", &json!({"message": format!("m{i}")}), &ctx)
                 .await
                 .unwrap();
         }
         ctx.caller = None;
 
         let v = run_internal(
-            "console_clear",
+            "console-clear",
             &json!({"action_ref": "/pkg/foo", "before_seq": 2}),
             &ctx,
         )
@@ -1933,7 +1933,7 @@ mod tests {
         .unwrap();
         assert_eq!(v.get("removed").and_then(Value::as_i64), Some(1));
 
-        let read = run_internal("console_read", &json!({"action_ref": "/pkg/foo"}), &ctx)
+        let read = run_internal("console-read", &json!({"action_ref": "/pkg/foo"}), &ctx)
             .await
             .unwrap();
         assert_eq!(read.get("entries").and_then(Value::as_array).map(Vec::len), Some(2));
@@ -1943,12 +1943,12 @@ mod tests {
     async fn console_list_reflects_written_consoles() {
         let (_d, mut ctx) = test_ctx(None).await;
         ctx.caller = Some(Caller::from_action("/pkg/a", None));
-        run_internal("console_print", &json!({"message": "x"}), &ctx).await.unwrap();
+        run_internal("console-print", &json!({"message": "x"}), &ctx).await.unwrap();
         ctx.caller = Some(Caller::from_action("/pkg/b", None));
-        run_internal("console_print", &json!({"message": "y"}), &ctx).await.unwrap();
+        run_internal("console-print", &json!({"message": "y"}), &ctx).await.unwrap();
         ctx.caller = None;
 
-        let v = run_internal("console_list", &json!({"prefix": "/pkg"}), &ctx)
+        let v = run_internal("console-list", &json!({"prefix": "/pkg"}), &ctx)
             .await
             .unwrap();
         let consoles = v.get("consoles").and_then(Value::as_array).unwrap();
@@ -1959,7 +1959,7 @@ mod tests {
     async fn action_cancelled_is_refused_without_an_action_caller() {
         let (_d, ctx) = test_ctx(None).await;
         assert!(ctx.caller.is_none());
-        let err = run_internal("action_cancelled", &json!({}), &ctx).await.unwrap_err();
+        let err = run_internal("action-cancelled", &json!({}), &ctx).await.unwrap_err();
         assert!(err.contains("no action caller"), "{err}");
     }
 
@@ -1972,13 +1972,13 @@ mod tests {
 
         // No row exists yet for "inv-fixed" — must fail closed to `false`,
         // not error, mirroring the loopback's `/cancelled` route.
-        let before = run_internal("action_cancelled", &json!({}), &ctx).await.unwrap();
+        let before = run_internal("action-cancelled", &json!({}), &ctx).await.unwrap();
         assert_eq!(before.get("cancelled"), Some(&Value::Bool(false)));
 
         ctx.local.invocations().create("inv-fixed", "/pkg/foo", 0).await.unwrap();
         ctx.local.invocations().request_cancel("inv-fixed").await.unwrap();
 
-        let after = run_internal("action_cancelled", &json!({}), &ctx).await.unwrap();
+        let after = run_internal("action-cancelled", &json!({}), &ctx).await.unwrap();
         assert_eq!(after.get("cancelled"), Some(&Value::Bool(true)));
     }
 }

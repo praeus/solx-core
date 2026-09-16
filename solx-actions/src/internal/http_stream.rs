@@ -4,26 +4,26 @@
 //! the motivating design — this module is that design's "three new internal
 //! actions", modeled directly on `super::oauth`'s registry pattern.
 //!
-//! Unrestricted by caller, exactly like `oauth_await`/`oauth_stop` and
-//! `console_read`/`tail`/`clear`: access is a bearer capability on the
+//! Unrestricted by caller, exactly like `oauth-await`/`oauth-stop` and
+//! `console-read`/`tail`/`clear`: access is a bearer capability on the
 //! unguessable `stream_id` (a UUID v4), not a caller/ownership check. This
 //! keeps a single guest able to `start` under one action invocation and
 //! `poll`/`close` under a different one (or a different action entirely) —
 //! the shape the design doc's `.solx` script-loop example relies on — without
 //! extra plumbing.
 //!
-//! * `http_stream_start` — sends the request, returns `{stream_id, status}`
+//! * `http-stream-start` — sends the request, returns `{stream_id, status}`
 //!   as soon as headers arrive, and spawns a task that reads the body as
 //!   newline-delimited JSON into a cursor-addressable buffer.
-//! * `http_stream_poll` — `{stream_id, cursor?, wait_secs?}` → drains
+//! * `http-stream-poll` — `{stream_id, cursor?, wait_secs?}` → drains
 //!   whatever's buffered since `cursor`, optionally long-polling for more.
-//! * `http_stream_close` — stops the reader task and drops the buffer.
+//! * `http-stream-close` — stops the reader task and drops the buffer.
 //!
 //! Two safety valves, both driven by config (`solx_config::ConfigService`):
 //! a max-buffered-bytes cap (oldest chunks are dropped on overflow, counted
 //! in `dropped`) and an idle-TTL reaper (a stream nobody polls for a while
 //! self-terminates) — `oauth.rs` has the same abandoned-resource shape today
-//! but relies on a human calling `oauth_stop`; nothing would do that for an
+//! but relies on a human calling `oauth-stop`; nothing would do that for an
 //! abandoned generation.
 
 use std::collections::VecDeque;
@@ -70,12 +70,12 @@ fn registry() -> &'static Mutex<Registry> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-// ── http_stream_start ───────────────────────────────────────────────────────
+// ── http-stream-start ───────────────────────────────────────────────────────
 
 pub(super) async fn start(params: &Value, config: &Arc<ConfigService>) -> Result<Value, String> {
     let url = require_str(params, "url")?.to_string();
     // Before the request is sent, so a denied URL opens no connection and
-    // registers no stream. Same gate webhook actions and `http_request` use.
+    // registers no stream. Same gate webhook actions and `http-request` use.
     crate::net::check_outbound_url(config, &url).map_err(|e| e.to_string())?;
     let method = params
         .get("method")
@@ -280,7 +280,7 @@ fn push_line(state: &Arc<Mutex<StreamState>>, line: &[u8], max_buffer_bytes: usi
     }
 }
 
-// ── http_stream_poll ─────────────────────────────────────────────────────────
+// ── http-stream-poll ─────────────────────────────────────────────────────────
 
 pub(super) async fn poll(params: &Value) -> Result<Value, String> {
     let stream_id = require_str(params, "stream_id")?.to_string();
@@ -346,7 +346,7 @@ pub(super) async fn poll(params: &Value) -> Result<Value, String> {
     }
 }
 
-// ── http_stream_close ────────────────────────────────────────────────────────
+// ── http-stream-close ────────────────────────────────────────────────────────
 
 pub(super) async fn close(params: &Value) -> Result<Value, String> {
     let stream_id = require_str(params, "stream_id")?.to_string();

@@ -6,7 +6,7 @@
 //!
 //! `print` and `cancelled` are two of the handlers scoped to a caller: they
 //! always act on *the calling action's own* console/invocation, resolved
-//! from `ctx.caller` exactly the way `get_secret`/`set_secret` resolve
+//! from `ctx.caller` exactly the way `get-secret`/`set-secret` resolve
 //! their scope — there is no way to pass an arbitrary `action_ref`/
 //! `invocation_id` in. `read`/`tail`/`clear`/`list`/`start`/`stop`/`poll`
 //! take an explicit target and are unrestricted, which is what lets an
@@ -73,7 +73,7 @@ struct ConsolePrint {
 impl InternalActionHandler for ConsolePrint {
     async fn call(&self, params: &Value, ctx: &InternalCallCtx) -> std::result::Result<Value, String> {
         let caller = ctx.caller.as_ref().ok_or_else(|| {
-            "console_print has no action caller — it can only be called from within \
+            "console-print has no action caller — it can only be called from within \
              an action's own execution"
                 .to_string()
         })?;
@@ -107,7 +107,7 @@ struct ConsoleCopy {
 impl InternalActionHandler for ConsoleCopy {
     async fn call(&self, params: &Value, ctx: &InternalCallCtx) -> std::result::Result<Value, String> {
         let caller = ctx.caller.as_ref().ok_or_else(|| {
-            "console_copy has no action caller — it can only be called from within \
+            "console-copy has no action caller — it can only be called from within \
              an action's own execution"
                 .to_string()
         })?;
@@ -263,7 +263,7 @@ struct ActionCancelled {
 impl InternalActionHandler for ActionCancelled {
     async fn call(&self, _params: &Value, ctx: &InternalCallCtx) -> std::result::Result<Value, String> {
         let caller = ctx.caller.as_ref().ok_or_else(|| {
-            "action_cancelled has no action caller — it can only be called from within \
+            "action-cancelled has no action caller — it can only be called from within \
              an action's own execution"
                 .to_string()
         })?;
@@ -281,7 +281,7 @@ impl InternalActionHandler for ActionCancelled {
 /// This crate's built-in catalogue entries — a standalone function (not tied
 /// to [`plugin`]'s handler construction) so `solx-actions` can seed them into
 /// the `actions` table at `LocalActionManager::open()` time, before an
-/// `Arc<Self>` exists to build the full registry (which `action_start`/
+/// `Arc<Self>` exists to build the full registry (which `action-start`/
 /// `stop`/`poll`'s handlers need, via [`ActionExecutor`]). See
 /// `LocalActionManager::set_self_ref`, which builds the full registry once
 /// that `Arc` is available.
@@ -290,70 +290,70 @@ pub fn seed_actions() -> Vec<SeedAction> {
         SeedAction {
             path: CONSOLE_PATH,
             name: "print",
-            fn_name: "console_print",
+            fn_name: "console-print",
             description: "Write one entry to the calling action's own console. Requires an action caller — this cannot be called directly from the CLI, MCP, or HTTP.",
             param_type: Some("ConsolePrintParams"),
         },
         SeedAction {
             path: CONSOLE_PATH,
             name: "copy",
-            fn_name: "console_copy",
+            fn_name: "console-copy",
             description: "Copy one invocation's entries from another console into the calling action's own, renumbered into its sequence and optionally message-prefixed with a label. Requires an action caller — this cannot be called directly from the CLI, MCP, or HTTP. Built for an orchestrator draining a child invocation's console without one print call per entry.",
             param_type: Some("ConsoleCopyParams"),
         },
         SeedAction {
             path: CONSOLE_PATH,
             name: "read",
-            fn_name: "console_read",
+            fn_name: "console-read",
             description: "Read entries from an action's console, oldest first, starting at from_seq.",
             param_type: Some("ConsoleReadParams"),
         },
         SeedAction {
             path: CONSOLE_PATH,
             name: "tail",
-            fn_name: "console_tail",
+            fn_name: "console-tail",
             description: "Like read, but if nothing new is available yet, long-polls up to wait_secs before returning.",
             param_type: Some("ConsoleTailParams"),
         },
         SeedAction {
             path: CONSOLE_PATH,
             name: "clear",
-            fn_name: "console_clear",
+            fn_name: "console-clear",
             description: "Drop entries from the front of an action's console, freeing retention.",
             param_type: Some("ConsoleClearParams"),
         },
         SeedAction {
             path: CONSOLE_PATH,
             name: "list",
-            fn_name: "console_list",
+            fn_name: "console-list",
             description: "List known consoles, most recently written first.",
             param_type: Some("ConsoleListParams"),
         },
         SeedAction {
             path: ACTION_PATH,
             name: "start",
-            fn_name: "action_start",
+            fn_name: "action-start",
             description: "Start an action detached: returns an invocation_id immediately while it runs in the background. Requires a long-lived host (solx-server/solx-mcp), not the CLI.",
             param_type: Some("ActionStartParams"),
         },
         SeedAction {
             path: ACTION_PATH,
             name: "stop",
-            fn_name: "action_stop",
+            fn_name: "action-stop",
             description: "Request that a detached invocation stop. Cooperative first (the running action notices and exits on its own); force-aborted after a grace period.",
             param_type: Some("ActionStopParams"),
         },
         SeedAction {
             path: ACTION_PATH,
             name: "poll",
-            fn_name: "action_poll",
+            fn_name: "action-poll",
             description: "Check a detached invocation's status, optionally long-polling until it finishes.",
             param_type: Some("ActionPollParams"),
         },
         SeedAction {
             path: ACTION_PATH,
             name: "cancelled",
-            fn_name: "action_cancelled",
+            fn_name: "action-cancelled",
             description: "Check whether the calling action's own invocation has had a stop requested. Requires an action caller.",
             param_type: Some("EmptyParams"),
         },
@@ -369,17 +369,17 @@ pub fn plugin(
 ) -> InternalActionRegistry {
     let mut registry = InternalActionRegistry::new();
 
-    registry.register(&["console_print"], Arc::new(ConsolePrint { store: console.clone() }));
-    registry.register(&["console_copy"], Arc::new(ConsoleCopy { store: console.clone() }));
-    registry.register(&["console_read"], Arc::new(ConsoleRead { store: console.clone() }));
-    registry.register(&["console_tail"], Arc::new(ConsoleTail { store: console.clone() }));
-    registry.register(&["console_clear"], Arc::new(ConsoleClear { store: console.clone() }));
-    registry.register(&["console_list"], Arc::new(ConsoleList { store: console }));
+    registry.register(&["console-print"], Arc::new(ConsolePrint { store: console.clone() }));
+    registry.register(&["console-copy"], Arc::new(ConsoleCopy { store: console.clone() }));
+    registry.register(&["console-read"], Arc::new(ConsoleRead { store: console.clone() }));
+    registry.register(&["console-tail"], Arc::new(ConsoleTail { store: console.clone() }));
+    registry.register(&["console-clear"], Arc::new(ConsoleClear { store: console.clone() }));
+    registry.register(&["console-list"], Arc::new(ConsoleList { store: console }));
 
-    registry.register(&["action_start"], Arc::new(ActionStart { executor: executor.clone() }));
-    registry.register(&["action_stop"], Arc::new(ActionStop { executor: executor.clone() }));
-    registry.register(&["action_poll"], Arc::new(ActionPoll { executor }));
-    registry.register(&["action_cancelled"], Arc::new(ActionCancelled { store: invocations }));
+    registry.register(&["action-start"], Arc::new(ActionStart { executor: executor.clone() }));
+    registry.register(&["action-stop"], Arc::new(ActionStop { executor: executor.clone() }));
+    registry.register(&["action-poll"], Arc::new(ActionPoll { executor }));
+    registry.register(&["action-cancelled"], Arc::new(ActionCancelled { store: invocations }));
 
     registry.add_seeds(seed_actions());
     registry

@@ -1,5 +1,5 @@
 //! File-store built-ins: single-file put/get/delete, list, copy, and the
-//! two recursive directory operations (`dir_copy`, `dir_delete`).
+//! two recursive directory operations (`dir-copy`, `dir-delete`).
 //!
 //! These are general-purpose and unrestricted — Internal actions carry
 //! the same trust level as the dispatcher itself, same as the OAuth
@@ -81,11 +81,11 @@ pub(super) async fn dir_copy(params: &Value, files: &Arc<dyn FileStore>) -> Resu
     Ok(json!({ "copied": copied }))
 }
 
-// ── dir_delete ───────────────────────────────────────────────────────────────
+// ── dir-delete ───────────────────────────────────────────────────────────────
 //
 // The file-store trait only exposes single-file `delete`; tree removal
 // needs a `list` + per-entry `delete`. This mirrors the structure of
-// `dir_copy` exactly, just inverted, so the two stay symmetric.
+// `dir-copy` exactly, just inverted, so the two stay symmetric.
 
 pub(super) async fn dir_delete(params: &Value, files: &Arc<dyn FileStore>) -> Result<Value, String> {
     let rel_path = require_str(params, "rel_path")?;

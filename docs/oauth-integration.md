@@ -92,7 +92,7 @@ makes an anonymous request.
    matching `*_secret` field, e.g.
    `"client_secret_secret": "GOOGLE_OAUTH_CLIENT_SECRET"`. The value is
    encrypted with AES-256-GCM and stored in the OS credential manager
-   via [`crate::secrets::get_secret`/`set_secret`](../sol-manager/src/secrets.rs).
+   via [`crate::secrets::get-secret`/`set-secret`](../sol-manager/src/secrets.rs).
    The decryption **key** is not looked up from the keyring — it must be
    declared in this action's own `action_config.secrets` map (sibling of
    `auth`). This is what makes the store scoped: an action can only
@@ -357,7 +357,7 @@ validated by [`validate_webhook_url`](../sol-manager/src/lib.rs)
 
 OAuth secrets (`client_id`, `client_secret`, `refresh_token`, `scope`)
 are read through the scoped secret store —
-[`crate::secrets::get_secret`/`set_secret`](../sol-manager/src/secrets.rs) —
+[`crate::secrets::get-secret`/`set-secret`](../sol-manager/src/secrets.rs) —
 via the `*_secret` fields on `action_config.auth` (§2.1), or for WASM
 guests, the `get secret`/`set secret` built-in actions (backed by the
 `secrets` WIT interface in
@@ -625,7 +625,7 @@ to force a re-read.
 | File | Symbol | Role |
 |---|---|---|
 | [sol-manager/src/secrets.rs](../sol-manager/src/secrets.rs) | `resolve`, `resolve_in_field`, `load_keyring_with_test_override` | inline/keyring precedence for secret-bearing fields |
-| [sol-manager/src/secrets.rs](../sol-manager/src/secrets.rs) | `get_secret`, `set_secret`, `delete_secret` | AES-256-GCM-encrypted, keyring-backed scoped secret store (`*_secret` indirection) |
+| [sol-manager/src/secrets.rs](../sol-manager/src/secrets.rs) | `get-secret`, `set-secret`, `delete_secret` | AES-256-GCM-encrypted, keyring-backed scoped secret store (`*_secret` indirection) |
 | [sol-manager/src/webhook_auth.rs](../sol-manager/src/webhook_auth.rs) | `resolve_auth` | bearer + refresh + service-account resolver |
 | [sol-manager/src/webhook_auth.rs](../sol-manager/src/webhook_auth.rs) | `clear_auth_cache` | force token refresh |
 | [sol-manager/src/webhook_auth.rs](../sol-manager/src/webhook_auth.rs) | `persist_rotated_refresh_token` | write a new `refresh_token` back to `action_config.auth` (inline) or the OS credential manager (keyring) |
@@ -638,7 +638,7 @@ to force a re-read.
 | [sol-manager/src/lib.rs](../sol-manager/src/lib.rs) | `validate_webhook_url`, `read_allowlist_cached` | URL allowlist (global ∪ per-action), mtime-cached |
 | [sol-server/src/oauth_loopback.rs](../sol-server/src/oauth_loopback.rs) | `serve_loopback_with_shutdown` | axum listener (RFC 6749 §4.1, RFC 8252 §7.3) |
 | [sol-manager/src/wasm_host.rs](../sol-manager/src/wasm_host.rs) | `get_wasm_env_value` / `set_wasm_env` | non-secret env-var store (shared with WASM guests) |
-| [sol-manager/src/wasm_host.rs](../sol-manager/src/wasm_host.rs) | `sol::actions::secrets::Host` impl (`get_secret`/`set_secret`) | per-action-scoped secret access for WASM guests |
+| [sol-manager/src/wasm_host.rs](../sol-manager/src/wasm_host.rs) | `sol::actions::secrets::Host` impl (`get-secret`/`set-secret`) | per-action-scoped secret access for WASM guests |
 | [sol-manager/src/browser_actions.rs](../sol-manager/src/browser_actions.rs) | `open-system-browser` action | launches the user-visible OAuth browser |
 
 ---
@@ -678,15 +678,15 @@ example of sharing one key across several actions.
 ### 11.3 "I want to test an OAuth flow without a real provider"
 
 Install a fake secret backend with
-[`secrets::set_secret_backend_for_tests`](../sol-manager/src/secrets.rs)
-(covers `get_secret`/`set_secret`/`delete_secret` without touching the
+[`secrets::set-secret_backend_for_tests`](../sol-manager/src/secrets.rs)
+(covers `get-secret`/`set-secret`/`delete_secret` without touching the
 real OS credential manager), or seed `wasm_host::set_wasm_env` for
 non-secret config values. The `oauth-loopback` `start` / `stop` modes
 are unit-tested in
 [`loopback_control.rs`](../sol-manager/src/loopback_control.rs) with a
 manual `oneshot` injection that bypasses the real axum server — extend
 that pattern for new assertions. The
-[`secrets::set_secret_loader_for_tests`](../sol-manager/src/secrets.rs)
+[`secrets::set-secret_loader_for_tests`](../sol-manager/src/secrets.rs)
 seam lets the inline/keyring-ref resolver (`resolve`) be exercised
 without an OS credential manager.
 

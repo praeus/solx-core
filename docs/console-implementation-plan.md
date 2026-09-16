@@ -154,7 +154,7 @@ a globally unique internal dispatch key. So:
 pub struct SeedAction {
     pub path: &'static str,        // NEW: "/builtin" or "/builtin/console"
     pub name: &'static str,        // "print"
-    pub fn_name: &'static str,     // "console_print"  <- the run_internal key
+    pub fn_name: &'static str,     // "console-print"  <- the run_internal key
     pub description: &'static str,
     pub param_type: Option<&'static str>,
 }
@@ -370,7 +370,7 @@ audited.
 Two options were weighed here. The first — a package calling
 `console/print` over HTTP straight to `solx-server` — doesn't actually work:
 `print` resolves its target only from `ctx.caller` (§4), and an HTTP request
-has none, so it hits the same "no action caller" refusal `get_secret` already
+has none, so it hits the same "no action caller" refusal `get-secret` already
 gives the CLI/MCP. Fixing that would mean a second, explicit-`action_ref`
 entry point gated on the server's bearer token instead of a `Caller` — and
 even then, `solx-server` isn't running by default (the CLI's default mode is

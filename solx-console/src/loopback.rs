@@ -14,7 +14,7 @@
 //! only, mint a random one-shot token per registration, tear the
 //! registration down when it's no longer needed. The one structural
 //! difference: the OAuth loopback is started and stopped per
-//! `oauth_start`/`oauth_stop` call (one browser sign-in at a time); this
+//! `oauth-start`/`oauth-stop` call (one browser sign-in at a time); this
 //! listener is started **once** and lives for the process's lifetime — only
 //! the *registrations* (one per Command invocation) are short-lived, since
 //! Command actions can run at any point throughout the process and
@@ -29,7 +29,7 @@
 //! forwards to. Unknown or missing tokens get `401`.
 //!
 //! `GET /cancelled` with the same header returns `{"cancelled": bool}` —
-//! whether `action_stop` has been called for this invocation. Added
+//! whether `action-stop` has been called for this invocation. Added
 //! alongside `print` rather than as a separate listener, since it needs the
 //! exact same one-token-one-invocation resolution; see
 //! `docs/async-actions-plan.md` §5a.

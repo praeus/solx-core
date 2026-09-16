@@ -175,18 +175,18 @@ If instead the console is exposed as **internal actions** under `/builtin`,
 following the exact pattern of `internal/http.rs`, `internal/file.rs`,
 `internal/secrets.rs`, then it inherits *every one of those surfaces for free*:
 
-- CLI: `solx exec /builtin/console_tail --json '{...}'` — already works.
+- CLI: `solx exec /builtin/console-tail --json '{...}'` — already works.
 - REST: `POST /actions/exec` — already works, no new routes.
 - MCP: every action is already surfaced as a tool — free.
 - WASM guests: `action-exec` already reaches `/builtin/*` — **no WIT change,
   no guest rebuilds.**
-- Scripts: `exec /builtin/console_print` — already works.
+- Scripts: `exec /builtin/console-print` — already works.
 - solx-js: works the moment `actions.exec` is implemented; needs nothing
   console-specific.
 
 Only a dedicated storage layer is genuinely new. Everything else is dispatch
-table entries and seed rows. This is the same trick that made `http_request`
-and `get_secret` cheap.
+table entries and seed rows. This is the same trick that made `http-request`
+and `get-secret` cheap.
 
 ### 3.2 Storage
 
@@ -229,13 +229,13 @@ without doing arithmetic; multiple readers can attach independently).
 
 | Internal action | Params | Notes |
 |---|---|---|
-| `console_print` | `{level?, message, data?}` | writes to *the caller's own* console |
-| `console_read` | `{console_id, from_seq?, limit?}` | range read |
-| `console_tail` | `{console_id, cursor?, wait_secs?}` | `{entries, next_cursor, done}`; optional long-poll |
-| `console_clear` | `{console_id, before_seq?}` | drop from the front |
-| `console_list` | `{action_ref?, status?, limit?}` | find recent invocations |
+| `console-print` | `{level?, message, data?}` | writes to *the caller's own* console |
+| `console-read` | `{console_id, from_seq?, limit?}` | range read |
+| `console-tail` | `{console_id, cursor?, wait_secs?}` | `{entries, next_cursor, done}`; optional long-poll |
+| `console-clear` | `{console_id, before_seq?}` | drop from the front |
+| `console-list` | `{action_ref?, status?, limit?}` | find recent invocations |
 
-`console_print` deliberately takes no `console_id`: an action writes to its own
+`console-print` deliberately takes no `console_id`: an action writes to its own
 console, resolved from the caller frame. Writing to *someone else's* console
 should not be casually available.
 
@@ -243,7 +243,7 @@ should not be casually available.
 
 The high-value, low-cost moves, in order:
 
-1. **Redirect `logger.log` → `console_print`.** ~10 lines in `wasm/host.rs`.
+1. **Redirect `logger.log` → `console-print`.** ~10 lines in `wasm/host.rs`.
    Every existing guest immediately gains console output with **zero package
    changes and no rebuild** — including `solx-ollama`'s already-present log
    calls. This is the single best ratio in the whole design.

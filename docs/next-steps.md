@@ -57,7 +57,7 @@ had two independent, already-shipped mechanisms worth porting almost as-is:
 
 **solx already has the identical shape**, just not for this: `env_mappings`
 (`solx-config/src/types.rs:53-58`) is the same allowlist-by-indirection
-idea — "only keys listed here are ever visible via `get_env`" — already
+idea — "only keys listed here are ever visible via `get-env`" — already
 proven and tested in this codebase. The Command design above is a direct
 extension of a pattern solx already trusts.
 
@@ -67,7 +67,7 @@ extension of a pattern solx already trusts.
   `CommandDef { command, description?, cwd? }`. `run_command` resolves
   `fn_name` through this map before spawning; an unregistered key (or an
   entirely unset allowlist) is a hard error naming the fix, same tone as the
-  existing `action_start` long-lived-host error. `CommandDef.cwd`, when set,
+  existing `action-start` long-lived-host error. `CommandDef.cwd`, when set,
   takes priority over the action's own `action_config.cwd` — the allowlist
   author decides where an approved command runs, not the action invoking it.
 - `SolxConfig.allowed_webhook_base_urls: Option<Vec<String>>` — prefix
@@ -149,11 +149,11 @@ workflow requested.
 ### Later: the allowlist widened past webhooks, and was renamed
 
 The design above gated `webhook` *action rows* only, and the check lived
-inline in `run_webhook`. That left `/builtin/web/http_request`,
-`/builtin/web/stream/start` and `/builtin/web/open_url` completely ungated —
+inline in `run_webhook`. That left `/builtin/web/http-request`,
+`/builtin/web/stream/start` and `/builtin/web/open-url` completely ungated —
 an unrestricted, CORS-free egress proxy for anything that could exec an
 action (a WASM guest, an MCP client, a widget holding a bearer token). Since
-`http_request` is exactly how a wasm guest is *supposed* to reach the network
+`http-request` is exactly how a wasm guest is *supposed* to reach the network
 (the guest world imports no sockets), that was the hole in the middle of the
 deny-by-default story.
 
@@ -167,14 +167,14 @@ all four. Consequences worth recording:
   mutators renamed to match, and `InstalledPackage.granted_webhook_prefixes`
   became `granted_base_urls` with a serde alias — without the alias, rows
   written before the rename read as empty and uninstall revokes nothing.
-- `open_url` refuses any scheme but `http`/`https`, whatever the allowlist
+- `open-url` refuses any scheme but `http`/`https`, whatever the allowlist
   says: `file:`/`javascript:`/`about:` carry no host for a prefix to
   constrain, and it hands the URL to the user's real browser session.
 - Packages reaching the network from a guest now need grants of their own.
   `solx-ollama` broke outright without one (it is the only path to Ollama);
   `solx-livejournal`'s hotlinked userpic fetch degrades gracefully, being
   best-effort already; `solx-google` needed `accounts.google.com` for
-  `open_url`, and lost the `open_url about:blank` in its login script's
+  `open-url`, and lost the `open-url about:blank` in its login script's
   missing-credentials guard, which the scheme check now refuses (the
   `missing_client_id` result it returns already reports the problem).
 
@@ -399,13 +399,13 @@ with the actual gap list.
    nobody's asked for one.
 
 **ActionRunner — new dialog, design confirmed, no backend work needed.**
-`action_start`/`action_stop`/`action_poll` and `console_read`/`console_tail`
+`action-start`/`action-stop`/`action-poll` and `console-read`/`console-tail`
 are ordinary seeded Internal actions under `/builtin/action/*` and
 `/builtin/console/*` (`solx-actions/src/seed.rs`), dispatched through the
 exact same generic `POST /api/actions/:path/:name/exec` route every other
 action already uses — and `solx-server/src/main.rs` already calls
 `set_long_lived_host(true)` at startup, so the gate that would otherwise
-block `action_start` is already satisfied. This is a frontend-only build.
+block `action-start` is already satisfied. This is a frontend-only build.
 
 Confirmed shapes (`solx-actions/src/invocations.rs` +
 `internal/{invocation,console}.rs`):

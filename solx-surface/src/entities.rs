@@ -155,7 +155,7 @@ pub enum ActionType {
     /// A shell command — `fn_name` is the literal command to execute.
     Command,
     /// Internal dispatcher handler — `fn_name` selects the operation
-    /// (`oauth_start`, `oauth_await`, `oauth_stop`, etc.).
+    /// (`oauth-start`, `oauth-await`, `oauth-stop`, etc.).
     Internal,
     /// A `solx-scripts` script (`bin_name` = the `.solx` artifact). The
     /// caller's params are available inside the script as `$params`.

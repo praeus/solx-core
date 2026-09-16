@@ -134,7 +134,7 @@ before anything consumed it. The reasons, so this is not re-litigated:
   at all. Building the push channel first inverted the priority.
 - **It was the only websocket, and the only server-push channel, in the
   system.** Every other async path here is cursor + long-poll over an
-  ordinary action call: `console_tail`, `action_poll`, `http_stream_poll`.
+  ordinary action call: `console-tail`, `action-poll`, `http-stream-poll`.
   `solx-server` has no SSE and no WS.
 - **Its transport was strictly weaker than the HTTP API beside it.**
   `ws://127.0.0.1:{random_port}` pointed at a loopback inside whichever

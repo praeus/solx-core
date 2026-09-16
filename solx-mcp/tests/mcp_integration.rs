@@ -37,9 +37,9 @@ async fn tools_list_and_call_tool_round_trip() -> anyhow::Result<()> {
         "list_tools should expose only the router meta-tool, got: {names:?}"
     );
 
-    // file_put -> file_get round trip through two real tool calls.
+    // file-put -> file-get round trip through two real tool calls.
     let put = client
-        .call_tool(CallToolRequestParams::new("act__builtin__file__file_put").with_arguments(
+        .call_tool(CallToolRequestParams::new("act__builtin__file__file-put").with_arguments(
             serde_json::json!({"rel_path": "notes/a.txt", "content": "hello from mcp"})
                 .as_object()
                 .unwrap()
@@ -49,7 +49,7 @@ async fn tools_list_and_call_tool_round_trip() -> anyhow::Result<()> {
     assert!(put.content[0].as_text().is_some());
 
     let got = client
-        .call_tool(CallToolRequestParams::new("act__builtin__file__file_get").with_arguments(
+        .call_tool(CallToolRequestParams::new("act__builtin__file__file-get").with_arguments(
             serde_json::json!({"rel_path": "notes/a.txt"}).as_object().unwrap().clone(),
         ))
         .await?;
@@ -97,7 +97,7 @@ async fn call_tool_streams_console_entries_as_progress_notifications() -> anyhow
     app.files()
         .put(
             &solx_files::shared_action_file_path("count.solx"),
-            b"exec /builtin/action/entity_list_actions; exec /builtin/document/entity_list_documents".to_vec(),
+            b"exec /builtin/action/entity-list-actions; exec /builtin/document/entity-list-documents".to_vec(),
         )
         .await?;
     app.actions()
@@ -149,11 +149,11 @@ async fn call_tool_streams_console_entries_as_progress_notifications() -> anyhow
     assert!(received.iter().all(|p| p.progress_token == token), "{received:?}");
     let messages: Vec<String> = received.iter().filter_map(|p| p.message.clone()).collect();
     assert!(
-        messages.iter().any(|m| m.contains("exec /builtin/action/entity_list_actions")),
+        messages.iter().any(|m| m.contains("exec /builtin/action/entity-list-actions")),
         "expected a progress message naming the first stage, got: {messages:?}"
     );
     assert!(
-        messages.iter().any(|m| m.contains("exec /builtin/document/entity_list_documents")),
+        messages.iter().any(|m| m.contains("exec /builtin/document/entity-list-documents")),
         "expected a progress message naming the second stage, got: {messages:?}"
     );
     // Progress must be non-decreasing per the MCP spec — using the
@@ -204,7 +204,7 @@ async fn router_list_all_respects_path_prefix() -> anyhow::Result<()> {
         "router should list /builtin/console actions, got: {text}"
     );
     assert!(
-        !text.contains("act__builtin__file__file_put"),
+        !text.contains("act__builtin__file__file-put"),
         "a /builtin-root action should not appear when scoped to /builtin/console, got: {text}"
     );
 

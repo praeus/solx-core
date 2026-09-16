@@ -90,57 +90,57 @@ const fn a_at(
 pub fn builtin_actions() -> Vec<SeedAction> {
     vec![
         // Document CRUD
-        a_at(DOCUMENT_PATH, "entity_save_document", "entity_save_document", "Create or update (upsert) a document.", Some("DocumentCrudParams")),
-        a_at(DOCUMENT_PATH, "entity_get_document", "entity_get_document", "Fetch a document by path+name.", Some("EntityRefParams")),
-        a_at(DOCUMENT_PATH, "entity_delete_document", "entity_delete_document", "Delete a document.", Some("EntityRefParams")),
-        a_at(DOCUMENT_PATH, "entity_list_documents", "entity_list_documents", "List documents, optionally filtered by path prefix.", Some("ListParams")),
-        a_at(DOCUMENT_PATH, "entity_list_document_paths", "entity_list_document_paths", "List distinct document paths in use, with a count of documents at each, optionally filtered by path prefix.", Some("ListParams")),
+        a_at(DOCUMENT_PATH, "entity-save-document", "entity-save-document", "Create or update (upsert) a document.", Some("DocumentCrudParams")),
+        a_at(DOCUMENT_PATH, "entity-get-document", "entity-get-document", "Fetch a document by path+name.", Some("EntityRefParams")),
+        a_at(DOCUMENT_PATH, "entity-delete-document", "entity-delete-document", "Delete a document.", Some("EntityRefParams")),
+        a_at(DOCUMENT_PATH, "entity-list-documents", "entity-list-documents", "List documents, optionally filtered by path prefix.", Some("ListParams")),
+        a_at(DOCUMENT_PATH, "entity-list-document-paths", "entity-list-document-paths", "List distinct document paths in use, with a count of documents at each, optionally filtered by path prefix.", Some("ListParams")),
         // Document legacy field ops (one field at a time)
-        a_at(DOCUMENT_PATH, "get_field", "get_field", "Read one field from a document's contents.", Some("GetFieldParams")),
-        a_at(DOCUMENT_PATH, "set_field", "set_field", "Write one field on a document's contents.", Some("SetFieldParams")),
+        a_at(DOCUMENT_PATH, "get-field", "get-field", "Read one field from a document's contents.", Some("GetFieldParams")),
+        a_at(DOCUMENT_PATH, "set-field", "set-field", "Write one field on a document's contents.", Some("SetFieldParams")),
         // Document path-style field ops (nested reads/writes via dotted path)
-        a_at(DOCUMENT_PATH, "get_field_at_path", "get_field_at_path", "Read a field at a slash-separated path inside a document's contents.", Some("GetFieldAtPathParams")),
-        a_at(DOCUMENT_PATH, "set_field_at_path", "set_field_at_path", "Write a field at a slash-separated path inside a document's contents (optionally creating missing parents).", Some("SetFieldAtPathParams")),
+        a_at(DOCUMENT_PATH, "get-field-at-path", "get-field-at-path", "Read a field at a slash-separated path inside a document's contents.", Some("GetFieldAtPathParams")),
+        a_at(DOCUMENT_PATH, "set-field-at-path", "set-field-at-path", "Write a field at a slash-separated path inside a document's contents (optionally creating missing parents).", Some("SetFieldAtPathParams")),
         // Document search (SQLite FTS5)
-        a_at(DOCUMENT_PATH, "search_documents", "search_documents", "Full-text + faceted search over documents.", Some("SearchDocumentsParams")),
+        a_at(DOCUMENT_PATH, "search-documents", "search-documents", "Full-text + faceted search over documents.", Some("SearchDocumentsParams")),
         // Action CRUD (alongside the async start/stop/poll/cancelled below)
-        a_at(ACTION_PATH, "entity_save_action", "entity_save_action", "Create or update (upsert) an action.", Some("ActionCrudParams")),
-        a_at(ACTION_PATH, "entity_get_action", "entity_get_action", "Fetch an action by path+name.", Some("EntityRefParams")),
-        a_at(ACTION_PATH, "entity_delete_action", "entity_delete_action", "Delete an action.", Some("EntityRefParams")),
-        a_at(ACTION_PATH, "entity_list_actions", "entity_list_actions", "List actions, optionally filtered by path prefix.", Some("ListParams")),
-        a_at(ACTION_PATH, "entity_list_action_paths", "entity_list_action_paths", "List distinct action paths in use, with a count of actions at each, optionally filtered by path prefix.", Some("ListParams")),
+        a_at(ACTION_PATH, "entity-save-action", "entity-save-action", "Create or update (upsert) an action.", Some("ActionCrudParams")),
+        a_at(ACTION_PATH, "entity-get-action", "entity-get-action", "Fetch an action by path+name.", Some("EntityRefParams")),
+        a_at(ACTION_PATH, "entity-delete-action", "entity-delete-action", "Delete an action.", Some("EntityRefParams")),
+        a_at(ACTION_PATH, "entity-list-actions", "entity-list-actions", "List actions, optionally filtered by path prefix.", Some("ListParams")),
+        a_at(ACTION_PATH, "entity-list-action-paths", "entity-list-action-paths", "List distinct action paths in use, with a count of actions at each, optionally filtered by path prefix.", Some("ListParams")),
         // Action search (a real FTS5 full-text index)
-        a_at(ACTION_PATH, "search_actions", "search_actions", "Full-text + faceted search over actions.", Some("SearchActionsParams")),
+        a_at(ACTION_PATH, "search-actions", "search-actions", "Full-text + faceted search over actions.", Some("SearchActionsParams")),
         // Type CRUD
-        a_at(TYPE_PATH, "entity_save_type", "entity_save_type", "Create or update (upsert) a type.", Some("TypeCrudParams")),
-        a_at(TYPE_PATH, "entity_get_type", "entity_get_type", "Fetch a type by path+name.", Some("EntityRefParams")),
-        a_at(TYPE_PATH, "entity_delete_type", "entity_delete_type", "Delete a type.", Some("EntityRefParams")),
-        a_at(TYPE_PATH, "entity_list_types", "entity_list_types", "List types, optionally filtered by path prefix.", Some("ListParams")),
-        a_at(TYPE_PATH, "entity_list_type_paths", "entity_list_type_paths", "List distinct type paths in use, with a count of types at each, optionally filtered by path prefix.", Some("ListParams")),
+        a_at(TYPE_PATH, "entity-save-type", "entity-save-type", "Create or update (upsert) a type.", Some("TypeCrudParams")),
+        a_at(TYPE_PATH, "entity-get-type", "entity-get-type", "Fetch a type by path+name.", Some("EntityRefParams")),
+        a_at(TYPE_PATH, "entity-delete-type", "entity-delete-type", "Delete a type.", Some("EntityRefParams")),
+        a_at(TYPE_PATH, "entity-list-types", "entity-list-types", "List types, optionally filtered by path prefix.", Some("ListParams")),
+        a_at(TYPE_PATH, "entity-list-type-paths", "entity-list-type-paths", "List distinct type paths in use, with a count of types at each, optionally filtered by path prefix.", Some("ListParams")),
         // General-purpose file store (unrestricted rel_path access)
-        a_at(FILE_PATH, "file_put", "file_put", "Write bytes to a rel-path under the files root.", Some("FilePutParams")),
-        a_at(FILE_PATH, "file_get", "file_get", "Read bytes from a rel-path under the files root.", Some("FileGetParams")),
-        a_at(FILE_PATH, "file_delete", "file_delete", "Delete a file at a rel-path under the files root.", Some("FileGetParams")),
-        a_at(FILE_PATH, "file_list", "file_list", "List stored rel-paths under a prefix.", Some("FileListParams")),
-        a_at(FILE_PATH, "file_copy", "file_copy", "Copy a file within the files root.", Some("FileCopyParams")),
-        a_at(FILE_PATH, "dir_copy", "dir_copy", "Recursively copy a directory within the files root.", Some("FileCopyParams")),
-        a_at(FILE_PATH, "dir_delete", "dir_delete", "Recursively delete a directory (and every file under it) within the files root.", Some("DirDeleteParams")),
+        a_at(FILE_PATH, "file-put", "file-put", "Write bytes to a rel-path under the files root.", Some("FilePutParams")),
+        a_at(FILE_PATH, "file-get", "file-get", "Read bytes from a rel-path under the files root.", Some("FileGetParams")),
+        a_at(FILE_PATH, "file-delete", "file-delete", "Delete a file at a rel-path under the files root.", Some("FileGetParams")),
+        a_at(FILE_PATH, "file-list", "file-list", "List stored rel-paths under a prefix.", Some("FileListParams")),
+        a_at(FILE_PATH, "file-copy", "file-copy", "Copy a file within the files root.", Some("FileCopyParams")),
+        a_at(FILE_PATH, "dir-copy", "dir-copy", "Recursively copy a directory within the files root.", Some("FileCopyParams")),
+        a_at(FILE_PATH, "dir-delete", "dir-delete", "Recursively delete a directory (and every file under it) within the files root.", Some("DirDeleteParams")),
         // Environment scratch store
-        a_at(ENV_PATH, "get_env", "get_env", "Read a variable from the environment store, optionally from a named namespace.", Some("GetEnvParams")),
-        a_at(ENV_PATH, "set_env", "set_env", "Write a variable to the environment store. In-memory by default; pass persist to also store it in solx-config.json so it survives a restart.", Some("SetEnvParams")),
+        a_at(ENV_PATH, "get-env", "get-env", "Read a variable from the environment store, optionally from a named namespace.", Some("GetEnvParams")),
+        a_at(ENV_PATH, "set-env", "set-env", "Write a variable to the environment store. In-memory by default; pass persist to also store it in solx-config.json so it survives a restart.", Some("SetEnvParams")),
         // Secrets, scoped to whichever action is currently executing
-        a_at(SECRETS_PATH, "get_secret", "get_secret", "Read a secret scoped to the calling action.", Some("GetSecretParams")),
-        a_at(SECRETS_PATH, "set_secret", "set_secret", "Write a secret scoped to the calling action.", Some("SetSecretParams")),
+        a_at(SECRETS_PATH, "get-secret", "get-secret", "Read a secret scoped to the calling action.", Some("GetSecretParams")),
+        a_at(SECRETS_PATH, "set-secret", "set-secret", "Write a secret scoped to the calling action.", Some("SetSecretParams")),
         // OAuth loopback
-        a_at(OAUTH_PATH, "oauth_start", "oauth_start", "Start a local OAuth 2.0 authorization-code loopback listener.", Some("OauthStartParams")),
-        a_at(OAUTH_PATH, "oauth_await", "oauth_await", "Block until the OAuth loopback for a state_value receives its callback.", Some("OauthAwaitParams")),
-        a_at(OAUTH_PATH, "oauth_stop", "oauth_stop", "Stop an OAuth loopback listener.", Some("OauthStopParams")),
+        a_at(OAUTH_PATH, "oauth-start", "oauth-start", "Start a local OAuth 2.0 authorization-code loopback listener.", Some("OauthStartParams")),
+        a_at(OAUTH_PATH, "oauth-await", "oauth-await", "Block until the OAuth loopback for a state_value receives its callback.", Some("OauthAwaitParams")),
+        a_at(OAUTH_PATH, "oauth-stop", "oauth-stop", "Stop an OAuth loopback listener.", Some("OauthStopParams")),
         // Web — a one-shot HTTP request and opening a URL in the system
         // browser; host-side streaming HTTP lives under WEB_STREAM_PATH below.
-        a_at(WEB_PATH, "http_request", "http_request", "Issue an HTTP request with optional method, headers, body, and timeout.", Some("HttpRequestParams")),
-        a_at(WEB_PATH, "open_url", "open_url", "Open a URL in the system browser via the platform-native handler (xdg-open / open / cmd /C start).", Some("OpenUrlParams")),
+        a_at(WEB_PATH, "http-request", "http-request", "Issue an HTTP request with optional method, headers, body, and timeout.", Some("HttpRequestParams")),
+        a_at(WEB_PATH, "open-url", "open-url", "Open a URL in the system browser via the platform-native handler (xdg-open / open / cmd /C start).", Some("OpenUrlParams")),
         // Scripting — parse and run a raw solx script string immediately.
-        a_at(SCRIPT_PATH, "exec", "script_exec", "Parse and immediately run a solx script from a string, returning its result. Supports the same 'exec <path/name> [--json '<params>']' and 'json <value>' stages as a Script-typed action.", Some("ScriptExecParams")),
+        a_at(SCRIPT_PATH, "exec", "script-exec", "Parse and immediately run a solx script from a string, returning its result. Supports the same 'exec <path/name> [--json '<params>']' and 'json <value>' stages as a Script-typed action.", Some("ScriptExecParams")),
         // Action consoles (`/builtin/console/*`) and asynchronous actions
         // (`/builtin/action/{start,stop,poll,cancelled}`) are seeded by
         // `solx-console` itself — see `solx_console::actions::seed_actions`,
@@ -149,9 +149,9 @@ pub fn builtin_actions() -> Vec<SeedAction> {
         // cross-call state of their own. Unrestricted by caller, like the
         // OAuth loopback and the action consoles: access is a bearer
         // capability on the unguessable stream_id.
-        a_at(WEB_STREAM_PATH, "start", "http_stream_start", "Issue a streaming HTTP request. Returns stream_id and status as soon as response headers arrive, without waiting for the body.", Some("HttpStreamStartParams")),
-        a_at(WEB_STREAM_PATH, "poll", "http_stream_poll", "Drain newline-delimited JSON chunks buffered for a stream since cursor, optionally long-polling up to wait_secs for more.", Some("HttpStreamPollParams")),
-        a_at(WEB_STREAM_PATH, "close", "http_stream_close", "Stop a stream's reader task and drop its buffer.", Some("HttpStreamCloseParams")),
+        a_at(WEB_STREAM_PATH, "start", "http-stream-start", "Issue a streaming HTTP request. Returns stream_id and status as soon as response headers arrive, without waiting for the body.", Some("HttpStreamStartParams")),
+        a_at(WEB_STREAM_PATH, "poll", "http-stream-poll", "Drain newline-delimited JSON chunks buffered for a stream since cursor, optionally long-polling up to wait_secs for more.", Some("HttpStreamPollParams")),
+        a_at(WEB_STREAM_PATH, "close", "http-stream-close", "Stop a stream's reader task and drop its buffer.", Some("HttpStreamCloseParams")),
     ]
 }
 
