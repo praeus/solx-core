@@ -141,12 +141,9 @@ pub struct LocalActionManager {
     /// `internal::run_internal`'s catch-all arm after its own hard-coded
     /// built-ins. See `solx_surface::internal_actions`.
     ///
-    /// Built lazily in [`Self::set_self_ref`] rather than in [`Self::open`]:
-    /// `solx_console::actions::plugin` needs an `Arc<dyn ActionExecutor>`
-    /// for `action-start`/`stop`/`poll`, which requires this manager to
-    /// already be wrapped in an `Arc` — the same reason [`Self::self_ref`]
-    /// itself is a `OnceLock` rather than a plain field.
-    plugin_registry: OnceLock<Arc<InternalActionRegistry>>,
+    /// Built lazily in [`Self::set_self_ref`] rather than [`Self::open`] —
+    /// see that method's doc for why.
+    internal_registry: OnceLock<Arc<InternalActionRegistry>>,
     /// Abort handles for in-flight detached (`action-start`) tasks, keyed by
     /// `invocation_id`. A field, not a process global — unlike the
     /// loopback's registry (see `solx_console::loopback`'s doc on why *that* one
@@ -154,10 +151,10 @@ pub struct LocalActionManager {
     /// `LocalActionManager` instances, so keeping it per-manager is simpler
     /// and keeps tests isolated from one another.
     running: Arc<Mutex<HashMap<String, AbortHandle>>>,
-    /// Set once, right after construction, to this manager's own
-    /// `Arc<LocalActionManager>` — needed so WASM guests can recursively
-    /// call back into `action-exec` (see `wasm`). `&self` methods
-    /// can't hand out `Arc<Self>` on their own, hence the `OnceLock`.
+    /// This manager's own handle, set once right after construction (see
+    /// [`Self::set_self_ref`]) so WASM guests can recursively call back into
+    /// `action-exec` (see `wasm`). `&self` methods can't hand out
+    /// `Arc<Self>` on their own, hence the `OnceLock`.
     ///
     /// Concrete rather than `Weak<dyn ActionManager>` so the recursive hop
     /// can reach [`Self::exec_as`], which carries the calling action's
@@ -182,9 +179,9 @@ impl ActionExecutor for LocalActionManager {
 }
 
 impl LocalActionManager {
-    /// Open the actions database, seed built-in WASM actions, and prepare
-    /// execution. `docs`/`types`/`files` are the sibling stores WASM host
-    /// functions call into; call [`Self::set_self_ref`] once after
+    /// Open the actions database, seed the built-in action catalogue, and
+    /// prepare execution. `docs`/`types`/`files` are the sibling stores WASM
+    /// host functions call into; call [`Self::set_self_ref`] once after
     /// wrapping the result in an `Arc` so recursive action execution works.
     pub async fn open(
         db_path: &Path,
@@ -197,19 +194,16 @@ impl LocalActionManager {
         let conn = db.connect().await?;
         conn.execute_batch(DDL).await.map_err(map_db)?;
         // `actions_fts` is `content='actions'` (external content), so a bare
-        // `SELECT ... FROM actions_fts` doesn't read the FTS index — it
-        // passes straight through to `actions`. An earlier version of this
-        // backfill did `INSERT ... SELECT ... WHERE rowid NOT IN (SELECT
-        // rowid FROM actions_fts)`, which for exactly that reason always
-        // compared `actions.rowid` against itself and silently indexed
-        // nothing for a DB that had rows before this table existed — new
-        // rows still indexed fine via the triggers below, which give
-        // `actions_fts` real column values directly. The fix, and the
-        // documented way to populate an external-content FTS5 index from
-        // existing data, is `INSERT INTO actions_fts(actions_fts) VALUES
-        // ('rebuild')` — run once, only the first time the table is
-        // created (mirroring `solx-docs`'s `created_fresh` reindex), so a
-        // normal restart doesn't pay for a full rebuild on every start.
+        // `SELECT ... FROM actions_fts` passes straight through to `actions`
+        // rather than reading the index — a `WHERE rowid NOT IN (SELECT
+        // rowid FROM actions_fts)` backfill would therefore always compare
+        // `actions.rowid` against itself and index nothing for rows that
+        // predate this table. The documented fix is `INSERT INTO
+        // actions_fts(actions_fts) VALUES ('rebuild')`, run once, only the
+        // first time the table is created (mirroring `solx-docs`'s
+        // `created_fresh` reindex), so a normal restart doesn't pay for a
+        // full rebuild every time. New rows index fine via the triggers
+        // below regardless.
         let fts_existed_before: bool = {
             let mut rows = conn
                 .query(
@@ -259,7 +253,7 @@ impl LocalActionManager {
             files,
             console,
             invocations,
-            plugin_registry: OnceLock::new(),
+            internal_registry: OnceLock::new(),
             running: Arc::new(Mutex::new(HashMap::new())),
             self_ref: OnceLock::new(),
         })
@@ -285,12 +279,12 @@ impl LocalActionManager {
     /// matters for a test harness that skips it, in which case
     /// `console-print`/`action-start`/etc. simply report "unknown internal
     /// fn_name" rather than panicking.
-    pub(crate) fn plugin_registry(&self) -> Arc<InternalActionRegistry> {
-        self.plugin_registry.get().cloned().unwrap_or_default()
+    pub(crate) fn internal_registry(&self) -> Arc<InternalActionRegistry> {
+        self.internal_registry.get().cloned().unwrap_or_default()
     }
 
     /// Provide this manager's own handle for recursive WASM `action-exec`
-    /// calls, and build [`Self::plugin_registry`] (which needs the same
+    /// calls, and build [`Self::internal_registry`] (which needs the same
     /// `Arc<Self>` to hand `solx-console` an `Arc<dyn ActionExecutor>`).
     /// Must be called exactly once, right after the manager is wrapped in
     /// an `Arc` (e.g. `let m = Arc::new(LocalActionManager::open(...).await?);
@@ -301,7 +295,7 @@ impl LocalActionManager {
         if let Some(strong) = self_ref.upgrade() {
             let executor: Arc<dyn ActionExecutor> = strong;
             let plugin = solx_console::actions::plugin(self.console.clone(), self.invocations.clone(), executor);
-            let _ = self.plugin_registry.set(Arc::new(plugin));
+            let _ = self.internal_registry.set(Arc::new(plugin));
         }
         let _ = self.self_ref.set(self_ref);
     }
@@ -461,13 +455,6 @@ fn row_to_action(row: &libsql::Row) -> Result<Action> {
 
 const SELECT: &str = "SELECT id,path,name,caption,description,capabilities,phrases,category,param_type_ref,result_type_ref,action_type,fn_name,bin_name,action_config,files,trusted,created_at,updated_at FROM actions";
 
-/// Columns this store exposes to `ListOptions`. `capabilities` and `phrases`
-/// are JSON arrays, so filtering them is a substring match over that text —
-/// enough to find "every action tagged mcp" without a join table.
-///
-/// `action_config` is deliberately absent: it can hold secrets (see
-/// [`mask`]), and a LIKE filter over it would leak their contents by
-/// letting a caller probe for substrings.
 /// How much to over-fetch when `exclude_hidden` forces post-query
 /// filtering, so a page that loses a few rows is usually still full.
 const HIDDEN_OVERFETCH: usize = 4;
@@ -476,6 +463,13 @@ const HIDDEN_OVERFETCH: usize = 4;
 /// unbounded scan.
 const HIDDEN_FETCH_CAP: usize = 1000;
 
+/// Columns this store exposes to `ListOptions`. `capabilities` and `phrases`
+/// are JSON arrays, so filtering them is a substring match over that text —
+/// enough to find "every action tagged mcp" without a join table.
+///
+/// `action_config` is deliberately absent: it can hold secrets (see
+/// [`mask`]), and a LIKE filter over it would leak their contents by
+/// letting a caller probe for substrings.
 const LIST_SCHEMA: ListSchema<'static> = ListSchema {
     filterable: &[
         "name",
@@ -745,11 +739,8 @@ impl ActionManager for LocalActionManager {
     /// `category`/`phrases`, composed with the same `path_prefix`/
     /// `filter_field`/date filters as [`Self::list`] (rendered once via
     /// `ListOptions::to_sql`, then the `MATCH` bind is appended last so none
-    /// of its `?N` placeholders need renumbering). Joins to `actions_fts`
-    /// through a `rowid, rank`-only subquery rather than directly, so the
-    /// FTS table's own `path` column can't collide with `q.where_clause`'s
-    /// unqualified one. With `query.q` absent this runs the exact same query
-    /// plan as `list` — no join, no ranking.
+    /// of its `?N` placeholders need renumbering). With `query.q` absent
+    /// this runs the exact same query plan as `list` — no join, no ranking.
     async fn search(&self, query: ActionSearchQuery) -> Result<Page<Action>> {
         let conn = self.db.connect().await?;
         let want = query.list.limit_or(DEFAULT_LIMIT);
@@ -912,7 +903,6 @@ impl LocalActionManager {
             params
         };
 
-        // Validate params against the declared parameter type, if any.
         if let Some(tr) = &action.param_type_ref {
             self.types.validate(&params, tr).await?;
         }
@@ -982,7 +972,7 @@ impl LocalActionManager {
                     files: self.files.clone(),
                     config: self.config.clone(),
                     local: self.self_arc()?,
-                    registry: self.plugin_registry(),
+                    registry: self.internal_registry(),
                     action_config: action.action_config.clone(),
                     caller: caller.cloned(),
                 };
@@ -2362,9 +2352,6 @@ mod tests {
             .find(|a| a.name == "entity-get-document")
             .expect("entity-get-document should be seeded");
         assert!(doc_get.trusted, "seeded built-ins should be trusted");
-        // Entity CRUD is dispatched natively (`internal`), not through the
-        // WASM guest — see solx-actions/src/seed.rs's module docs: the WASM
-        // entity-ops guest silently ignores the `path` parameter.
         assert_eq!(doc_get.action_type, Some(ActionType::Internal));
 
         // Every built-in is native dispatch now — there's no more WASM

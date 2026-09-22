@@ -7,6 +7,16 @@
 //! macros: those assume a fixed, compile-time-known tool set, but the tools
 //! the router discovers come from a live `actions.list()`/`actions.search()`
 //! query.
+//!
+//! This means an MCP client reading `tools/list` will see exactly one entry
+//! even though there are dozens of invokable actions behind it. The
+//! `get_info` instructions and the `explore_tools` description both spell
+//! this out, but a UI that only renders the wire `tools/list` (VS Code's
+//! MCP picker, for one) will show just the one tool regardless — that's a
+//! discoverability UX gap, not a routing bug, and it's by design: a flat
+//! `tools/list` would need a `tools/list_changed` notification on every
+//! package install/uninstall, and the model would have to filter dozens of
+//! static entries instead of searching on demand.
 
 use std::sync::Arc;
 
@@ -87,7 +97,7 @@ impl SolxMcpServer {
         .clone();
         Tool::new(
             ROUTER_TOOL_NAME,
-            "Discover available tools. Use 'search' to find tools for a specific task, or 'list_all' to browse the complete registry. Returns tool names you can then invoke directly.",
+            "Discover available tools. Use 'search' to find tools for a specific task, or 'list_all' to browse the complete registry. Returns tool names you can then invoke directly. Note: only this router tool is advertised in the MCP `tools/list` response — the action tools it surfaces are NOT listed there (they're discovered through this tool, then invoked by `tools/call` against their `act__`-prefixed names). That mismatch is by design: the action catalogue is dynamic and large, and exposing it as a flat `tools/list` would mean every package install/uninstall needs a `tools/list_changed` notification and the model would have to wade through dozens of static entries instead of searching on demand.",
             Arc::new(schema),
         )
     }
@@ -278,10 +288,20 @@ impl ServerHandler for SolxMcpServer {
         // crate), not ours — set it explicitly instead.
         info.server_info = Implementation::new("solx-mcp", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
-            "Every action in the solx actions database is surfaced here as a tool. \
-             Documents, types, actions-as-data, search, and general file-store access \
-             are all reached through those actions (e.g. entity_new_document, \
-             search-documents, file-put) — there is no separate CRUD tool layer."
+            "This server is a thin router over the live solx actions database, exposed as MCP tools.\n\
+             \n\
+             IMPORTANT: only one tool, `explore_tools`, is registered in the MCP `tools/list` response. \
+             The full action catalogue (every action across every installed package, plus the built-in \
+             ones under `/builtin/*`) is NOT advertised in `tools/list` — it is dynamic, large, and \
+             changes every time a package is installed or removed. To discover the actions available \
+             to you right now, call `explore_tools` with `discovery_mode: \"search\"` (keyword filter) \
+             or `discovery_mode: \"list_all\"` (paginated browse). Every action it surfaces is encoded \
+             as an `act__`-prefixed tool name and is invokable directly via `tools/call` against that \
+             name — passing through the action's parameters as the `arguments` object.\n\
+             \n\
+             Documents, types, actions-as-data, search, and general file-store access are all reached \
+             through those actions (e.g. `entity-save-document`, `search-actions`, `file-put`) — there \
+             is no separate CRUD tool layer."
                 .to_string(),
         );
         info

@@ -125,11 +125,14 @@ pub fn load_keyring(r: &KeyringRef) -> Result<String, String> {
     let entry = keyring::Entry::new(&r.keyring_service, &r.keyring_account)
         .map_err(|e| format!("keyring entry '{}/{}' open failed: {e}", r.keyring_service, r.keyring_account))?;
     entry.get_password().map_err(|e| {
+        let service = &r.keyring_service;
+        let account = &r.keyring_account;
         format!(
-            "keyring lookup '{}/{}' failed: {e} \
-             (this commonly means the entry was never stored; see \
-             `docs/oauth-integration.md` for the setup commands)",
-            r.keyring_service, r.keyring_account
+            "keyring lookup '{service}/{account}' failed: {e} \
+             (this commonly means the entry was never stored -- set it with \
+             `cmdkey /generic:{service}\\{account} /user:ignored /pass:\"<value>\"` on Windows, \
+             `security add-generic-password -s {service} -a {account} -w \"<value>\"` on macOS, \
+             or `secret-tool store service {service} account {account}` on Linux)"
         )
     })
 }

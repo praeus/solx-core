@@ -441,7 +441,7 @@ mod tests {
         );
         actions_concrete.set_self_ref(Arc::downgrade(&actions_concrete));
         let local = actions_concrete.clone();
-        let registry = actions_concrete.plugin_registry();
+        let registry = actions_concrete.internal_registry();
         let actions: Arc<dyn ActionManager> = actions_concrete;
         (
             dir,

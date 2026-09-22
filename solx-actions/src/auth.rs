@@ -488,8 +488,7 @@ async fn exchange_refresh_token(
 
     // Persistence of rotated tokens is opt-out (`auth.persist_rotated_refresh`).
     // The default is `true` because most providers rotate, but actions that
-    // want to manage the new token themselves can disable this — see
-    // `docs/oauth-integration.md` §2.3.
+    // want to manage the new token themselves can disable this.
     let persistence_enabled = auth
         .get("persist_rotated_refresh")
         .and_then(Value::as_bool)
@@ -600,9 +599,8 @@ async fn persist_rotated_refresh_token(
 /// grant. See [`RefreshRequest`] for why we avoid `Deserialize` here.
 ///
 /// `private_key` is sourced through [`secret_field`] (inline string,
-/// keyring reference, or scoped secret-store pointer — see
-/// `docs/oauth-integration.md` §6.1). For RSA PEMs the keyring or
-/// secret-store shape is strongly preferred over inline.
+/// keyring reference, or scoped secret-store pointer). For RSA PEMs the
+/// keyring or secret-store shape is strongly preferred over inline.
 #[derive(Debug)]
 struct ServiceAccountRequest {
     client_email: String,
