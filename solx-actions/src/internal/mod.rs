@@ -123,7 +123,7 @@ pub async fn run_internal(fn_name: &str, params: &Value, ctx: &InternalCtx) -> R
     match fn_name {
         // ── OAuth 2.0 authorization-code loopback ────────────────────────
         "oauth-start" => oauth::oauth_start(params).await,
-        "oauth-await" => oauth::oauth_await(params).await,
+        "oauth-await" => oauth::oauth_await(params, ctx).await,
         "oauth-stop" => oauth::oauth_stop(params).await,
 
         // ── entity CRUD ──────────────────────────────────────────────────
@@ -1980,5 +1980,129 @@ mod tests {
 
         let after = run_internal("action-cancelled", &json!({}), &ctx).await.unwrap();
         assert_eq!(after.get("cancelled"), Some(&Value::Bool(true)));
+    }
+
+    // ── OAuth loopback lifetime ─────────────────────────────────────────────
+    //
+    // Each test uses its own port: the listener registry is process-global
+    // and tests run in parallel.
+
+    /// Polls until nothing is bound to `port` (a listener's shutdown is
+    /// asynchronous), up to a few seconds.
+    async fn wait_port_free(port: u16) -> bool {
+        for _ in 0..40 {
+            if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    }
+
+    async fn start_on(ctx: &InternalCtx, port: u16) -> String {
+        let v = run_internal("oauth-start", &json!({ "port": port }), ctx).await.unwrap();
+        v["state_value"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn oauth_start_supersedes_our_own_abandoned_listener_on_the_same_port() {
+        let (_d, ctx) = test_ctx(None).await;
+        let port = 18761;
+        let first = start_on(&ctx, port).await;
+        // Previously: "failed to bind oauth loopback ... os error 10048".
+        let second = start_on(&ctx, port).await;
+
+        let v = run_internal("oauth-stop", &json!({ "state_value": first }), &ctx).await.unwrap();
+        assert_eq!(v["stopped"], false, "the superseded listener should already be gone");
+        let v = run_internal("oauth-stop", &json!({ "state_value": second }), &ctx).await.unwrap();
+        assert_eq!(v["stopped"], true);
+        assert!(wait_port_free(port).await);
+    }
+
+    #[tokio::test]
+    async fn oauth_await_releases_the_port_when_the_caller_is_stopped() {
+        let (_d, mut ctx) = test_ctx(None).await;
+        ctx.caller = Some(Caller::with_invocation("/pkg/login", None, "inv-oauth-cancel"));
+        ctx.local.invocations().create("inv-oauth-cancel", "/pkg/login", 0).await.unwrap();
+        let port = 18762;
+        let state = start_on(&ctx, port).await;
+
+        ctx.local.invocations().request_cancel("inv-oauth-cancel").await.unwrap();
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_internal("oauth-await", &json!({ "state_value": state, "timeout_secs": 300 }), &ctx),
+        )
+        .await
+        .expect("oauth-await must notice the stop request instead of waiting out its timeout")
+        .unwrap_err();
+        assert!(err.contains("cancelled"), "{err}");
+        assert!(wait_port_free(port).await);
+    }
+
+    #[tokio::test]
+    async fn oauth_await_releases_the_port_when_its_future_is_dropped() {
+        let (_d, ctx) = test_ctx(None).await;
+        let port = 18763;
+        let state = start_on(&ctx, port).await;
+
+        // Stands in for a force-abort / client disconnect mid-wait.
+        let dropped = tokio::time::timeout(
+            Duration::from_millis(300),
+            run_internal("oauth-await", &json!({ "state_value": state }), &ctx),
+        )
+        .await;
+        assert!(dropped.is_err(), "await should still have been waiting");
+        assert!(wait_port_free(port).await);
+    }
+
+    #[tokio::test]
+    async fn oauth_await_timeout_keeps_the_listener_for_a_later_await() {
+        let (_d, ctx) = test_ctx(None).await;
+        let port = 18764;
+        let state = start_on(&ctx, port).await;
+
+        let err = run_internal("oauth-await", &json!({ "state_value": state, "timeout_secs": 1 }), &ctx)
+            .await
+            .unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(
+            std::net::TcpListener::bind(("127.0.0.1", port)).is_err(),
+            "listener must survive an oauth-await timeout"
+        );
+
+        let v = run_internal("oauth-stop", &json!({ "state_value": state }), &ctx).await.unwrap();
+        assert_eq!(v["stopped"], true);
+        assert!(wait_port_free(port).await);
+    }
+
+    #[tokio::test]
+    async fn oauth_await_releases_the_port_after_a_real_callback() {
+        let (_d, ctx) = test_ctx(None).await;
+        let port = 18765;
+        let state = start_on(&ctx, port).await;
+
+        // A hand-rolled request rather than reqwest: building a reqwest
+        // client initializes its TLS stack, which intermittently crashed the
+        // test binary (STATUS_ACCESS_VIOLATION) when raced against other
+        // tests doing the same.
+        let request = format!(
+            "GET /callback?code=the-code&state={state} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        );
+        let browser = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            response
+        });
+        let v = run_internal("oauth-await", &json!({ "state_value": state, "timeout_secs": 10 }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(v["code"], "the-code");
+        let response = browser.await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(wait_port_free(port).await);
     }
 }
