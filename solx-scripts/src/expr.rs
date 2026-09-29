@@ -7,7 +7,8 @@
 //!
 //! Strings: `"double quotes"` take JSON escapes and fill in `${name.path}`
 //! references; a bare `$` inside them is literal, so pasted JSON is taken
-//! as-is. `'single'`/`'''triple'''` quotes are fully literal (older forms).
+//! as-is, and `\$` is a literal `$` even before `{`. `'single'`/
+//! `'''triple'''` quotes are fully literal (older forms).
 //!
 //! Precedence, low to high: `||` → `&&` → unary `!` → comparison → atom.
 //! Atoms are `$name[.field.sub]` variable references (resolved the same way
@@ -29,8 +30,8 @@ pub enum Expr {
     Literal(Value),
     Var(String),
     /// Double-quoted string containing `${name.path}` references, filled in
-    /// at evaluation time (see [`interpolate`]).
-    Template(String),
+    /// at evaluation time (see [`render_template`]).
+    Template(Vec<TemplatePart>),
     /// `{"key": expr, ...}` — keys are string literals (a double-quoted key
     /// may use `${...}`, like any `"..."`).
     Object(Vec<(Expr, Expr)>),
@@ -40,6 +41,15 @@ pub enum Expr {
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
     Compare(CompareOp, Box<Expr>, Box<Expr>),
+}
+
+/// A piece of a double-quoted string, split at lex time so an escaped `\$`
+/// can never be mistaken for a reference.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TemplatePart {
+    Text(String),
+    /// `${name.path}`
+    Ref(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -65,8 +75,8 @@ enum Token {
     Op(CompareOp),
     Var(String),
     Str(String),
-    /// Double-quoted string: `${name}` references inside are filled in.
-    Template(String),
+    /// Double-quoted string, split into text and `${name}` references.
+    Template(Vec<TemplatePart>),
     Num(serde_json::Number),
     LBrace,
     RBrace,
@@ -185,12 +195,29 @@ fn lex(src: &str) -> Result<Vec<Token>> {
             }
             '"' => {
                 chars.next();
-                let mut s = String::new();
+                let mut parts = Vec::new();
+                let mut text = String::new();
                 loop {
                     match chars.next() {
-                        Some('\\') => lex_json_escape(&mut chars, &mut s, src)?,
+                        // `\$` is a literal `$` that never starts a `${...}`.
+                        Some('\\') if chars.peek() == Some(&'$') => {
+                            text.push(chars.next().unwrap());
+                        }
+                        Some('\\') => lex_json_escape(&mut chars, &mut text, src)?,
+                        Some('$') if chars.peek() == Some(&'{') => match lex_braced_ref(&chars) {
+                            Some((name, consumed)) => {
+                                for _ in 0..consumed {
+                                    chars.next();
+                                }
+                                if !text.is_empty() {
+                                    parts.push(TemplatePart::Text(std::mem::take(&mut text)));
+                                }
+                                parts.push(TemplatePart::Ref(name));
+                            }
+                            None => text.push('$'),
+                        },
                         Some('"') => break,
-                        Some(ch) => s.push(ch),
+                        Some(ch) => text.push(ch),
                         None => {
                             return Err(SolxError::Invalid(format!(
                                 "unterminated string literal in expression: {src}"
@@ -198,7 +225,10 @@ fn lex(src: &str) -> Result<Vec<Token>> {
                         }
                     }
                 }
-                tokens.push(Token::Template(s));
+                if !text.is_empty() || parts.is_empty() {
+                    parts.push(TemplatePart::Text(text));
+                }
+                tokens.push(Token::Template(parts));
             }
             '$' => {
                 chars.next();
@@ -435,8 +465,7 @@ impl Parser {
             }
             Some(Token::Var(name)) => Ok(Expr::Var(name)),
             Some(Token::Str(s)) => Ok(Expr::Literal(Value::String(s))),
-            Some(Token::Template(s)) if s.contains("${") => Ok(Expr::Template(s)),
-            Some(Token::Template(s)) => Ok(Expr::Literal(Value::String(s))),
+            Some(Token::Template(parts)) => Ok(template_expr(parts)),
             Some(Token::Num(n)) => Ok(Expr::Literal(Value::Number(n))),
             Some(Token::Bool(b)) => Ok(Expr::Literal(Value::Bool(b))),
             Some(Token::Null) => Ok(Expr::Literal(Value::Null)),
@@ -453,8 +482,7 @@ impl Parser {
                 while !self.eat(&Token::RBrace) {
                     let key = match self.next() {
                         Some(Token::Str(k)) => Expr::Literal(Value::String(k)),
-                        Some(Token::Template(k)) if k.contains("${") => Expr::Template(k),
-                        Some(Token::Template(k)) => Expr::Literal(Value::String(k)),
+                        Some(Token::Template(parts)) => template_expr(parts),
                         other => {
                             return Err(SolxError::Invalid(format!(
                                 "object keys must be quoted strings, found {other:?}"
@@ -498,7 +526,7 @@ pub fn eval_expr(expr: &Expr, ctx: &HashMap<String, Value>) -> Result<Value> {
     match expr {
         Expr::Literal(v) => Ok(v.clone()),
         Expr::Var(name) => Ok(resolve_var(name, ctx)),
-        Expr::Template(s) => Ok(Value::String(interpolate(s, ctx))),
+        Expr::Template(parts) => Ok(Value::String(render_template(parts, ctx))),
         Expr::Array(items) => Ok(Value::Array(
             items.iter().map(|e| eval_expr(e, ctx)).collect::<Result<_>>()?,
         )),
@@ -536,36 +564,48 @@ pub fn eval_expr(expr: &Expr, ctx: &HashMap<String, Value>) -> Result<Value> {
     }
 }
 
-/// Fill in each `${name.path}` in a double-quoted string with the variable's
-/// text (strings raw, other values as JSON, missing as `null` — the same
-/// rendering pipeline arguments use). A bare `$name` is literal, so pasted
-/// JSON like `"$schema"` is left alone; a `${` that isn't a valid reference
-/// (`${}`, `${a b}`, no closing `}`) is kept as-is.
-fn interpolate(s: &str, ctx: &HashMap<String, Value>) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(start) = rest.find("${") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        let name = after.find('}').map(|end| &after[..end]).filter(|n| {
-            !n.is_empty()
-                && !n.starts_with('.')
-                && !n.ends_with('.')
-                && n.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
-        });
-        match name {
-            Some(name) => {
-                out.push_str(&value_to_arg_string(&resolve_var(name, ctx)));
-                rest = &after[name.len() + 1..];
-            }
-            None => {
-                out.push_str("${");
-                rest = after;
-            }
+/// A double-quoted string with no `${...}` is just a literal.
+fn template_expr(parts: Vec<TemplatePart>) -> Expr {
+    match parts.as_slice() {
+        [TemplatePart::Text(t)] => Expr::Literal(Value::String(t.clone())),
+        _ => Expr::Template(parts),
+    }
+}
+
+/// Render a double-quoted string's pieces: each `${name.path}` becomes the
+/// variable's text (strings raw, other values as JSON, missing as `null` —
+/// the same rendering pipeline arguments use).
+fn render_template(parts: &[TemplatePart], ctx: &HashMap<String, Value>) -> String {
+    let mut out = String::new();
+    for part in parts {
+        match part {
+            TemplatePart::Text(t) => out.push_str(t),
+            TemplatePart::Ref(name) => out.push_str(&value_to_arg_string(&resolve_var(name, ctx))),
         }
     }
-    out.push_str(rest);
     out
+}
+
+/// With `chars` positioned just after a `$` whose next char is `{`, check
+/// for a valid `{name.path}` reference. Returns the name and how many chars
+/// it spans (braces included); `None` (`${}`, `${a b}`, `${.x}`, no closing
+/// `}`) means the `$` is literal text.
+fn lex_braced_ref(chars: &Peekable<Chars>) -> Option<(String, usize)> {
+    let mut look = chars.clone();
+    look.next(); // `{`
+    let mut name = String::new();
+    loop {
+        match look.next()? {
+            '}' => break,
+            c if c.is_alphanumeric() || c == '_' || c == '.' => name.push(c),
+            _ => return None,
+        }
+    }
+    if name.is_empty() || name.starts_with('.') || name.ends_with('.') {
+        return None;
+    }
+    let consumed = name.chars().count() + 2;
+    Some((name, consumed))
 }
 
 fn resolve_var(name: &str, ctx: &HashMap<String, Value>) -> Value {
@@ -775,6 +815,12 @@ mod tests {
         assert_eq!(eval(r#""$schema $name""#, &ctx), serde_json::json!("$schema $name"));
         assert_eq!(eval(r#""${} ${a b} ${.x} ${open""#, &ctx), serde_json::json!("${} ${a b} ${.x} ${open"));
         assert_eq!(eval("'${id}'", &ctx), serde_json::json!("${id}"));
+        // `\$` is a literal `$` that never starts a reference.
+        assert_eq!(eval(r#""write \${id} to insert ${id}""#, &ctx), serde_json::json!("write ${id} to insert 42"));
+        assert_eq!(eval(r#""\$5 \\${id}""#, &ctx), serde_json::json!("$5 \\42"));
+        assert_eq!(eval(r#"{"\${k}": "${name}"}"#, &ctx), serde_json::json!({"${k}": "Ann"}));
+        assert_eq!(eval(r#""""#, &ctx), serde_json::json!(""));
+        assert_eq!(eval(r#""${id}""#, &ctx), serde_json::json!("42"));
         assert_eq!(eval(r#""${name}" == "Ann""#, &ctx), Value::Bool(true));
     }
 

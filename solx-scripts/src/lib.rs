@@ -52,7 +52,8 @@
 //!   quotes, only with braces: `"Hi ${user.name}."` Strings go in as their
 //!   text, other values as JSON, a missing value as `null`. Use this for
 //!   URLs and messages; for JSON, use an object literal instead of building
-//!   a string.
+//!   a string. To write a literal `${...}` in text, escape the dollar:
+//!   `"type \${name} to insert a name"` yields `type ${name} to insert a name`.
 //! - **Plain values don't need `json`.** A statement starting with a `$var`,
 //!   a literal (`8765`, `"text"`, `true`/`false`/`null`), `{`, `[`, `(` or
 //!   `!` is an expression: `$timeout = $params.timeout_secs;`, or a bare
