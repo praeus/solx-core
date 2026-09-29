@@ -12,99 +12,79 @@
 //! the tokens with clap and dispatching. (This mirrors the old CLI's
 //! `execute_pipeline`, lifted into a library.)
 //!
-//! ## Gotchas for script authors
+//! ## Writing scripts
 //!
-//! - **Comments are `#` to end of line**, stripped before the `;`-split (see
-//!   [`strip_comments`]). A `#` inside a single- or double-quoted substring
-//!   (e.g. a URL fragment in a JSON body) is left alone — only an unquoted
-//!   `#` starts a comment. There's no block-comment form.
-//! - **Wrap JSON bodies in `'''triple single quotes'''`, not `'...'`.**
-//!   Everything between `'''` and the next `'''` is taken completely raw —
-//!   no escaping of any kind — so a JSON body full of apostrophes, quotes,
-//!   or backslashes can be pasted in unmodified. This is the recommended
-//!   form for `--json '''{...}'''` bodies and condition string literals
-//!   alike; the only limitation is that the content can't itself contain the
-//!   literal 3-character sequence `'''`, which essentially never comes up.
-//!   The older single/double-quoted form (`'...'`/`"..."`) still works for
-//!   backward compatibility: a literal `'` or `"` inside one of those needs
-//!   `\'` / `\"`, and getting that wrong is silent and severe rather than a
-//!   parse error — an *unescaped* `'` ends the argument right there, and
-//!   everything after it on the line becomes bare, unrelated tokens that
-//!   still form a syntactically valid (but wrong) statement. This is exactly
-//!   what broke an early package's `install.solx`, and is why `'''...'''` is
-//!   preferred for anything that might contain an apostrophe.
-//! - **Ordinary statements end with `;`; control-flow keywords end at the
-//!   line.** For `exec`/`json`/assignments, newlines are cosmetic — only `;`
-//!   ends one, so a long `exec` can wrap across lines. An `if`, `elseif`,
-//!   `else`, `endif`, `for`, `endfor`, or `wait` statement instead ends at
-//!   the first `;` *or* newline, and an `if`/`else if` condition may also be
-//!   closed with `then` (`if $x == null then json 1; endif`), which must sit
-//!   on the same line as its condition. Both styles mix freely:
+//! ```text
+//! # Values: no `json` stage needed.
+//! $port = $params.port || 8765;
+//! $url = "https://host/auth?client_id=${client_id}&port=${port}";
 //!
-//!   ```text
-//!   if $x == null then
-//!       $y = json 1;
-//!   else
-//!       $y = json 2;
-//!   endif
-//!   ```
+//! # JSON arguments: write the object itself, unquoted.
+//! $cb = exec /builtin/oauth/oauth-await --json {
+//!     "state_value": $loopback.result.state_value,
+//!     "timeout_secs": $timeout,
+//! };
 //!
-//!   `else if <cond>` on one line is the next branch of the same `if`
-//!   (`elseif <cond>` also works); to nest a new `if` inside an `else`, put
-//!   it on the following line.
-//! - **`Script`-typed *actions* only support `exec`/`json` stages** (see
-//!   `solx-actions::script::ActionCommandRunner`) — not the
-//!   fuller CLI grammar (`save`/`get`/`delete`/`list`/`search`), and no
-//!   `return` statement exists at all (a block evaluates to its last
-//!   statement's value, so end the script with the value you want returned).
+//! if $cb.result.succeeded == true then
+//!     $result = {"succeeded": true, "code": $cb.result.code};
+//! else
+//!     $result = {"succeeded": false, "error": $cb.result.error};
+//! endif
+//! $result;
+//! ```
+//!
+//! - **JSON is written as object/array literals, never inside quotes.** An
+//!   assignment (`$x = {...}`) or a command argument that starts with an
+//!   unquoted `{` or `[` runs to its matching bracket — across spaces,
+//!   newlines, and `||` — and is evaluated as an expression. Values are any
+//!   expression (`$var.path`, literals, `$a || "default"`, nested
+//!   objects/arrays) and keep their real types: a string stays a string, a
+//!   missing field is a real `null`, a nested object stays an object. Keys
+//!   must be quoted; a trailing comma is allowed. As a command argument the
+//!   result is passed on as one JSON string, so
+//!   `exec /x --json {"a": $a}` and `exec /x --json $body` (a `$var` holding
+//!   an object) both work.
+//! - **Pasted JSON is taken literally.** Double-quoted strings use JSON
+//!   escapes (`\"`, `\\`, `\n`, `\uXXXX`, ...), and a bare `$` inside one
+//!   is just a character, so `{"$schema": "http://json-schema.org/..."}`
+//!   pastes in unchanged.
+//! - **`${name.path}` fills a value into a string.** Only inside double
+//!   quotes, only with braces: `"Hi ${user.name}."` Strings go in as their
+//!   text, other values as JSON, a missing value as `null`. Use this for
+//!   URLs and messages; for JSON, use an object literal instead of building
+//!   a string.
 //! - **Plain values don't need `json`.** A statement starting with a `$var`,
-//!   a literal (`8765`, `"text"`, `true`/`false`/`null`), `(` or `!` is an
-//!   expression, evaluated directly with its real type — no text round-trip:
-//!   `$timeout = $params.timeout_secs;`, `$port = 8765;`, or a bare
+//!   a literal (`8765`, `"text"`, `true`/`false`/`null`), `{`, `[`, `(` or
+//!   `!` is an expression: `$timeout = $params.timeout_secs;`, or a bare
 //!   `$result;` as a script's last line. `&&`/`||` return the operand that
 //!   decided them, so `$port = $params.port || 8765;` is a fallback (`0`,
-//!   `null`, `""`, `[]`, `{}` count as falsy). Object and array literals
-//!   work too, with any expression as a value and quoted keys only:
-//!   `$body = {"port": $port, "tags": ["a", $tag], "who": "user $name"};`
-//!   (may span lines; a trailing comma is allowed). Values keep their types,
-//!   so a missing field is a real `null` and a nested object stays an object.
-//!   There's no `$a | $b` pipe form — a `|` pipeline's stages must be
-//!   commands.
-//! - **Pass JSON arguments as unquoted object literals.** A command
-//!   argument that starts with an unquoted `{` or `[` runs to its matching
-//!   bracket (spaces, newlines, `||` and all), is evaluated like any object
-//!   literal, and is passed on as one JSON argument:
-//!   `exec /x --json {"state": $loopback.result.state_value, "timeout_secs": $t}`.
-//!   This is the preferred form — no splicing `'...'$var'...'`, no deciding
-//!   which values need quotes. A `$var` holding an object works the same
-//!   way (`exec /x --json $body`). Double-quoted strings take JSON escapes
-//!   (`\n`, `\\`, `é`, ...). Commands may wrap across lines anywhere
-//!   between arguments.
-//! - **Double quotes interpolate, single quotes don't.** In an expression,
-//!   `"..."` substitutes every `$var`/`$var.path` inside it (as text, the
-//!   same way pipeline arguments are substituted) and yields a string:
-//!   `$url = "https://host/path?id=$id&name=$name";`. `'...'` and
-//!   `'''...'''` are literal. A `$` not followed by a name stays as-is, and
-//!   a trailing `.` after a name is punctuation (`"Hi $name."`). For a
-//!   literal `$name` in text, use single quotes.
-//! - **When splicing into a quoted argument** (the older form, still
-//!   supported), **quote string substitutions, don't quote everything else.** A `$var`
-//!   holding a `String` substitutes as the *raw, unquoted* text (so it can
-//!   sit inside an `exec` argument or be user-composed into a larger string);
-//!   wrap it in explicit `"..."` when it needs to land as a valid JSON string
-//!   value, e.g. `json '{"name":"$var"}'`. A `$var` holding a number/bool/
-//!   object/array already serializes to valid JSON, so leave it bare:
-//!   `json '{"port":$port}'`. Mixing these up produces "expected value" (a
-//!   string landed unquoted) or a string containing literal `{...}` text (an
-//!   object got wrapped in quotes it didn't need).
-//! - **A missing/null field's substitution is the 4-character text `null`**,
-//!   not an absent token — so `Value::Null` and the JSON string `"null"`
-//!   become indistinguishable once a value has gone through the
-//!   quote-wrapped-string convention above. If you need to tell a real `null`
-//!   apart from the string `"null"`, compare the *unwrapped* value directly
-//!   in an `if` (`if $existing.value == null; ...`) or copy it with a value
-//!   assignment (`$v = $existing.value;`), both of which use the real typed
-//!   value via dotted-path navigation rather than text substitution.
+//!   `null`, `""`, `[]`, `{}` are falsy). There's no `$a | $b` pipe form —
+//!   a `|` pipeline's stages must be commands.
+//! - **Ordinary statements end with `;`; control-flow keywords end at the
+//!   line.** An `exec`, `json`, or assignment runs until `;`, so it can wrap
+//!   across lines. `if`, `else if`, `else`, `endif`, `for`, `endfor`, and
+//!   `wait` end at the first `;` *or* newline, and an `if`/`else if`
+//!   condition may also end with `then` on the same line
+//!   (`if $x then json 1; endif`). `else if <cond>` on one line is the next
+//!   branch of the same `if` (`elseif` also works); to nest a new `if`
+//!   inside an `else`, put it on the following line.
+//! - **Comments are `#` to end of line**, except inside quotes (see
+//!   [`strip_comments`]). There's no block-comment form.
+//! - **`Script`-typed *actions* only support `exec`/`json` stages** (see
+//!   `solx-actions::script::ActionCommandRunner`) — not the fuller CLI
+//!   grammar (`save`/`get`/`delete`/`list`/`search`) — and there's no
+//!   `return`: a block evaluates to its last statement's value.
+//!
+//! ### Older forms (still accepted, not for new scripts)
+//!
+//! Before object literals, JSON arguments were quoted strings with values
+//! spliced in as text: `--json '{"name":"'$name'","port":'$port'}'`, or
+//! `--json '''{...}'''` (raw, no escaping) to survive apostrophes. Inside
+//! those, and in any other command argument, a bare `$var`/`$var.path` is
+//! replaced with its text (strings unquoted, other values as JSON, `null`
+//! as the text `null`). These forms keep working so existing scripts don't
+//! break, but they're error-prone: which values need `"..."`, escaping
+//! `\'`, and `null` vs `"null"` are exactly what object literals remove.
 
 mod ast;
 mod block;
@@ -532,7 +512,7 @@ pub(crate) fn navigate_json_path(val: &Value, path: &str) -> Value {
     current.clone()
 }
 
-fn value_to_arg_string(val: &Value) -> String {
+pub(crate) fn value_to_arg_string(val: &Value) -> String {
     match val {
         Value::String(s) => s.clone(),
         Value::Null => "null".to_string(),

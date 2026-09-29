@@ -1,12 +1,13 @@
-//! Expression grammar used by `if`/`else if` conditions and by value
-//! assignments (`$x = $y.field || 300`).
+//! Expression grammar used by `if`/`else if` conditions, value
+//! assignments (`$x = $y.field || 300`), and object/array literals.
 //!
 //! `&&`/`||` return the operand that decided the result, JavaScript-style
 //! (`$a || 300` is `$a` when truthy, else `300`), so conditions behave the
 //! same as with plain booleans while assignments get a fallback idiom.
 //!
-//! Strings: `"double quotes"` substitute `$var.path` references (text, as
-//! in pipeline arguments); `'single'`/`'''triple'''` quotes are literal.
+//! Strings: `"double quotes"` take JSON escapes and fill in `${name.path}`
+//! references; a bare `$` inside them is literal, so pasted JSON is taken
+//! as-is. `'single'`/`'''triple'''` quotes are fully literal (older forms).
 //!
 //! Precedence, low to high: `||` → `&&` → unary `!` → comparison → atom.
 //! Atoms are `$name[.field.sub]` variable references (resolved the same way
@@ -21,17 +22,17 @@ use std::str::Chars;
 use serde_json::Value;
 use solx_surface::error::{Result, SolxError};
 
-use crate::{consume_triple_quote_rest, navigate_json_path, substitute_vars_in_token};
+use crate::{consume_triple_quote_rest, navigate_json_path, value_to_arg_string};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Literal(Value),
     Var(String),
-    /// Double-quoted string containing `$var` references, substituted at
-    /// evaluation time exactly like a pipeline stage's arguments.
+    /// Double-quoted string containing `${name.path}` references, filled in
+    /// at evaluation time (see [`interpolate`]).
     Template(String),
-    /// `{"key": expr, ...}` — keys are string literals (double-quoted keys
-    /// may interpolate, like any `"..."`).
+    /// `{"key": expr, ...}` — keys are string literals (a double-quoted key
+    /// may use `${...}`, like any `"..."`).
     Object(Vec<(Expr, Expr)>),
     /// `[expr, ...]`
     Array(Vec<Expr>),
@@ -64,7 +65,7 @@ enum Token {
     Op(CompareOp),
     Var(String),
     Str(String),
-    /// Double-quoted string: `$var` references inside are substituted.
+    /// Double-quoted string: `${name}` references inside are filled in.
     Template(String),
     Num(serde_json::Number),
     LBrace,
@@ -434,7 +435,7 @@ impl Parser {
             }
             Some(Token::Var(name)) => Ok(Expr::Var(name)),
             Some(Token::Str(s)) => Ok(Expr::Literal(Value::String(s))),
-            Some(Token::Template(s)) if s.contains('$') => Ok(Expr::Template(s)),
+            Some(Token::Template(s)) if s.contains("${") => Ok(Expr::Template(s)),
             Some(Token::Template(s)) => Ok(Expr::Literal(Value::String(s))),
             Some(Token::Num(n)) => Ok(Expr::Literal(Value::Number(n))),
             Some(Token::Bool(b)) => Ok(Expr::Literal(Value::Bool(b))),
@@ -452,7 +453,7 @@ impl Parser {
                 while !self.eat(&Token::RBrace) {
                     let key = match self.next() {
                         Some(Token::Str(k)) => Expr::Literal(Value::String(k)),
-                        Some(Token::Template(k)) if k.contains('$') => Expr::Template(k),
+                        Some(Token::Template(k)) if k.contains("${") => Expr::Template(k),
                         Some(Token::Template(k)) => Expr::Literal(Value::String(k)),
                         other => {
                             return Err(SolxError::Invalid(format!(
@@ -497,7 +498,7 @@ pub fn eval_expr(expr: &Expr, ctx: &HashMap<String, Value>) -> Result<Value> {
     match expr {
         Expr::Literal(v) => Ok(v.clone()),
         Expr::Var(name) => Ok(resolve_var(name, ctx)),
-        Expr::Template(s) => Ok(Value::String(substitute_vars_in_token(s, ctx))),
+        Expr::Template(s) => Ok(Value::String(interpolate(s, ctx))),
         Expr::Array(items) => Ok(Value::Array(
             items.iter().map(|e| eval_expr(e, ctx)).collect::<Result<_>>()?,
         )),
@@ -533,6 +534,38 @@ pub fn eval_expr(expr: &Expr, ctx: &HashMap<String, Value>) -> Result<Value> {
             eval_compare(*op, &lhs, &rhs)
         }
     }
+}
+
+/// Fill in each `${name.path}` in a double-quoted string with the variable's
+/// text (strings raw, other values as JSON, missing as `null` — the same
+/// rendering pipeline arguments use). A bare `$name` is literal, so pasted
+/// JSON like `"$schema"` is left alone; a `${` that isn't a valid reference
+/// (`${}`, `${a b}`, no closing `}`) is kept as-is.
+fn interpolate(s: &str, ctx: &HashMap<String, Value>) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let name = after.find('}').map(|end| &after[..end]).filter(|n| {
+            !n.is_empty()
+                && !n.starts_with('.')
+                && !n.ends_with('.')
+                && n.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        });
+        match name {
+            Some(name) => {
+                out.push_str(&value_to_arg_string(&resolve_var(name, ctx)));
+                rest = &after[name.len() + 1..];
+            }
+            None => {
+                out.push_str("${");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn resolve_var(name: &str, ctx: &HashMap<String, Value>) -> Value {
@@ -724,20 +757,25 @@ mod tests {
     }
 
     #[test]
-    fn double_quotes_interpolate_single_quotes_dont() {
+    fn braced_refs_interpolate_bare_dollars_are_literal() {
         let ctx = ctx_with(&[
             ("id", serde_json::json!(42)),
             ("r", serde_json::json!({"uri": "http://x/cb"})),
             ("name", serde_json::json!("Ann")),
+            ("schema", serde_json::json!("OOPS")),
         ]);
         assert_eq!(
-            eval(r#""a?id=$id&u=$r.uri""#, &ctx),
+            eval(r#""a?id=${id}&u=${r.uri}""#, &ctx),
             serde_json::json!("a?id=42&u=http://x/cb")
         );
-        assert_eq!(eval(r#""Hi $name.""#, &ctx), serde_json::json!("Hi Ann."));
-        assert_eq!(eval("'$id'", &ctx), serde_json::json!("$id"));
-        assert_eq!(eval(r#""cost $5""#, &ctx), serde_json::json!("cost $5"));
-        assert_eq!(eval(r#""$name" == "Ann""#, &ctx), Value::Bool(true));
+        assert_eq!(eval(r#""Hi ${name}.""#, &ctx), serde_json::json!("Hi Ann."));
+        assert_eq!(eval(r#""x${missing}y""#, &ctx), serde_json::json!("xnully"));
+        // Bare `$name` is literal even when a variable of that name exists,
+        // so pasted JSON (`"$schema"`, `"$ref"`) is never rewritten.
+        assert_eq!(eval(r#""$schema $name""#, &ctx), serde_json::json!("$schema $name"));
+        assert_eq!(eval(r#""${} ${a b} ${.x} ${open""#, &ctx), serde_json::json!("${} ${a b} ${.x} ${open"));
+        assert_eq!(eval("'${id}'", &ctx), serde_json::json!("${id}"));
+        assert_eq!(eval(r#""${name}" == "Ann""#, &ctx), Value::Bool(true));
     }
 
     #[test]
@@ -749,15 +787,16 @@ mod tests {
         ]);
         assert_eq!(
             eval(
-                r#"{"port": $port, "page": $page, "missing": $nope, "msg": "hi $who", 'lit': '$who', "list": [1, "two", $port, [], {},], "fb": $nope || 3}"#,
+                r#"{"port": $port, "page": $page, "missing": $nope, "msg": "hi ${who}", 'lit': '${who}', "$schema": "$who", "list": [1, "two", $port, [], {},], "fb": $nope || 3}"#,
                 &ctx
             ),
             serde_json::json!({
                 "port": 8765, "page": {"id": "1", "name": "P"}, "missing": null,
-                "msg": "hi Ann", "lit": "$who", "list": [1, "two", 8765, [], {}], "fb": 3
+                "msg": "hi Ann", "lit": "${who}", "$schema": "$who",
+                "list": [1, "two", 8765, [], {}], "fb": 3
             })
         );
-        assert_eq!(eval(r#"{"$who": 1}"#, &ctx), serde_json::json!({"Ann": 1}));
+        assert_eq!(eval(r#"{"${who}": 1}"#, &ctx), serde_json::json!({"Ann": 1}));
         assert_eq!(eval("[]", &ctx), serde_json::json!([]));
         assert!(is_truthy(&eval("$page contains \"id\" && [1] != []", &ctx)));
     }

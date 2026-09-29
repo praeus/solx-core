@@ -2160,15 +2160,11 @@ mod tests {
         // The bare `exec /builtin/action/entity-list-actions` (no `json`
         // wrapping needed) becomes the script's result directly: the callee's
         // whole ActionExecResult, JSON-encoded — same as `handle_exec` in the
-        // CLI. `json`'s argument is parsed as JSON, and `tokenize_stage`
-        // strips one layer of quoting to form the token — so a JSON string
-        // literal needs the outer '...' shell-style quoting plus inner \"...\"
-        // JSON quotes, same as the CLI's `json` command (`solx script -e 'json
-        // \'"big"\''`).
+        // CLI. The else branch is a plain string value, no `json` stage.
         post_script_artifact(
             &files,
             "hello.solx",
-            "if $params.go == true; exec /builtin/action/entity-list-actions; else; json '\"skipped\"'; endif",
+            "if $params.go == true then exec /builtin/action/entity-list-actions; else; \"skipped\"; endif",
         )
         .await;
         m.save(

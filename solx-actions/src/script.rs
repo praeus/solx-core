@@ -247,8 +247,10 @@ mod tests {
 
     #[test]
     fn triple_quoted_json_with_apostrophe_reaches_run_json() {
-        // The tokenizer strips '''...''' raw, with no escaping needed, so a
-        // JSON body with an embedded apostrophe reaches serde_json intact.
+        // Older quoted form, kept working for existing scripts (new scripts
+        // pass an object literal): the tokenizer strips '''...''' raw, with
+        // no escaping needed, so an embedded apostrophe reaches serde_json
+        // intact.
         let tokens =
             solx_scripts::tokenize_stage(r#"json '''{"text":"can't stop"}'''"#);
         assert_eq!(
