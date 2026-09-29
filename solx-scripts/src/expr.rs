@@ -1,4 +1,12 @@
-//! Boolean expression grammar used by `if`/`elseif` conditions.
+//! Expression grammar used by `if`/`else if` conditions and by value
+//! assignments (`$x = $y.field || 300`).
+//!
+//! `&&`/`||` return the operand that decided the result, JavaScript-style
+//! (`$a || 300` is `$a` when truthy, else `300`), so conditions behave the
+//! same as with plain booleans while assignments get a fallback idiom.
+//!
+//! Strings: `"double quotes"` substitute `$var.path` references (text, as
+//! in pipeline arguments); `'single'`/`'''triple'''` quotes are literal.
 //!
 //! Precedence, low to high: `||` → `&&` → unary `!` → comparison → atom.
 //! Atoms are `$name[.field.sub]` variable references (resolved the same way
@@ -13,12 +21,20 @@ use std::str::Chars;
 use serde_json::Value;
 use solx_surface::error::{Result, SolxError};
 
-use crate::{consume_triple_quote_rest, navigate_json_path};
+use crate::{consume_triple_quote_rest, navigate_json_path, substitute_vars_in_token};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Literal(Value),
     Var(String),
+    /// Double-quoted string containing `$var` references, substituted at
+    /// evaluation time exactly like a pipeline stage's arguments.
+    Template(String),
+    /// `{"key": expr, ...}` — keys are string literals (double-quoted keys
+    /// may interpolate, like any `"..."`).
+    Object(Vec<(Expr, Expr)>),
+    /// `[expr, ...]`
+    Array(Vec<Expr>),
     Not(Box<Expr>),
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
@@ -48,7 +64,15 @@ enum Token {
     Op(CompareOp),
     Var(String),
     Str(String),
-    Num(f64),
+    /// Double-quoted string: `$var` references inside are substituted.
+    Template(String),
+    Num(serde_json::Number),
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    Comma,
+    Colon,
     Bool(bool),
     Null,
 }
@@ -69,6 +93,17 @@ fn lex(src: &str) -> Result<Vec<Token>> {
             ')' => {
                 chars.next();
                 tokens.push(Token::RParen);
+            }
+            '{' | '}' | '[' | ']' | ',' | ':' => {
+                chars.next();
+                tokens.push(match c {
+                    '{' => Token::LBrace,
+                    '}' => Token::RBrace,
+                    '[' => Token::LBracket,
+                    ']' => Token::RBracket,
+                    ',' => Token::Comma,
+                    _ => Token::Colon,
+                });
             }
             '&' => {
                 chars.next();
@@ -122,7 +157,7 @@ fn lex(src: &str) -> Result<Vec<Token>> {
                             Some(ch) => s.push(ch),
                             None => {
                                 return Err(SolxError::Invalid(format!(
-                                    "unterminated triple-quoted string literal in condition: {src}"
+                                    "unterminated triple-quoted string literal in expression: {src}"
                                 )))
                             }
                         }
@@ -139,7 +174,7 @@ fn lex(src: &str) -> Result<Vec<Token>> {
                             Some(ch) => s.push(ch),
                             None => {
                                 return Err(SolxError::Invalid(format!(
-                                    "unterminated string literal in condition: {src}"
+                                    "unterminated string literal in expression: {src}"
                                 )))
                             }
                         }
@@ -152,19 +187,17 @@ fn lex(src: &str) -> Result<Vec<Token>> {
                 let mut s = String::new();
                 loop {
                     match chars.next() {
-                        Some('\\') if chars.peek() == Some(&'"') => {
-                            s.push(chars.next().unwrap());
-                        }
+                        Some('\\') => lex_json_escape(&mut chars, &mut s, src)?,
                         Some('"') => break,
                         Some(ch) => s.push(ch),
                         None => {
                             return Err(SolxError::Invalid(format!(
-                                "unterminated string literal in condition: {src}"
+                                "unterminated string literal in expression: {src}"
                             )))
                         }
                     }
                 }
-                tokens.push(Token::Str(s));
+                tokens.push(Token::Template(s));
             }
             '$' => {
                 chars.next();
@@ -179,7 +212,7 @@ fn lex(src: &str) -> Result<Vec<Token>> {
                 }
                 if name.is_empty() {
                     return Err(SolxError::Invalid(format!(
-                        "empty variable reference in condition: {src}"
+                        "empty variable reference in expression: {src}"
                     )));
                 }
                 tokens.push(Token::Var(name));
@@ -194,13 +227,28 @@ fn lex(src: &str) -> Result<Vec<Token>> {
                     if ch.is_ascii_digit() || ch == '.' {
                         num.push(ch);
                         chars.next();
+                    } else if (ch == 'e' || ch == 'E') && !num.contains(['e', 'E']) {
+                        // JSON exponent: 1e3, 2.5E-4
+                        num.push(ch);
+                        chars.next();
+                        if let Some(&sign) = chars.peek().filter(|c| **c == '+' || **c == '-') {
+                            num.push(sign);
+                            chars.next();
+                        }
                     } else {
                         break;
                     }
                 }
-                let val = num.parse::<f64>().map_err(|_| {
-                    SolxError::Invalid(format!("invalid number literal in condition: {num}"))
-                })?;
+                // Whole numbers stay integers, so `$port = 8765` substitutes
+                // as `8765` rather than `8765.0`.
+                let val = num
+                    .parse::<i64>()
+                    .ok()
+                    .map(serde_json::Number::from)
+                    .or_else(|| num.parse::<f64>().ok().and_then(serde_json::Number::from_f64))
+                    .ok_or_else(|| {
+                        SolxError::Invalid(format!("invalid number literal in expression: {num}"))
+                    })?;
                 tokens.push(Token::Num(val));
             }
             c if c.is_alphabetic() || c == '_' => {
@@ -220,14 +268,14 @@ fn lex(src: &str) -> Result<Vec<Token>> {
                     "contains" => tokens.push(Token::Op(CompareOp::Contains)),
                     other => {
                         return Err(SolxError::Invalid(format!(
-                            "unexpected word '{other}' in condition: {src}"
+                            "unexpected word '{other}' in expression: {src}"
                         )))
                     }
                 }
             }
             other => {
                 return Err(SolxError::Invalid(format!(
-                    "unexpected character '{other}' in condition: {src}"
+                    "unexpected character '{other}' in expression: {src}"
                 )))
             }
         }
@@ -236,12 +284,51 @@ fn lex(src: &str) -> Result<Vec<Token>> {
     Ok(tokens)
 }
 
+/// Having consumed a `\` inside a double-quoted string, decode a JSON escape
+/// (`\" \\ \/ \b \f \n \r \t \uXXXX`) into `out`. Any other escaped
+/// character is kept as-is along with its backslash.
+fn lex_json_escape(chars: &mut Peekable<Chars>, out: &mut String, src: &str) -> Result<()> {
+    let bad = || SolxError::Invalid(format!("invalid \\u escape in string literal: {src}"));
+    let hex4 =|chars: &mut Peekable<Chars>| -> Result<u32> {
+        let digits: String = (0..4).filter_map(|_| chars.next()).collect();
+        u32::from_str_radix(&digits, 16).map_err(|_| bad())
+    };
+    match chars.next() {
+        Some('"') => out.push('"'),
+        Some('\\') => out.push('\\'),
+        Some('/') => out.push('/'),
+        Some('b') => out.push('\u{8}'),
+        Some('f') => out.push('\u{c}'),
+        Some('n') => out.push('\n'),
+        Some('r') => out.push('\r'),
+        Some('t') => out.push('\t'),
+        Some('u') => {
+            let mut code = hex4(chars)?;
+            // A UTF-16 surrogate pair spans two \u escapes.
+            if (0xD800..0xDC00).contains(&code) {
+                if chars.next() != Some('\\') || chars.next() != Some('u') {
+                    return Err(bad());
+                }
+                let low = hex4(chars)?;
+                code = 0x10000 + ((code - 0xD800) << 10) + (low.wrapping_sub(0xDC00) & 0x3FF);
+            }
+            out.push(char::from_u32(code).ok_or_else(bad)?);
+        }
+        Some(other) => {
+            out.push('\\');
+            out.push(other);
+        }
+        None => out.push('\\'),
+    }
+    Ok(())
+}
+
 fn expect_char(chars: &mut Peekable<Chars>, expected: char, op: &str) -> Result<()> {
     if chars.next_if_eq(&expected).is_some() {
         Ok(())
     } else {
         Err(SolxError::Invalid(format!(
-            "expected '{op}' in condition (single '{expected}' is not a valid operator)"
+            "expected '{op}' in expression (single '{expected}' is not a valid operator)"
         )))
     }
 }
@@ -271,6 +358,29 @@ impl Parser {
         let t = self.tokens.get(self.pos).cloned();
         self.pos += 1;
         t
+    }
+
+    /// Consume `tok` if it's next.
+    fn eat(&mut self, tok: &Token) -> bool {
+        if self.peek() == Some(tok) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// After an array/object item: a `,` (a trailing one before `close` is
+    /// allowed) or the closing token itself, left for the caller's loop.
+    fn end_of_item(&mut self, close: &Token, what: &str) -> Result<()> {
+        if self.eat(&Token::Comma) || self.peek() == Some(close) {
+            Ok(())
+        } else {
+            Err(SolxError::Invalid(format!(
+                "expected ',' or closing bracket in {what}, found {:?}",
+                self.peek()
+            )))
+        }
     }
 
     fn parse_or(&mut self) -> Result<Expr> {
@@ -319,20 +429,47 @@ impl Parser {
                 let inner = self.parse_or()?;
                 match self.next() {
                     Some(Token::RParen) => Ok(inner),
-                    _ => Err(SolxError::Invalid("missing closing ')' in condition".into())),
+                    _ => Err(SolxError::Invalid("missing closing ')' in expression".into())),
                 }
             }
             Some(Token::Var(name)) => Ok(Expr::Var(name)),
             Some(Token::Str(s)) => Ok(Expr::Literal(Value::String(s))),
-            Some(Token::Num(n)) => Ok(Expr::Literal(
-                serde_json::Number::from_f64(n)
-                    .map(Value::Number)
-                    .unwrap_or(Value::Null),
-            )),
+            Some(Token::Template(s)) if s.contains('$') => Ok(Expr::Template(s)),
+            Some(Token::Template(s)) => Ok(Expr::Literal(Value::String(s))),
+            Some(Token::Num(n)) => Ok(Expr::Literal(Value::Number(n))),
             Some(Token::Bool(b)) => Ok(Expr::Literal(Value::Bool(b))),
             Some(Token::Null) => Ok(Expr::Literal(Value::Null)),
+            Some(Token::LBracket) => {
+                let mut items = Vec::new();
+                while !self.eat(&Token::RBracket) {
+                    items.push(self.parse_or()?);
+                    self.end_of_item(&Token::RBracket, "array")?;
+                }
+                Ok(Expr::Array(items))
+            }
+            Some(Token::LBrace) => {
+                let mut fields = Vec::new();
+                while !self.eat(&Token::RBrace) {
+                    let key = match self.next() {
+                        Some(Token::Str(k)) => Expr::Literal(Value::String(k)),
+                        Some(Token::Template(k)) if k.contains('$') => Expr::Template(k),
+                        Some(Token::Template(k)) => Expr::Literal(Value::String(k)),
+                        other => {
+                            return Err(SolxError::Invalid(format!(
+                                "object keys must be quoted strings, found {other:?}"
+                            )))
+                        }
+                    };
+                    if !self.eat(&Token::Colon) {
+                        return Err(SolxError::Invalid("expected ':' after object key".into()));
+                    }
+                    fields.push((key, self.parse_or()?));
+                    self.end_of_item(&Token::RBrace, "object")?;
+                }
+                Ok(Expr::Object(fields))
+            }
             other => Err(SolxError::Invalid(format!(
-                "expected a value in condition, found {other:?}"
+                "expected a value in expression, found {other:?}"
             ))),
         }
     }
@@ -342,13 +479,13 @@ impl Parser {
 pub fn parse_expr(src: &str) -> Result<Expr> {
     let tokens = lex(src)?;
     if tokens.is_empty() {
-        return Err(SolxError::Invalid("empty condition".into()));
+        return Err(SolxError::Invalid("empty expression".into()));
     }
     let mut parser = Parser { tokens, pos: 0 };
     let expr = parser.parse_or()?;
     if parser.pos != parser.tokens.len() {
         return Err(SolxError::Invalid(format!(
-            "trailing tokens after condition: {src}"
+            "trailing tokens after expression: {src}"
         )));
     }
     Ok(expr)
@@ -360,20 +497,35 @@ pub fn eval_expr(expr: &Expr, ctx: &HashMap<String, Value>) -> Result<Value> {
     match expr {
         Expr::Literal(v) => Ok(v.clone()),
         Expr::Var(name) => Ok(resolve_var(name, ctx)),
+        Expr::Template(s) => Ok(Value::String(substitute_vars_in_token(s, ctx))),
+        Expr::Array(items) => Ok(Value::Array(
+            items.iter().map(|e| eval_expr(e, ctx)).collect::<Result<_>>()?,
+        )),
+        Expr::Object(fields) => {
+            let mut map = serde_json::Map::new();
+            for (k, v) in fields {
+                let key = match eval_expr(k, ctx)? {
+                    Value::String(s) => s,
+                    other => other.to_string(),
+                };
+                map.insert(key, eval_expr(v, ctx)?);
+            }
+            Ok(Value::Object(map))
+        }
         Expr::Not(inner) => Ok(Value::Bool(!is_truthy(&eval_expr(inner, ctx)?))),
         Expr::And(a, b) => {
             let lhs = eval_expr(a, ctx)?;
             if !is_truthy(&lhs) {
-                return Ok(Value::Bool(false));
+                return Ok(lhs);
             }
-            Ok(Value::Bool(is_truthy(&eval_expr(b, ctx)?)))
+            eval_expr(b, ctx)
         }
         Expr::Or(a, b) => {
             let lhs = eval_expr(a, ctx)?;
             if is_truthy(&lhs) {
-                return Ok(Value::Bool(true));
+                return Ok(lhs);
             }
-            Ok(Value::Bool(is_truthy(&eval_expr(b, ctx)?)))
+            eval_expr(b, ctx)
         }
         Expr::Compare(op, a, b) => {
             let lhs = eval_expr(a, ctx)?;
@@ -551,6 +703,70 @@ mod tests {
         let ctx = ctx_with(&[("s", Value::String("abc".into()))]);
         let err = eval_expr(&parse_expr("$s > 1").unwrap(), &ctx).unwrap_err();
         assert!(matches!(err, SolxError::Invalid(_)));
+    }
+
+    #[test]
+    fn and_or_return_deciding_operand() {
+        let ctx = ctx_with(&[("t", serde_json::json!(30)), ("z", serde_json::json!(0))]);
+        assert_eq!(eval("$t || 300", &ctx), serde_json::json!(30));
+        assert_eq!(eval("$z || 300", &ctx), serde_json::json!(300));
+        assert_eq!(eval("$missing || \"d\"", &ctx), serde_json::json!("d"));
+        assert_eq!(eval("$z && 5", &ctx), serde_json::json!(0));
+        assert_eq!(eval("$t && 5", &ctx), serde_json::json!(5));
+    }
+
+    #[test]
+    fn whole_numbers_stay_integers() {
+        let ctx = HashMap::new();
+        assert_eq!(eval("8765", &ctx).to_string(), "8765");
+        assert_eq!(eval("-3", &ctx).to_string(), "-3");
+        assert_eq!(eval("1.5", &ctx).to_string(), "1.5");
+    }
+
+    #[test]
+    fn double_quotes_interpolate_single_quotes_dont() {
+        let ctx = ctx_with(&[
+            ("id", serde_json::json!(42)),
+            ("r", serde_json::json!({"uri": "http://x/cb"})),
+            ("name", serde_json::json!("Ann")),
+        ]);
+        assert_eq!(
+            eval(r#""a?id=$id&u=$r.uri""#, &ctx),
+            serde_json::json!("a?id=42&u=http://x/cb")
+        );
+        assert_eq!(eval(r#""Hi $name.""#, &ctx), serde_json::json!("Hi Ann."));
+        assert_eq!(eval("'$id'", &ctx), serde_json::json!("$id"));
+        assert_eq!(eval(r#""cost $5""#, &ctx), serde_json::json!("cost $5"));
+        assert_eq!(eval(r#""$name" == "Ann""#, &ctx), Value::Bool(true));
+    }
+
+    #[test]
+    fn object_and_array_literals() {
+        let ctx = ctx_with(&[
+            ("port", serde_json::json!(8765)),
+            ("page", serde_json::json!({"id": "1", "name": "P"})),
+            ("who", serde_json::json!("Ann")),
+        ]);
+        assert_eq!(
+            eval(
+                r#"{"port": $port, "page": $page, "missing": $nope, "msg": "hi $who", 'lit': '$who', "list": [1, "two", $port, [], {},], "fb": $nope || 3}"#,
+                &ctx
+            ),
+            serde_json::json!({
+                "port": 8765, "page": {"id": "1", "name": "P"}, "missing": null,
+                "msg": "hi Ann", "lit": "$who", "list": [1, "two", 8765, [], {}], "fb": 3
+            })
+        );
+        assert_eq!(eval(r#"{"$who": 1}"#, &ctx), serde_json::json!({"Ann": 1}));
+        assert_eq!(eval("[]", &ctx), serde_json::json!([]));
+        assert!(is_truthy(&eval("$page contains \"id\" && [1] != []", &ctx)));
+    }
+
+    #[test]
+    fn malformed_literals_error() {
+        for src in [r#"{a: 1}"#, r#"{"a" 1}"#, r#"{"a": 1"#, "[1 2]", "[1,", r#"{"a": 1,, }"#] {
+            assert!(parse_expr(src).is_err(), "{src}");
+        }
     }
 
     #[test]

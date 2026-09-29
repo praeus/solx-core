@@ -47,6 +47,13 @@ async fn exec_statement(
             }
             Ok(result)
         }
+        Statement::Value { var, expr } => {
+            let result = eval_expr(expr, ctx)?;
+            if let Some(name) = var {
+                ctx.insert(name.clone(), result.clone());
+            }
+            Ok(result)
+        }
         Statement::If {
             branches,
             else_branch,
@@ -205,6 +212,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out["name"], "200");
+    }
+
+    #[tokio::test]
+    async fn newline_and_then_forms_run() {
+        let src = "$x = json 2;\nif $x.name == \"1\" then json 100;\nelseif $x.name == \"2\"\n  json 200;\nelse\n  json 300;\nendif";
+        let out = run(src).await.unwrap();
+        assert_eq!(out["name"], "200");
+    }
+
+    #[tokio::test]
+    async fn value_assignments_skip_the_runner() {
+        let r = Recorder {
+            seen: Mutex::new(Vec::new()),
+        };
+        let program = parse_program(
+            "$p = json 1;\n$port = $p.missing || 8765;\n$name = $p.name;\n$flag = true;\n$port",
+        )
+        .unwrap();
+        let mut ctx = HashMap::new();
+        let out = exec_block(&r, &program, &mut ctx).await.unwrap();
+        assert_eq!(out.to_string(), "8765");
+        assert_eq!(ctx["name"], "1");
+        assert_eq!(ctx["flag"], true);
+        // Only `json 1` reached the runner.
+        assert_eq!(r.seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn multiline_object_literal_assignment() {
+        let src = "$port = 8765;\n$body = {\n    \"port\": $port,\n    \"tags\": [\"a\", \"b\"],\n};\n$body";
+        let out = run(src).await.unwrap();
+        assert_eq!(out, serde_json::json!({"port": 8765, "tags": ["a", "b"]}));
+    }
+
+    #[tokio::test]
+    async fn object_var_substitutes_into_command_arg_as_json() {
+        let r = Recorder {
+            seen: Mutex::new(Vec::new()),
+        };
+        let program = parse_program(
+            "$body = {\"state\": \"s 1\", \"n\": 3, \"q\": \"it's \\\"x\\\"\"};\nexec /a --json $body",
+        )
+        .unwrap();
+        let mut ctx = HashMap::new();
+        exec_block(&r, &program, &mut ctx).await.unwrap();
+        let seen = r.seen.lock().unwrap();
+        assert_eq!(seen[0][..2], ["exec", "/a"]);
+        assert_eq!(seen[0][2], "--json");
+        let arg: Value = serde_json::from_str(&seen[0][3]).unwrap();
+        assert_eq!(arg, serde_json::json!({"state": "s 1", "n": 3, "q": "it's \"x\""}));
+        assert_eq!(seen[0].len(), 4);
     }
 
     #[tokio::test]

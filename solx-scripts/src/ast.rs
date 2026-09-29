@@ -8,7 +8,12 @@ pub enum Statement {
     /// `$name = <pipeline>` or a bare `<pipeline>` — today's only statement
     /// kind, unchanged from before control flow existed.
     Pipeline { var: Option<String>, src: String },
-    /// `if <expr> ; ... [elseif <expr> ; ...]* [else ; ...]? endif`
+    /// `$name = <expr>` or a bare `<expr>` — a value computed directly (see
+    /// [`crate::expr`]) instead of by a command stage, e.g. `$port = 8765`,
+    /// `$t = $params.timeout_secs || 300`, or `$result`.
+    Value { var: Option<String>, expr: Expr },
+    /// `if <expr> [then] ; ... [else if <expr> [then] ; ...]* [else ; ...]? endif`
+    /// (a newline may stand in for each `;` after a keyword)
     If {
         branches: Vec<(Expr, Vec<Statement>)>,
         else_branch: Option<Vec<Statement>>,

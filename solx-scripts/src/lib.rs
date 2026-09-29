@@ -33,27 +33,62 @@
 //!   still form a syntactically valid (but wrong) statement. This is exactly
 //!   what broke an early package's `install.solx`, and is why `'''...'''` is
 //!   preferred for anything that might contain an apostrophe.
-//! - **Every statement needs its own `;`, including control-flow keywords.**
-//!   Newlines are cosmetic — only `;` separates statements. `if $x == null`
-//!   followed by a newline and `$y = ...` on the next line is one merged
-//!   statement (`parse_expr` then chokes on the stray `=` from the
-//!   assignment). Always write `if $x == null;`, `else;`, `endif;`.
+//! - **Ordinary statements end with `;`; control-flow keywords end at the
+//!   line.** For `exec`/`json`/assignments, newlines are cosmetic — only `;`
+//!   ends one, so a long `exec` can wrap across lines. An `if`, `elseif`,
+//!   `else`, `endif`, `for`, `endfor`, or `wait` statement instead ends at
+//!   the first `;` *or* newline, and an `if`/`else if` condition may also be
+//!   closed with `then` (`if $x == null then json 1; endif`), which must sit
+//!   on the same line as its condition. Both styles mix freely:
+//!
+//!   ```text
+//!   if $x == null then
+//!       $y = json 1;
+//!   else
+//!       $y = json 2;
+//!   endif
+//!   ```
+//!
+//!   `else if <cond>` on one line is the next branch of the same `if`
+//!   (`elseif <cond>` also works); to nest a new `if` inside an `else`, put
+//!   it on the following line.
 //! - **`Script`-typed *actions* only support `exec`/`json` stages** (see
 //!   `solx-actions::script::ActionCommandRunner`) — not the
 //!   fuller CLI grammar (`save`/`get`/`delete`/`list`/`search`), and no
 //!   `return` statement exists at all (a block evaluates to its last
 //!   statement's value, so end the script with the value you want returned).
-//! - **String concatenation / interpolation** has no dedicated operator.
-//!   Build a templated string in one `json` stage instead, with the whole
-//!   template single-quoted so the tokenizer doesn't consume the inner
-//!   double quotes as its own delimiter:
-//!   `$url = json '"https://host/path?id=$id&name=$name"';`
-//!   Every `$var` inside that one token gets substituted before the `json`
-//!   stage parses it. This also means bare `$a | $b` "fallback" pipelines
-//!   don't work (each side would be dispatched as its own stage, and a bare
-//!   value like `"null"` or a JSON key isn't `exec`/`json`) — use
-//!   `if $a == null; ...; else; ...; endif` instead.
-//! - **Quote string substitutions, don't quote everything else.** A `$var`
+//! - **Plain values don't need `json`.** A statement starting with a `$var`,
+//!   a literal (`8765`, `"text"`, `true`/`false`/`null`), `(` or `!` is an
+//!   expression, evaluated directly with its real type — no text round-trip:
+//!   `$timeout = $params.timeout_secs;`, `$port = 8765;`, or a bare
+//!   `$result;` as a script's last line. `&&`/`||` return the operand that
+//!   decided them, so `$port = $params.port || 8765;` is a fallback (`0`,
+//!   `null`, `""`, `[]`, `{}` count as falsy). Object and array literals
+//!   work too, with any expression as a value and quoted keys only:
+//!   `$body = {"port": $port, "tags": ["a", $tag], "who": "user $name"};`
+//!   (may span lines; a trailing comma is allowed). Values keep their types,
+//!   so a missing field is a real `null` and a nested object stays an object.
+//!   There's no `$a | $b` pipe form — a `|` pipeline's stages must be
+//!   commands.
+//! - **Pass JSON arguments as unquoted object literals.** A command
+//!   argument that starts with an unquoted `{` or `[` runs to its matching
+//!   bracket (spaces, newlines, `||` and all), is evaluated like any object
+//!   literal, and is passed on as one JSON argument:
+//!   `exec /x --json {"state": $loopback.result.state_value, "timeout_secs": $t}`.
+//!   This is the preferred form — no splicing `'...'$var'...'`, no deciding
+//!   which values need quotes. A `$var` holding an object works the same
+//!   way (`exec /x --json $body`). Double-quoted strings take JSON escapes
+//!   (`\n`, `\\`, `é`, ...). Commands may wrap across lines anywhere
+//!   between arguments.
+//! - **Double quotes interpolate, single quotes don't.** In an expression,
+//!   `"..."` substitutes every `$var`/`$var.path` inside it (as text, the
+//!   same way pipeline arguments are substituted) and yields a string:
+//!   `$url = "https://host/path?id=$id&name=$name";`. `'...'` and
+//!   `'''...'''` are literal. A `$` not followed by a name stays as-is, and
+//!   a trailing `.` after a name is punctuation (`"Hi $name."`). For a
+//!   literal `$name` in text, use single quotes.
+//! - **When splicing into a quoted argument** (the older form, still
+//!   supported), **quote string substitutions, don't quote everything else.** A `$var`
 //!   holding a `String` substitutes as the *raw, unquoted* text (so it can
 //!   sit inside an `exec` argument or be user-composed into a larger string);
 //!   wrap it in explicit `"..."` when it needs to land as a valid JSON string
@@ -67,9 +102,9 @@
 //!   become indistinguishable once a value has gone through the
 //!   quote-wrapped-string convention above. If you need to tell a real `null`
 //!   apart from the string `"null"`, compare the *unwrapped* value directly
-//!   in an `if` (`if $existing.value == null; ...`), which evaluates against
-//!   the real typed value via dotted-path navigation rather than through
-//!   text substitution.
+//!   in an `if` (`if $existing.value == null; ...`) or copy it with a value
+//!   assignment (`$v = $existing.value;`), both of which use the real typed
+//!   value via dotted-path navigation rather than text substitution.
 
 mod ast;
 mod block;
@@ -80,7 +115,9 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use serde_json::Value;
-use solx_surface::error::Result;
+use solx_surface::error::{Result, SolxError};
+
+use crate::expr::{eval_expr, parse_expr};
 
 /// Runs a single already-substituted command stage. `tokens` is the argv-style
 /// token list (without a leading program name); `piped` is the previous stage's
@@ -158,7 +195,8 @@ pub fn strip_comments(source: &str) -> String {
                 out.push(ch);
                 out.push(chars.next().unwrap());
             }
-            '\\' if in_double && chars.peek() == Some(&'"') => {
+            // `\"` and `\\` both pair up, so `"a\\"` closes at its last `"`.
+            '\\' if in_double && matches!(chars.peek(), Some('"' | '\\')) => {
                 out.push(ch);
                 out.push(chars.next().unwrap());
             }
@@ -202,12 +240,33 @@ pub(crate) async fn execute_pipeline(
     ctx: &HashMap<String, Value>,
 ) -> Result<Value> {
     let mut piped: Option<Value> = None;
-    for stage in split_respecting_quotes(pipeline_src, '|') {
+    // A `|` inside an unquoted `{...}`/`[...]` argument (e.g. `||`) isn't a
+    // stage separator.
+    let mut depth = 0i32;
+    let stages = split_respecting_quotes_by(pipeline_src, |c| {
+        match c {
+            '{' | '[' => depth += 1,
+            '}' | ']' => depth -= 1,
+            _ => {}
+        }
+        c == '|' && depth <= 0
+    });
+    for stage in stages {
         let stage = stage.trim().to_string();
         if stage.is_empty() {
             continue;
         }
-        let tokens = substitute_vars(tokenize_stage(&stage), ctx);
+        let mut tokens = Vec::new();
+        for arg in tokenize_stage_args(&stage) {
+            tokens.push(match arg {
+                StageArg::Text(t) => substitute_vars_in_token(&t, ctx),
+                StageArg::Literal(src) => {
+                    let value = eval_expr(&parse_expr(&src)?, ctx)?;
+                    serde_json::to_string(&value)
+                        .map_err(|e| SolxError::Invalid(format!("serialize {src}: {e}")))?
+                }
+            });
+        }
         if tokens.is_empty() {
             continue;
         }
@@ -216,10 +275,27 @@ pub(crate) async fn execute_pipeline(
     Ok(piped.unwrap_or(Value::Null))
 }
 
+/// One argument of a command stage, as split by [`tokenize_stage_args`].
+enum StageArg {
+    /// Ordinary argument, quotes already stripped; `$var`s substituted later.
+    Text(String),
+    /// Unquoted `{...}`/`[...]` object or array literal (raw source), which
+    /// is evaluated as an expression and passed on as its JSON text.
+    Literal(String),
+}
+
 /// Split `s` on `sep`, respecting single/double/triple quoted substrings.
 /// `\'` inside single quotes and `\"` inside double quotes are literal quote
 /// characters; a `'''...'''` substring is taken raw, with no escaping.
 pub fn split_respecting_quotes(s: &str, sep: char) -> Vec<String> {
+    split_respecting_quotes_by(s, |c| c == sep)
+}
+
+/// Like [`split_respecting_quotes`], but splits on any unquoted character
+/// matching `is_sep` (e.g. `char::is_whitespace`). `is_sep` sees every
+/// unquoted character in order (never a quoted one or a quote delimiter), so
+/// it may keep state — e.g. bracket depth.
+pub(crate) fn split_respecting_quotes_by(s: &str, mut is_sep: impl FnMut(char) -> bool) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut in_single = false;
@@ -247,7 +323,8 @@ pub fn split_respecting_quotes(s: &str, sep: char) -> Vec<String> {
                 current.push(ch);
                 current.push(chars.next().unwrap());
             }
-            '\\' if in_double && chars.peek() == Some(&'"') => {
+            // `\"` and `\\` both pair up, so `"a\\"` closes at its last `"`.
+            '\\' if in_double && matches!(chars.peek(), Some('"' | '\\')) => {
                 current.push(ch);
                 current.push(chars.next().unwrap());
             }
@@ -259,7 +336,7 @@ pub fn split_respecting_quotes(s: &str, sep: char) -> Vec<String> {
                 in_double = !in_double;
                 current.push(ch);
             }
-            c if c == sep && !in_single && !in_double => {
+            c if !in_single && !in_double && is_sep(c) => {
                 parts.push(current.clone());
                 current.clear();
             }
@@ -274,8 +351,24 @@ pub fn split_respecting_quotes(s: &str, sep: char) -> Vec<String> {
 
 /// Tokenize a stage into argv tokens, stripping quotes. `\'`/`\"` inside the
 /// matching quote become literal quote characters; a `'''...'''` substring
-/// is taken raw (delimiters stripped, no escaping applied inside).
+/// is taken raw (delimiters stripped, no escaping applied inside). An
+/// unquoted `{...}`/`[...]` argument is returned as its raw source text.
 pub fn tokenize_stage(s: &str) -> Vec<String> {
+    tokenize_stage_args(s)
+        .into_iter()
+        .map(|arg| match arg {
+            StageArg::Text(t) | StageArg::Literal(t) => t,
+        })
+        .collect()
+}
+
+/// Split a stage into arguments on unquoted whitespace (spaces, tabs, and
+/// newlines, so a command may wrap across lines). An argument that *starts*
+/// with an unquoted `{` or `[` runs to its matching close bracket — spaces,
+/// newlines, and quotes inside it included — and comes back as
+/// [`StageArg::Literal`], so `exec /x --json {"a": $a, "b": [1, 2]}` passes
+/// one evaluated JSON argument.
+fn tokenize_stage_args(s: &str) -> Vec<StageArg> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut in_single = false;
@@ -284,6 +377,15 @@ pub fn tokenize_stage(s: &str) -> Vec<String> {
     let mut chars = s.chars().peekable();
 
     while let Some(ch) = chars.next() {
+        if current.is_empty()
+            && !in_single
+            && !in_double
+            && !in_triple
+            && (ch == '{' || ch == '[')
+        {
+            tokens.push(StageArg::Literal(scan_bracketed(ch, &mut chars)));
+            continue;
+        }
         if in_triple {
             if ch == '\'' && consume_triple_quote_rest(&mut chars) {
                 in_triple = false;
@@ -305,26 +407,65 @@ pub fn tokenize_stage(s: &str) -> Vec<String> {
             }
             '\'' if !in_double => in_single = !in_single,
             '"' if !in_single => in_double = !in_double,
-            ' ' | '\t' if !in_single && !in_double => {
+            c if c.is_whitespace() && !in_single && !in_double => {
                 if !current.is_empty() {
-                    tokens.push(current.clone());
-                    current.clear();
+                    tokens.push(StageArg::Text(std::mem::take(&mut current)));
                 }
             }
             _ => current.push(ch),
         }
     }
     if !current.is_empty() {
-        tokens.push(current);
+        tokens.push(StageArg::Text(current));
     }
     tokens
 }
 
-fn substitute_vars(tokens: Vec<String>, ctx: &HashMap<String, Value>) -> Vec<String> {
-    tokens
-        .into_iter()
-        .map(|t| substitute_vars_in_token(&t, ctx))
-        .collect()
+/// Having consumed `open` (`{` or `[`), collect through its matching close
+/// bracket, skipping brackets inside `"..."`, `'...'`, and `'''...'''`
+/// strings. Returns the raw text including both brackets; if the input ends
+/// first, returns what there is and lets the expression parser report it.
+fn scan_bracketed(open: char, chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
+    let mut out = String::from(open);
+    let mut depth = 1;
+    let mut quote: Option<char> = None;
+    let mut in_triple = false;
+    while let Some(ch) = chars.next() {
+        out.push(ch);
+        if in_triple {
+            if ch == '\'' && consume_triple_quote_rest(chars) {
+                out.push_str("''");
+                in_triple = false;
+            }
+            continue;
+        }
+        if let Some(q) = quote {
+            if ch == '\\' {
+                if let Some(escaped) = chars.next() {
+                    out.push(escaped);
+                }
+            } else if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' if consume_triple_quote_rest(chars) => {
+                out.push_str("''");
+                in_triple = true;
+            }
+            '"' | '\'' => quote = Some(ch),
+            '{' | '[' => depth += 1,
+            '}' | ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 pub(crate) fn substitute_vars_in_token(token: &str, ctx: &HashMap<String, Value>) -> String {
@@ -342,6 +483,11 @@ pub(crate) fn substitute_vars_in_token(token: &str, ctx: &HashMap<String, Value>
                 && (chars[end].is_alphanumeric() || chars[end] == '_' || chars[end] == '.')
             {
                 end += 1;
+            }
+            // A trailing '.' is punctuation, not an empty path segment
+            // ("Hi $name." -> "Hi Ann.").
+            while end > start && chars[end - 1] == '.' {
+                end -= 1;
             }
             let var_expr: String = chars[start..end].iter().collect();
             if var_expr.is_empty() {
@@ -425,6 +571,61 @@ mod tests {
         // Second stage's $doc.name resolved to the first stage's echoed name.
         assert_eq!(seen[1], vec!["get", "action", "/a/b"]);
         assert_eq!(out["name"], "/a/b");
+    }
+
+    async fn seen_for(src: &str) -> Vec<Vec<String>> {
+        let r = Recorder {
+            seen: Mutex::new(Vec::new()),
+        };
+        execute_script(&r, src).await.unwrap();
+        let seen = r.seen.lock().unwrap().clone();
+        seen
+    }
+
+    #[tokio::test]
+    async fn inline_object_arg_is_one_evaluated_json_token() {
+        let seen = seen_for(
+            "$s = json 7;\n\
+             exec /a --json {\n    \"state\": $s.name, \"n\": 3, \"miss\": $nope,\n    \"t\": \"it's }] \\\"q\\\"\", \"l\": [1, {\"x\": $s.name}],\n}",
+        )
+        .await;
+        let call = &seen[1];
+        assert_eq!(call[..3], ["exec", "/a", "--json"]);
+        assert_eq!(call.len(), 4);
+        let arg: Value = serde_json::from_str(&call[3]).unwrap();
+        assert_eq!(
+            arg,
+            serde_json::json!({"state": "7", "n": 3, "miss": null, "t": "it's }] \"q\"", "l": [1, {"x": "7"}]})
+        );
+    }
+
+    #[tokio::test]
+    async fn or_inside_inline_object_is_not_a_pipe() {
+        let seen = seen_for("exec /a --json {\"p\": $params.port || 8765} | exec /b").await;
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0], vec!["exec", "/a", "--json", r#"{"p":8765}"#]);
+        assert_eq!(seen[1], vec!["exec", "/b"]);
+    }
+
+    #[tokio::test]
+    async fn inline_array_and_json_escapes() {
+        let seen = seen_for(r#"json ["a\nb", "C:\\dir\\", "\u00e9", 1e3]; json 'x'"#).await;
+        let arg: Value = serde_json::from_str(&seen[0][1]).unwrap();
+        assert_eq!(arg, serde_json::json!(["a\nb", "C:\\dir\\", "é", 1000.0]));
+        // The `;` after the trailing `\\"` still ended the statement.
+        assert_eq!(seen[1], vec!["json", "x"]);
+    }
+
+    #[tokio::test]
+    async fn quoted_and_mid_token_braces_stay_text() {
+        let seen = seen_for(r#"exec /a --json '{"x": "$y"}' k={a}"#).await;
+        assert_eq!(seen[0], vec!["exec", "/a", "--json", r#"{"x": "$y"}"#, "k={a}"]);
+    }
+
+    #[tokio::test]
+    async fn command_args_may_wrap_lines() {
+        let seen = seen_for("exec /a\n    --json\n    '{}'").await;
+        assert_eq!(seen[0], vec!["exec", "/a", "--json", "{}"]);
     }
 
     #[test]
