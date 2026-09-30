@@ -289,7 +289,15 @@ fn builtin_action_param_types() -> Vec<SeedType> {
             description: "Start a local OAuth 2.0 authorization-code loopback listener.",
             schema: json!({
                 "type": "object",
-                "properties": { "port": { "type": "integer", "description": "Defaults to 8765." } }
+                "properties": {
+                    "port": { "type": "integer", "description": "Defaults to 8765." },
+                    "redirect_host": {
+                        "type": "string",
+                        "enum": ["127.0.0.1", "localhost"],
+                        "description": "Host in the returned redirect_uri; the listener binds 127.0.0.1 either way. Defaults to 127.0.0.1. Use localhost for providers that exempt only http://localhost from HTTPS enforcement (e.g. Facebook)."
+                    },
+                    "max_lifetime_secs": { "type": "integer", "description": "The listener shuts itself down after this long. Defaults to 900 (minimum 30)." }
+                }
             }),
             groups: vec!["builtin-params"],
         },

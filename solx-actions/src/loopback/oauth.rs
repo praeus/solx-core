@@ -57,10 +57,27 @@ pub const DEFAULT_LOOPBACK_PORT: u16 = 8765;
 /// `http://127.0.0.1:{port}{LOOPBACK_PATH}`.
 pub const LOOPBACK_PATH: &str = "/callback";
 
+/// Hostnames a redirect URI may name. The listener itself always binds
+/// `127.0.0.1`; `localhost` reaches it too (browsers fall back to IPv4
+/// when `::1` refuses). Anything else could point the provider's redirect
+/// somewhere other than our listener, so it isn't accepted.
+///
+/// `localhost` exists for providers that exempt it by *name* from an HTTPS
+/// requirement — Facebook's "Enforce HTTPS" allows `http://localhost`
+/// redirects (in development mode) but not `http://127.0.0.1`, even though
+/// RFC 8252 §7.3 recommends the IP literal.
+pub const LOOPBACK_REDIRECT_HOSTS: &[&str] = &["127.0.0.1", "localhost"];
+
 /// Build the canonical redirect URI for a given port. Consumers should use
 /// this so the path is always in sync with the route handler.
 pub fn redirect_uri(port: u16) -> String {
-    format!("http://127.0.0.1:{port}{LOOPBACK_PATH}")
+    redirect_uri_for_host("127.0.0.1", port)
+}
+
+/// Like [`redirect_uri`] with an explicit host from
+/// [`LOOPBACK_REDIRECT_HOSTS`] (callers validate the host first).
+pub fn redirect_uri_for_host(host: &str, port: u16) -> String {
+    format!("http://{host}:{port}{LOOPBACK_PATH}")
 }
 
 /// What the `/callback` route captures from the redirect. Exactly one of

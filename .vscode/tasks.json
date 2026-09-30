@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "solx: start solx-server",
+      "label": "solx-core: start solx-server",
       "type": "process",
       "command": "${workspaceFolder}/target/debug/solx-server.exe",
       "args": ["--port", "8766"],
@@ -23,6 +23,25 @@
         "close": false
       },
       "detail": "Starts solx-server against the default appdata dir (%APPDATA%/praeus/solx) — no SOLX_APPDATA_DIR override, matching .vscode/mcp.json's SOLX_SERVER_URL. Build first with 'cargo build -p solx-server' if the binary doesn't exist yet."
+    },
+    {
+      "label": "solx-core: cargo build",
+      "type": "shell",
+      "command": "cargo build",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": "$rustc",
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "close": false
+      },
+      "detail": "Runs 'cargo build' in the solx-core root folder."
     }
   ]
 }

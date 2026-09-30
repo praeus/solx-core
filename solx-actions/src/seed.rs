@@ -138,7 +138,7 @@ pub fn builtin_actions() -> Vec<SeedAction> {
         // Web — a one-shot HTTP request and opening a URL in the system
         // browser; host-side streaming HTTP lives under WEB_STREAM_PATH below.
         a_at(WEB_PATH, "http-request", "http-request", "Issue an HTTP request with optional method, headers, body, and timeout.", Some("HttpRequestParams")),
-        a_at(WEB_PATH, "open-url", "open-url", "Open a URL in the system browser via the platform-native handler (xdg-open / open / cmd /C start).", Some("OpenUrlParams")),
+        a_at(WEB_PATH, "open-url", "open-url", "Open a URL in the system browser via the platform-native handler (xdg-open / open / ShellExecuteW).", Some("OpenUrlParams")),
         // Scripting — parse and run a raw solx script string immediately.
         a_at(SCRIPT_PATH, "exec", "script-exec", "Parse and immediately run a solx script from a string, returning its result. Supports the same 'exec <path/name> [--json '<params>']' and 'json <value>' stages as a Script-typed action.", Some("ScriptExecParams")),
         // Action consoles (`/builtin/console/*`) and asynchronous actions

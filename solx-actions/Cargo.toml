@@ -39,6 +39,12 @@ wasmtime-wasi = "47"
 # tree via wasmtime's default `component-model-async` feature.
 futures = { workspace = true }
 
+# `open-url` launches the browser with `ShellExecuteW` rather than
+# `cmd /C start`, which splits an unquoted URL at `&` (see
+# `internal/open_url.rs`). Already in the tree via tokio/keyring.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
 [dev-dependencies]
 solx-types = { workspace = true }
 solx-docs = { workspace = true }

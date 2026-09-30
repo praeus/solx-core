@@ -8,7 +8,7 @@
   //      debugger is attached.
   //   2. "Debug: solx-server (CodeLLDB, attach)" — attach to a
   //      solx-server.exe you started yourself (via Run Task →
-  //      `solx: start solx-server`, or in another terminal).
+  //      `solx-core: start solx-server`, or in another terminal).
   //
   // The compound uses (1) so a single Run/Debug click brings the
   // server up under the debugger with no coordination timing issue.
