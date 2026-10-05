@@ -2,7 +2,9 @@
 //!
 //! Concurrency model (the explicit cross-process requirement):
 //! * **Reads** are lock-free. The in-memory cache is refreshed by comparing the
-//!   file mtime; if another process wrote the file, the next read reloads it.
+//!   file's mtime and length; if another process wrote the file, the next read
+//!   reloads it. A stamp too close to when it was loaded is never trusted (see
+//!   [`RACY_WINDOW`]), since a coarse mtime can't tell two quick writes apart.
 //! * **Writes** take an OS advisory exclusive lock (`fs2`) over the config file
 //!   for the whole read-modify-write, serializing writers across processes.
 //! * The write path edits the file as a raw [`serde_json::Value`] so unknown
@@ -15,7 +17,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
 use fs2::FileExt;
@@ -119,12 +121,52 @@ pub fn appdata_dir() -> PathBuf {
     std::env::temp_dir().join("praeus").join("solx")
 }
 
-struct Cached {
-    value: Value,
-    mtime: Option<SystemTime>,
+/// How far a cached stamp's mtime must trail the moment it was loaded before
+/// the cache trusts it — git's "racy clean" rule. Filesystem timestamps are
+/// coarse (a ~16ms tick on Windows, 2s on FAT), so a write landing in the same
+/// tick as the one we cached leaves the mtime unchanged; the length check
+/// doesn't help either when the new contents are the same size. Inside this
+/// window every read goes to disk, which costs a re-read only just after a
+/// write.
+const RACY_WINDOW: Duration = Duration::from_secs(2);
+
+/// What the cache compares against the file on disk to detect a change.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    mtime: SystemTime,
+    len: u64,
 }
 
-/// The config service. Cheap to share via `Arc`; holds an mtime-guarded cache.
+fn stamp_of(meta: &fs::Metadata) -> Option<Stamp> {
+    Some(Stamp { mtime: meta.modified().ok()?, len: meta.len() })
+}
+
+struct Cached {
+    value: Value,
+    /// `None` when the file didn't exist at load time.
+    stamp: Option<Stamp>,
+    loaded_at: SystemTime,
+}
+
+impl Cached {
+    fn new(value: Value, stamp: Option<Stamp>) -> Self {
+        Cached { value, stamp, loaded_at: SystemTime::now() }
+    }
+
+    /// Whether this cache still describes a file currently stamped `disk`.
+    fn is_fresh(&self, disk: Option<Stamp>) -> bool {
+        match (self.stamp, disk) {
+            (None, None) => true,
+            (Some(cached), Some(disk)) if cached == disk => cached
+                .mtime
+                .checked_add(RACY_WINDOW)
+                .is_some_and(|settled| settled <= self.loaded_at),
+            _ => false,
+        }
+    }
+}
+
+/// The config service. Cheap to share via `Arc`; holds a stamp-guarded cache.
 pub struct ConfigService {
     appdata: PathBuf,
     path: PathBuf,
@@ -143,11 +185,11 @@ impl ConfigService {
         let appdata = appdata.into();
         fs::create_dir_all(&appdata)?;
         let path = appdata.join(CONFIG_FILE);
-        let (value, mtime) = read_file(&path)?;
+        let (value, stamp) = read_file(&path)?;
         Ok(ConfigService {
             appdata,
             path,
-            cache: RwLock::new(Cached { value, mtime }),
+            cache: RwLock::new(Cached::new(value, stamp)),
         })
     }
 
@@ -161,26 +203,25 @@ impl ConfigService {
         &self.path
     }
 
-    /// Current file mtime on disk (if the file exists).
-    fn disk_mtime(&self) -> Option<SystemTime> {
-        fs::metadata(&self.path).ok().and_then(|m| m.modified().ok())
+    /// Current file stamp on disk (if the file exists).
+    fn disk_stamp(&self) -> Option<Stamp> {
+        fs::metadata(&self.path).ok().as_ref().and_then(stamp_of)
     }
 
     /// Return a clone of the current config value, reloading from disk first if
     /// another process changed it since we last read.
     pub fn raw_snapshot(&self) -> Value {
-        let disk_mtime = self.disk_mtime();
+        let disk = self.disk_stamp();
         {
             let cache = self.cache.read().unwrap();
-            if cache.mtime == disk_mtime {
+            if cache.is_fresh(disk) {
                 return cache.value.clone();
             }
         }
         // Stale — reload under a write lock.
         let mut cache = self.cache.write().unwrap();
-        if let Ok((value, mtime)) = read_file(&self.path) {
-            cache.value = value;
-            cache.mtime = mtime;
+        if let Ok((value, stamp)) = read_file(&self.path) {
+            *cache = Cached::new(value, stamp);
         }
         cache.value.clone()
     }
@@ -248,8 +289,7 @@ impl ConfigService {
         let _ = FileExt::unlock(&file);
 
         let value = result?;
-        cache.value = value;
-        cache.mtime = file.metadata().ok().and_then(|m| m.modified().ok());
+        *cache = Cached::new(value, file.metadata().ok().as_ref().and_then(stamp_of));
         Ok(())
     }
 
@@ -576,14 +616,15 @@ impl ConfigService {
     }
 }
 
-fn read_file(path: &Path) -> Result<(Value, Option<SystemTime>)> {
+/// Read and parse the config file, with the stamp it had *before* the read.
+/// Stamping first matters: a write landing between the two steps then leaves
+/// the cache holding an old stamp, so the next read sees it as stale — the
+/// other order would pair the new stamp with the old contents indefinitely.
+fn read_file(path: &Path) -> Result<(Value, Option<Stamp>)> {
+    let stamp = fs::metadata(path).ok().as_ref().and_then(stamp_of);
     match fs::read_to_string(path) {
-        Ok(s) if !s.trim().is_empty() => {
-            let value = serde_json::from_str(&s)?;
-            let mtime = fs::metadata(path).ok().and_then(|m| m.modified().ok());
-            Ok((value, mtime))
-        }
-        Ok(_) => Ok((Value::Object(Map::new()), None)),
+        Ok(s) if !s.trim().is_empty() => Ok((serde_json::from_str(&s)?, stamp)),
+        Ok(_) => Ok((Value::Object(Map::new()), stamp)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Ok((Value::Object(Map::new()), None))
         }
@@ -638,6 +679,20 @@ mod tests {
         // Ensure mtime differs even on coarse-resolution clocks.
         std::thread::sleep(std::time::Duration::from_millis(10));
         assert_eq!(b.snapshot().data_directory.as_deref(), Some("/from-a"));
+    }
+
+    /// Two back-to-back writes of the same length can share an mtime on a
+    /// coarse clock; `b` must still see the second one, with no sleep to help.
+    #[test]
+    fn cross_instance_reload_sees_rapid_same_length_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = ConfigService::open_in(dir.path()).unwrap();
+        let b = ConfigService::open_in(dir.path()).unwrap();
+
+        for value in ["/skip=10", "/skip=20", "/skip=30"] {
+            a.set("data_directory", Value::String(value.into())).unwrap();
+            assert_eq!(b.snapshot().data_directory.as_deref(), Some(value));
+        }
     }
 
     #[test]
