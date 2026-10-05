@@ -62,8 +62,10 @@ here, so the boundaries are explicit:
   unset.
 - **Deny-by-default outbound allowlist.** Every outbound URL — a `webhook`
   action's, and any handed to `/builtin/web/http-request`,
-  `/builtin/web/stream/start` or `/builtin/web/open-url` — must match a
-  prefix in `allowed_base_urls`. One check, in `solx-actions::net`.
+  `/builtin/web/stream/start` or `/builtin/web/open-url` — must match an
+  entry in `allowed_base_urls`: exact scheme, host and port, and a path
+  under the entry's. Redirects are held to the same list. One check, in
+  `solx-actions::net`.
 - **Guests cannot self-grant.** `entity-save-action` refuses to create,
   modify, or delete `command` and `webhook` actions. That built-in is the
   only route to action creation available to an MCP client, a WASM guest, or

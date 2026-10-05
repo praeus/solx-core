@@ -270,7 +270,8 @@ pub async fn run_webhook(
     let started = std::time::Instant::now();
     log_webhook(&console, action_ref, &invocation_id, "info", format!("{method} {url}")).await;
 
-    let result = run_webhook_inner(actions, path, name, url, action_config, params).await;
+    let redirects = crate::net::redirect_policy(cfg);
+    let result = run_webhook_inner(actions, path, name, url, action_config, params, redirects).await;
 
     let elapsed_ms = started.elapsed().as_millis();
     match &result {
@@ -361,6 +362,7 @@ async fn run_webhook_inner(
     url: &str,
     action_config: &Option<Value>,
     params: &Value,
+    redirects: reqwest::redirect::Policy,
 ) -> Result<Value> {
     // `action_config.timeout_secs` was previously read only by `run_command`
     // -- a webhook call had no timeout at all, so a stalled connection or an
@@ -375,6 +377,7 @@ async fn run_webhook_inner(
         .unwrap_or(DEFAULT_TIMEOUT_SECS);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
+        .redirect(redirects)
         .build()
         .map_err(|e| SolxError::Exec(format!("failed to build HTTP client: {e}")))?;
 
@@ -801,7 +804,7 @@ mod tests {
         let action_config = Some(json!({ "method": "GET" }));
         let params = json!({ "q": "trashed=false", "pageSize": 5 });
 
-        let result = run_webhook_inner(&StubActionManager, "/p", "n", &url, &action_config, &params).await;
+        let result = run_webhook_inner(&StubActionManager, "/p", "n", &url, &action_config, &params, reqwest::redirect::Policy::default()).await;
         assert!(result.is_ok(), "{:?}", result.err());
 
         let (request_line, body) = handle.await.unwrap();
@@ -818,7 +821,7 @@ mod tests {
         let (url, handle) = start_capturing_endpoint().await;
         let params = json!({ "name": "a-file" });
 
-        let result = run_webhook_inner(&StubActionManager, "/p", "n", &url, &None, &params).await;
+        let result = run_webhook_inner(&StubActionManager, "/p", "n", &url, &None, &params, reqwest::redirect::Policy::default()).await;
         assert!(result.is_ok(), "{:?}", result.err());
 
         let (request_line, body) = handle.await.unwrap();
@@ -856,7 +859,7 @@ mod tests {
         let action_config = Some(json!({ "timeout_secs": 1 }));
 
         let started = std::time::Instant::now();
-        let result = run_webhook_inner(&StubActionManager, "/p", "n", &url, &action_config, &json!({})).await;
+        let result = run_webhook_inner(&StubActionManager, "/p", "n", &url, &action_config, &json!({}), reqwest::redirect::Policy::default()).await;
         let elapsed = started.elapsed();
 
         assert!(result.is_err(), "a stalled connection must error, not succeed");

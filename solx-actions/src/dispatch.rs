@@ -384,7 +384,7 @@ mod tests {
     async fn exec_webhook_logs_start_and_success_to_the_console() {
         let (_d, c, m) = setup().await;
         let (url, server) = start_ok_server().await;
-        allow_webhook_prefix(&c, "http://127.0.0.1");
+        allow_webhook_prefix(&c, "http://127.0.0.1:");
 
         m.save(
             "/tools",
@@ -416,7 +416,7 @@ mod tests {
     #[tokio::test]
     async fn exec_webhook_logs_failure_to_the_console() {
         let (_d, c, m) = setup().await;
-        allow_webhook_prefix(&c, "http://127.0.0.1");
+        allow_webhook_prefix(&c, "http://127.0.0.1:");
         m.save(
             "/tools",
             "deadhook",

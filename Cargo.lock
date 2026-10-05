@@ -3597,6 +3597,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "url",
  "uuid",
  "wasmtime",
  "wasmtime-wasi",

@@ -63,6 +63,7 @@ pub(super) async fn http_request(params: &Value, cfg: &ConfigService) -> Result<
 
     let mut req = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
+        .redirect(crate::net::redirect_policy(cfg))
         .build()
         .map_err(|e| format!("failed to build http client: {e}"))?
         .request(method.parse().map_err(|e| format!("invalid method: {e}"))?, url);
