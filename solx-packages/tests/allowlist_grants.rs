@@ -253,3 +253,38 @@ async fn the_legacy_allowed_webhook_base_urls_manifest_key_still_grants() {
     uninstall_package(&runner, &cfg, "pkg-legacy-key").await.unwrap();
     assert!(cfg.allowed_base_urls().is_empty());
 }
+
+/// A relative `cwd` is resolved against the package directory at install
+/// time; an absolute one, or none, is recorded unchanged.
+#[tokio::test]
+async fn a_relative_command_cwd_resolves_against_the_package_directory() {
+    let appdata = tempfile::tempdir().unwrap();
+    let cfg = ConfigService::open_in(appdata.path()).unwrap();
+    let runner = NoopRunner;
+
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let absolute = appdata.path().to_string_lossy().into_owned();
+    write_package(
+        pkg_dir.path(),
+        "pkg-cwd",
+        json!({
+            "command_actions": {
+                "rel-cmd": { "command": "echo 1", "cwd": "target/release" },
+                "dot-cmd": { "command": "echo 2", "cwd": "." },
+                "abs-cmd": { "command": "echo 3", "cwd": absolute },
+                "no-cwd": { "command": "echo 4" }
+            }
+        }),
+    );
+
+    let outcome = install_package(&runner, &cfg, pkg_dir.path()).await.unwrap();
+    let recorded = Path::new(&outcome.package.path);
+    assert!(!outcome.package.path.starts_with(r"\?\"), "{}", outcome.package.path);
+    assert_eq!(recorded.canonicalize().unwrap(), pkg_dir.path().canonicalize().unwrap());
+
+    let commands = cfg.command_actions();
+    assert_eq!(Path::new(commands["rel-cmd"].cwd.as_deref().unwrap()), recorded.join("target/release"));
+    assert_eq!(Path::new(commands["dot-cmd"].cwd.as_deref().unwrap()), recorded);
+    assert_eq!(commands["abs-cmd"].cwd.as_deref(), Some(absolute.as_str()));
+    assert_eq!(commands["no-cwd"].cwd, None);
+}

@@ -191,3 +191,39 @@ pub async fn seed_builtins(conn: &Connection, extra: &[SeedAction]) -> Result<()
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use solx_surface::entities::ActionType;
+    use solx_surface::managers::ActionManager;
+    use solx_surface::query::ListOptions;
+
+    use crate::test_support::setup;
+
+    #[tokio::test]
+    async fn seeded_builtin_actions_are_discoverable() {
+        let (_d, _c, m) = setup().await;
+        let page = m
+            .list(ListOptions {
+                path_prefix: Some("/builtin".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(page.total > 0, "expected seeded built-in actions under /builtin");
+        let doc_get = page
+            .items
+            .iter()
+            .find(|a| a.name == "entity-get-document")
+            .expect("entity-get-document should be seeded");
+        assert!(doc_get.trusted, "seeded built-ins should be trusted");
+        assert_eq!(doc_get.action_type, Some(ActionType::Internal));
+
+        // Every built-in is native dispatch now — there's no more WASM
+        // built-in catalogue (see solx-actions/src/seed.rs's module docs).
+        assert!(
+            page.items.iter().all(|a| a.action_type == Some(ActionType::Internal)),
+            "every seeded /builtin action should be action_type=internal"
+        );
+    }
+}
