@@ -14,13 +14,17 @@ solx save action /weather/forecast --json '{
   "paramTypeRef": "/weather/ForecastParams"
 }'
 
-# It is now a tool named act__weather__forecast in every connected MCP client.
+# Every connected MCP client can now find it with explore_tools and call it
+# as act__weather__forecast.
 ```
 
-That's the whole loop. `tools/list` is a live query against the actions
-database — there is no hand-written tool layer to keep in sync, and no
-separate CRUD tool surface, because entity CRUD, search, files, and secrets
-are themselves just actions in the `/builtin` catalogue.
+That's the whole loop. MCP's `tools/list` advertises a single router tool,
+`explore_tools`, which searches or pages through the live actions database;
+each action it surfaces is then called directly by its `act__` name. There is
+no hand-written tool layer to keep in sync and no `tools/list_changed` churn
+when packages come and go — and no separate CRUD tool surface, because entity
+CRUD, search, files, and secrets are themselves just actions in the
+`/builtin` catalogue.
 
 ## Actions
 
@@ -62,8 +66,10 @@ here, so the boundaries are explicit:
   unset.
 - **Deny-by-default outbound allowlist.** Every outbound URL — a `webhook`
   action's, and any handed to `/builtin/web/http-request`,
-  `/builtin/web/stream/start` or `/builtin/web/open-url` — must match a
-  prefix in `allowed_base_urls`. One check, in `solx-actions::net`.
+  `/builtin/web/stream/start` or `/builtin/web/open-url` — must match an
+  entry in `allowed_base_urls`: exact scheme, host and port, and a path
+  under the entry's. Redirects are held to the same list. One check, in
+  `solx-actions::net`.
 - **Guests cannot self-grant.** `entity-save-action` refuses to create,
   modify, or delete `command` and `webhook` actions. That built-in is the
   only route to action creation available to an MCP client, a WASM guest, or
@@ -200,7 +206,7 @@ references use full path strings resolved at write time. Data lives under
 
 ## Status
 
-Early but real: 323 tests pass across the workspace, including in-process MCP
+Early but real: 439 tests pass across the workspace, including in-process MCP
 client/server integration tests. Interfaces may still shift.
 
 Design notes and roadmaps live in [docs/](docs/).

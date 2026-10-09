@@ -46,6 +46,15 @@ refuses any scheme but `http`/`https`, since `file:`/`javascript:`/`about:`
 carry no host for a prefix to constrain and it hands the URL to the user's
 real browser session.
 
+An entry is matched by origin, not as a raw string: the URL's scheme, host
+and port must equal the entry's (an entry with no port means the scheme's
+default; `http://host:` means any port), and only the path is a prefix
+match. Both sides are compared parsed and normalised, so
+`https://api.example.com` does not admit `https://api.example.com.evil.net`
+or `https://api.example.com@evil.net`, and `..` cannot climb out of an
+allowed path. Redirects are checked hop by hop against the same list, so an
+open redirect on an allowed host is not a way out to an unlisted one.
+
 The `/builtin/web/*` built-ins were ungated until this check was extracted
 and shared; before that, anything able to exec an action — a WASM guest, an
 MCP client, a widget with a bearer token — could use `http-request` as an

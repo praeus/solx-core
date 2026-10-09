@@ -45,9 +45,14 @@
 //! field) are simply not affected — reinstalling is how they pick up
 //! allowlist grants, exactly as before this feature existed for anything
 //! else in the manifest.
+//!
+//! A relative `cwd` in a declared [`solx_config::CommandDef`] is resolved
+//! against the package directory at install time, so a manifest can say
+//! `"cwd": "bin"` instead of hard-coding where the package is checked out.
+//! An absolute `cwd` is kept as is.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use solx_config::{CommandDef, ConfigService, InstalledPackage};
@@ -136,6 +141,7 @@ pub async fn install_package(
         .unwrap_or("0.0.0")
         .to_string();
     let grants = parse_grants(&meta, meta_file)?;
+    let pkg_dir = package_dir(dir);
 
     let mut warnings = Vec::new();
     if legacy_manifest {
@@ -169,7 +175,7 @@ pub async fn install_package(
             tracing::warn!("{msg}");
             warnings.push(msg);
         }
-        config.register_command(key, def.clone())?;
+        config.register_command(key, resolve_cwd(def, &pkg_dir))?;
     }
     for prefix in &grants.base_urls {
         if let Some(owner) = others.iter().find(|p| p.granted_base_urls.iter().any(|p| p == prefix))
@@ -192,11 +198,7 @@ pub async fn install_package(
     let pkg = InstalledPackage {
         name,
         version,
-        path: dir
-            .canonicalize()
-            .unwrap_or_else(|_| dir.to_path_buf())
-            .to_string_lossy()
-            .into_owned(),
+        path: pkg_dir.to_string_lossy().into_owned(),
         installed_at: chrono::Utc::now().to_rfc3339(),
         granted_commands: grants.commands.into_keys().collect(),
         granted_base_urls: grants.base_urls,
@@ -249,6 +251,38 @@ pub async fn uninstall_package(
 /// List installed packages.
 pub fn list_packages(config: &ConfigService) -> Vec<InstalledPackage> {
     config.list_packages()
+}
+
+/// `dir` canonicalized, without Windows' `\\?\` verbatim prefix — it is
+/// recorded as the package's path and joined into command `cwd`s, where the
+/// verbatim form is noise at best and rejected by some tools at worst.
+fn package_dir(dir: &Path) -> PathBuf {
+    let path = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let s = path.to_string_lossy().into_owned();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path
+    }
+}
+
+/// `def` with a relative `cwd` joined onto the package directory, so a
+/// manifest can say `"cwd": "bin"` rather than hard-coding where the package
+/// happens to be checked out. `.` components are dropped, so `"cwd": "."`
+/// records the package directory itself.
+fn resolve_cwd(def: &CommandDef, pkg_dir: &Path) -> CommandDef {
+    let mut def = def.clone();
+    if let Some(cwd) = def.cwd.as_deref().filter(|c| Path::new(c).is_relative()) {
+        let joined: PathBuf = pkg_dir
+            .join(cwd)
+            .components()
+            .filter(|c| !matches!(c, Component::CurDir))
+            .collect();
+        def.cwd = Some(joined.to_string_lossy().into_owned());
+    }
+    def
 }
 
 /// Run a package script with the process CWD temporarily set to the package

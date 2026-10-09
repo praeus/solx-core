@@ -116,6 +116,7 @@ pub(super) async fn start(params: &Value, config: &Arc<ConfigService>) -> Result
     // outer timeout. `timeout_secs` only governs the initial connect.
     let mut req = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(timeout_secs))
+        .redirect(crate::net::redirect_policy(config))
         .build()
         .map_err(|e| format!("failed to build http client: {e}"))?
         .request(

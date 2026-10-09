@@ -53,18 +53,26 @@ async fn tools_list_and_call_tool_round_trip_over_http() -> anyhow::Result<()> {
 
     let client = ().serve(StreamableHttpClientTransport::from_config(mcp_client_config(mcp_url, Some(token)))).await?;
 
+    // Only the router is advertised; actions are found through it (see
+    // `solx-mcp/src/server.rs`), then called by their `act__` names.
     let tools = client.list_tools(None).await?;
     let names: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
-    assert!(
-        names.iter().any(|n| n.starts_with("act__builtin")),
-        "expected builtin action tools among the MCP catalogue, got: {names:?}"
-    );
+    assert_eq!(names, vec!["explore_tools"], "list_tools should expose only the router meta-tool");
 
-    // Owned (not `&str` borrowed from `tools`): `CallToolRequestParams::new`
-    // takes `impl Into<Cow<'static, str>>`, which a borrow scoped to this
-    // function can't satisfy.
-    let put_name = names.iter().find(|n| n.contains("file-put")).expect("a file-put tool should exist").to_string();
-    let get_name = names.iter().find(|n| n.contains("file-get")).expect("a file-get tool should exist").to_string();
+    let found = client
+        .call_tool(CallToolRequestParams::new("explore_tools").with_arguments(
+            serde_json::json!({"discovery_mode": "list_all", "path_prefix": "/builtin/file"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ))
+        .await?;
+    let found = found.content[0].as_text().expect("router returns text").text.clone();
+    let put_name = "act__builtin__file__file-put";
+    let get_name = "act__builtin__file__file-get";
+    for name in [put_name, get_name] {
+        assert!(found.contains(name), "router should surface {name}, got:\n{found}");
+    }
 
     let put = client
         .call_tool(CallToolRequestParams::new(put_name).with_arguments(

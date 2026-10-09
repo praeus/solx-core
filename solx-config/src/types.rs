@@ -187,7 +187,10 @@ pub struct SolxConfig {
     pub command_actions: Option<HashMap<String, CommandDef>>,
 
     /// Allowlist of URL prefixes any action may send an outbound HTTP
-    /// request to. A request URL must start with at least one listed prefix.
+    /// request to. A request URL must match at least one listed prefix: the
+    /// same scheme, host and port (an entry without a port means the default
+    /// one; `http://host:` means any), and a path starting with the entry's
+    /// path. Redirects are held to the same list. See `solx-actions::net`.
     /// **Deny-by-default**: unset or empty means no outbound request is
     /// permitted at all.
     ///
