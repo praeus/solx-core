@@ -2005,6 +2005,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oauth_start_redirect_host_localhost_is_reachable_and_others_are_refused() {
+        let (_d, ctx) = test_ctx(None).await;
+        let port = 18766;
+        let v = run_internal("oauth-start", &json!({ "port": port, "redirect_host": "localhost" }), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(v["redirect_uri"], format!("http://localhost:{port}/callback"));
+        // The listener is still on 127.0.0.1, which is what `localhost`
+        // reaches once the browser falls back from ::1.
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
+        run_internal("oauth-stop", &json!({ "state_value": v["state_value"] }), &ctx).await.unwrap();
+
+        let err = run_internal("oauth-start", &json!({ "port": 18767, "redirect_host": "evil.example" }), &ctx)
+            .await
+            .unwrap_err();
+        assert!(err.contains("redirect_host"), "{err}");
+        assert!(std::net::TcpListener::bind(("127.0.0.1", 18767)).is_ok(), "a refused host must bind nothing");
+    }
+
+    #[tokio::test]
     async fn oauth_start_supersedes_our_own_abandoned_listener_on_the_same_port() {
         let (_d, ctx) = test_ctx(None).await;
         let port = 18761;

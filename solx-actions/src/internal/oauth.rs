@@ -186,6 +186,19 @@ pub(super) async fn oauth_start(params: &Value) -> Result<Value, String> {
         .and_then(Value::as_u64)
         .map(|p| p as u16)
         .unwrap_or(oauth_loopback::DEFAULT_LOOPBACK_PORT);
+    // Only changes the redirect URI we hand back — the listener binds
+    // 127.0.0.1 either way. See `LOOPBACK_REDIRECT_HOSTS`.
+    let redirect_host = params
+        .get("redirect_host")
+        .and_then(Value::as_str)
+        .filter(|h| !h.is_empty())
+        .unwrap_or("127.0.0.1");
+    if !oauth_loopback::LOOPBACK_REDIRECT_HOSTS.contains(&redirect_host) {
+        return Err(format!(
+            "oauth-start: redirect_host must be one of {:?}, got '{redirect_host}'",
+            oauth_loopback::LOOPBACK_REDIRECT_HOSTS
+        ));
+    }
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let max_lifetime_secs = params
         .get("max_lifetime_secs")
@@ -247,7 +260,7 @@ pub(super) async fn oauth_start(params: &Value) -> Result<Value, String> {
         );
     }
 
-    let redirect_uri = oauth_loopback::redirect_uri(port);
+    let redirect_uri = oauth_loopback::redirect_uri_for_host(redirect_host, port);
     let started_at = chrono::Utc::now().to_rfc3339();
 
     Ok(json!({
