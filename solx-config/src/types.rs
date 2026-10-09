@@ -119,6 +119,18 @@ pub struct SolxConfig {
     /// won't normally have its own config's `server_url` set at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_port: Option<u16>,
+    /// Address `solx-server` binds on. Server-side only. Defaults to
+    /// `127.0.0.1`; set to e.g. `"0.0.0.0"` (or a LAN/Tailscale IP) to serve
+    /// other machines. Once it's off loopback, `server_token` is the only
+    /// gate and traffic is plaintext HTTP, so put it on a private network
+    /// or behind a TLS reverse proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_host: Option<String>,
+    /// Browser origins allowed by CORS when `server_host` is not loopback
+    /// (e.g. `["https://solx.example.com"]`). On loopback, CORS stays wide
+    /// open. Off loopback, `None` means no cross-origin browser access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_cors_origins: Option<Vec<String>>,
 
     /// Ring-buffer cap on entries retained per action console. Oldest
     /// entries are evicted once a console exceeds this. Defaults to 5000.

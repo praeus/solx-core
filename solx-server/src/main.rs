@@ -10,7 +10,12 @@ use solx_server::state::AppState;
 #[derive(Parser)]
 #[command(name = "solx-server", about = "HTTP server hosting the local solx managers", version)]
 struct Cli {
-    /// Port to bind on 127.0.0.1. Defaults to config's `server_port`, else
+    /// Address to bind on. Defaults to config's `server_host`, else
+    /// `127.0.0.1`. Use `0.0.0.0` (or a specific interface IP) to serve
+    /// other machines.
+    #[arg(long)]
+    host: Option<IpAddr>,
+    /// Port to bind on. Defaults to config's `server_port`, else
     /// `solx_config::DEFAULT_SERVER_PORT`.
     #[arg(long)]
     port: Option<u16>,
@@ -37,20 +42,37 @@ async fn main() -> anyhow::Result<()> {
 
     let token = app.config.ensure_server_token().context("ensure server token")?;
 
-    let port = cli
-        .port
-        .or(app.config.snapshot().server_port)
-        .unwrap_or(solx_config::DEFAULT_SERVER_PORT);
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let snap = app.config.snapshot();
+    let host = match cli.host {
+        Some(host) => host,
+        None => match snap.server_host.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(s) => s
+                .parse::<IpAddr>()
+                .with_context(|| format!("config server_host {s:?} is not an IP address"))?,
+            None => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        },
+    };
+    let port = cli.port.or(snap.server_port).unwrap_or(solx_config::DEFAULT_SERVER_PORT);
+    let addr = SocketAddr::new(host, port);
 
+    let cors = solx_server::cors_layer(host, snap.server_cors_origins.as_deref().unwrap_or_default());
     let state = AppState { app, token: Arc::from(token.as_str()) };
-    let router = solx_server::build_router(state);
+    let router = solx_server::build_router_with_cors(state, cors);
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
     tracing::info!("solx-server listening on http://{addr}");
     println!("solx-server listening on http://{addr}");
+    if !host.is_loopback() {
+        // Off loopback, anyone who can reach the port can attempt auth, and
+        // the bearer token travels in cleartext.
+        let warning = "solx-server is reachable from the network: the bearer token is the \
+                       only gate and traffic is unencrypted HTTP. Use a private network \
+                       (e.g. Tailscale/WireGuard) or a TLS reverse proxy.";
+        tracing::warn!("{warning}");
+        eprintln!("WARNING: {warning}");
+    }
 
     axum::serve(listener, router).await.context("serve")?;
     Ok(())

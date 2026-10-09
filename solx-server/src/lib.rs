@@ -28,7 +28,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use axum::middleware;
 use axum::routing::get;
 use axum::Router;
-use tower_http::cors::CorsLayer;
+use axum::http::HeaderValue;
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use state::AppState;
 
@@ -45,13 +46,19 @@ pub const BUILD_COMMIT_DATE: &str = env!("SOLX_BUILD_COMMIT_DATE");
 /// (e.g. `solx-web`'s frontend, via `@solx/http`) can call this server
 /// directly. This is a deliberate widening of the trust boundary — until
 /// now only Rust/Node clients could reach `solx-server` — but it's
-/// consistent with the existing model: bind is `127.0.0.1`-only (see
-/// `main.rs`) and the bearer token is the only real gate, same posture
-/// `solx-web`'s Bun backend already used (CORS `*`) for its own callers.
-/// Layered outermost (after `.merge`) so a preflight `OPTIONS` is answered
-/// before it ever reaches `require_bearer` — which now matters for ordinary
-/// calls too, since `PUT`/`DELETE` are always preflighted by browsers.
+/// consistent with the existing model on a loopback bind: the bearer token
+/// is the only real gate, same posture `solx-web`'s Bun backend already
+/// used (CORS `*`) for its own callers. A non-loopback bind uses
+/// `build_router_with_cors` with an allow-list instead (see `cors_layer`).
 pub fn build_router(state: AppState) -> Router {
+    build_router_with_cors(state, CorsLayer::permissive())
+}
+
+/// `build_router` with an explicit CORS policy. The layer is outermost
+/// (after `.merge`) so a preflight `OPTIONS` is answered before it ever
+/// reaches `require_bearer`. That matters for ordinary calls too, since
+/// browsers always preflight `PUT`/`DELETE`.
+pub fn build_router_with_cors(state: AppState, cors: CorsLayer) -> Router {
     let protected = routes::router(&state)
         .route_layer(middleware::from_fn_with_state(state.clone(), auth::require_bearer));
 
@@ -71,8 +78,34 @@ pub fn build_router(state: AppState) -> Router {
             }),
         )
         .merge(protected)
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .with_state(state)
+}
+
+/// CORS policy for a server bound on `ip`. On loopback it's permissive, as
+/// described on `build_router`. Off loopback, only the listed `origins` are
+/// allowed (none if the list is empty), so an arbitrary web page can't
+/// script requests at a network-exposed server. Non-browser clients ignore
+/// CORS entirely, so they're unaffected either way. Origins that don't parse
+/// as header values are skipped with a warning.
+pub fn cors_layer(ip: IpAddr, origins: &[String]) -> CorsLayer {
+    if ip.is_loopback() {
+        return CorsLayer::permissive();
+    }
+    let allowed: Vec<HeaderValue> = origins
+        .iter()
+        .filter_map(|o| match HeaderValue::from_str(o.trim()) {
+            Ok(v) => Some(v),
+            Err(_) => {
+                tracing::warn!("ignoring invalid server_cors_origins entry {o:?}");
+                None
+            }
+        })
+        .collect();
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(allowed))
+        .allow_methods(Any)
+        .allow_headers(Any)
 }
 
 /// Bind `127.0.0.1:port` and start serving in the background. Returns once

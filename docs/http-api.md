@@ -8,13 +8,31 @@ through the routes below.
 The surface is REST. An entity's reference lives in the URL, list and search
 options ride in the query string, and the HTTP method carries the verb.
 
-- **Base URL** — `http://127.0.0.1:8766` by default (the server binds
-  `127.0.0.1` only).
+- **Base URL** — `http://127.0.0.1:8766` by default. The bind address and
+  port come from `--host`/`--port`, else the config's `server_host`/
+  `server_port`.
 - **Auth** — every route except `/health` requires
   `Authorization: Bearer <token>`. The token is generated on first run and
   stored in the config; `solx server start` prints it.
-- **CORS** — permissive, so a browser page can call the server directly. The
-  bearer token is the only real gate.
+- **CORS** — on a loopback bind, permissive, so a browser page can call the
+  server directly. On any other bind, only the origins listed in the config's
+  `server_cors_origins` are allowed (none by default). Either way, the bearer
+  token is the only real gate.
+
+### Serving other machines
+
+Set `server_host` to `0.0.0.0` (or a specific interface IP), or start the
+server with `--host`. On another machine, point a client at it with
+`server_url` (or `SOLX_SERVER_URL`) and copy over the server's
+`server_token`. The server prints a warning at startup when it isn't bound
+to loopback, because:
+
+- The single token grants full access (read/write on every entity, action
+  execution and `/mcp`). The only way to revoke it is to rotate it, and
+  rotating it breaks every client, local ones included.
+- Traffic is plain HTTP, so the token is sent unencrypted. Run it over a
+  private network (Tailscale/WireGuard) or behind a TLS reverse proxy (Caddy,
+  nginx). Don't expose it directly to the internet.
 
 ## Entity references in the URL
 
