@@ -1,0 +1,630 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PermissionFile",
+  "description": "Permission file that can define a default permission, a set of permissions or a list of inlined permissions.",
+  "type": "object",
+  "properties": {
+    "default": {
+      "description": "The default permission set for the plugin",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DefaultPermission"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "set": {
+      "description": "A list of permissions sets defined",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/PermissionSet"
+      }
+    },
+    "permission": {
+      "description": "A list of inlined permissions",
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Permission"
+      }
+    }
+  },
+  "definitions": {
+    "DefaultPermission": {
+      "description": "The default permission set of the plugin.\n\nWorks similarly to a permission with the \"default\" identifier.",
+      "type": "object",
+      "required": [
+        "permissions"
+      ],
+      "properties": {
+        "version": {
+          "description": "The version of the permission.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 1.0
+        },
+        "description": {
+          "description": "Human-readable description of what the permission does. Tauri convention is to use `<h4>` headings in markdown content for Tauri documentation generation purposes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "permissions": {
+          "description": "All permissions this set contains.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "PermissionSet": {
+      "description": "A set of direct permissions grouped together under a new name.",
+      "type": "object",
+      "required": [
+        "description",
+        "identifier",
+        "permissions"
+      ],
+      "properties": {
+        "identifier": {
+          "description": "A unique identifier for the permission.",
+          "type": "string"
+        },
+        "description": {
+          "description": "Human-readable description of what the permission does.",
+          "type": "string"
+        },
+        "permissions": {
+          "description": "All permissions this set contains.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PermissionKind"
+          }
+        }
+      }
+    },
+    "Permission": {
+      "description": "Descriptions of explicit privileges of commands.\n\nIt can enable commands to be accessible in the frontend of the application.\n\nIf the scope is defined it can be used to fine grain control the access of individual or multiple commands.",
+      "type": "object",
+      "required": [
+        "identifier"
+      ],
+      "properties": {
+        "version": {
+          "description": "The version of the permission.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 1.0
+        },
+        "identifier": {
+          "description": "A unique identifier for the permission.",
+          "type": "string"
+        },
+        "description": {
+          "description": "Human-readable description of what the permission does. Tauri internal convention is to use `<h4>` headings in markdown content for Tauri documentation generation purposes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commands": {
+          "description": "Allowed or denied commands when using this permission.",
+          "default": {
+            "allow": [],
+            "deny": []
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/Commands"
+            }
+          ]
+        },
+        "scope": {
+          "description": "Allowed or denied scoped when using this permission.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Scopes"
+            }
+          ]
+        },
+        "platforms": {
+          "description": "Target platforms this permission applies. By default all platforms are affected by this permission.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/Target"
+          }
+        }
+      }
+    },
+    "Commands": {
+      "description": "Allowed and denied commands inside a permission.\n\nIf two commands clash inside of `allow` and `deny`, it should be denied by default.",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Allowed command.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny": {
+          "description": "Denied command, which takes priority.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "Scopes": {
+      "description": "An argument for fine grained behavior control of Tauri commands.\n\nIt can be of any serde serializable type and is used to allow or prevent certain actions inside a Tauri command. The configured scope is passed to the command and will be enforced by the command implementation.\n\n## Example\n\n```json { \"allow\": [{ \"path\": \"$HOME/**\" }], \"deny\": [{ \"path\": \"$HOME/secret.txt\" }] } ```",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Data that defines what is allowed by the scope.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/Value"
+          }
+        },
+        "deny": {
+          "description": "Data that defines what is denied by the scope. This should be prioritized by validation logic.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/Value"
+          }
+        }
+      }
+    },
+    "Value": {
+      "description": "All supported ACL values.",
+      "anyOf": [
+        {
+          "description": "Represents a null JSON value.",
+          "type": "null"
+        },
+        {
+          "description": "Represents a [`bool`].",
+          "type": "boolean"
+        },
+        {
+          "description": "Represents a valid ACL [`Number`].",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Number"
+            }
+          ]
+        },
+        {
+          "description": "Represents a [`String`].",
+          "type": "string"
+        },
+        {
+          "description": "Represents a list of other [`Value`]s.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Value"
+          }
+        },
+        {
+          "description": "Represents a map of [`String`] keys to [`Value`]s.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/Value"
+          }
+        }
+      ]
+    },
+    "Number": {
+      "description": "A valid ACL number.",
+      "anyOf": [
+        {
+          "description": "Represents an [`i64`].",
+          "type": "integer",
+          "format": "int64"
+        },
+        {
+          "description": "Represents a [`f64`].",
+          "type": "number",
+          "format": "double"
+        }
+      ]
+    },
+    "Target": {
+      "description": "Platform target.",
+      "oneOf": [
+        {
+          "description": "MacOS.",
+          "type": "string",
+          "enum": [
+            "macOS"
+          ]
+        },
+        {
+          "description": "Windows.",
+          "type": "string",
+          "enum": [
+            "windows"
+          ]
+        },
+        {
+          "description": "Linux.",
+          "type": "string",
+          "enum": [
+            "linux"
+          ]
+        },
+        {
+          "description": "Android.",
+          "type": "string",
+          "enum": [
+            "android"
+          ]
+        },
+        {
+          "description": "iOS.",
+          "type": "string",
+          "enum": [
+            "iOS"
+          ]
+        }
+      ]
+    },
+    "PermissionKind": {
+      "type": "string",
+      "oneOf": [
+        {
+          "description": "Enables the actions_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-actions-delete",
+          "markdownDescription": "Enables the actions_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the actions_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-actions-delete",
+          "markdownDescription": "Denies the actions_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the actions_exec command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-actions-exec",
+          "markdownDescription": "Enables the actions_exec command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the actions_exec command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-actions-exec",
+          "markdownDescription": "Denies the actions_exec command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the actions_get command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-actions-get",
+          "markdownDescription": "Enables the actions_get command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the actions_get command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-actions-get",
+          "markdownDescription": "Denies the actions_get command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the actions_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-actions-list",
+          "markdownDescription": "Enables the actions_list command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the actions_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-actions-list",
+          "markdownDescription": "Denies the actions_list command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the actions_paths command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-actions-paths",
+          "markdownDescription": "Enables the actions_paths command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the actions_paths command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-actions-paths",
+          "markdownDescription": "Denies the actions_paths command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the actions_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-actions-save",
+          "markdownDescription": "Enables the actions_save command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the actions_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-actions-save",
+          "markdownDescription": "Denies the actions_save command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the actions_search command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-actions-search",
+          "markdownDescription": "Enables the actions_search command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the actions_search command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-actions-search",
+          "markdownDescription": "Denies the actions_search command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the connect command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-connect",
+          "markdownDescription": "Enables the connect command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the connect command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-connect",
+          "markdownDescription": "Denies the connect command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the disconnect command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-disconnect",
+          "markdownDescription": "Enables the disconnect command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the disconnect command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-disconnect",
+          "markdownDescription": "Denies the disconnect command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the docs_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-docs-delete",
+          "markdownDescription": "Enables the docs_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the docs_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-docs-delete",
+          "markdownDescription": "Denies the docs_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the docs_get command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-docs-get",
+          "markdownDescription": "Enables the docs_get command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the docs_get command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-docs-get",
+          "markdownDescription": "Denies the docs_get command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the docs_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-docs-list",
+          "markdownDescription": "Enables the docs_list command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the docs_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-docs-list",
+          "markdownDescription": "Denies the docs_list command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the docs_paths command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-docs-paths",
+          "markdownDescription": "Enables the docs_paths command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the docs_paths command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-docs-paths",
+          "markdownDescription": "Denies the docs_paths command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the docs_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-docs-save",
+          "markdownDescription": "Enables the docs_save command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the docs_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-docs-save",
+          "markdownDescription": "Denies the docs_save command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the docs_search command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-docs-search",
+          "markdownDescription": "Enables the docs_search command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the docs_search command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-docs-search",
+          "markdownDescription": "Denies the docs_search command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the files_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-files-delete",
+          "markdownDescription": "Enables the files_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the files_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-files-delete",
+          "markdownDescription": "Denies the files_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the files_get command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-files-get",
+          "markdownDescription": "Enables the files_get command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the files_get command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-files-get",
+          "markdownDescription": "Denies the files_get command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the files_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-files-list",
+          "markdownDescription": "Enables the files_list command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the files_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-files-list",
+          "markdownDescription": "Denies the files_list command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the files_put command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-files-put",
+          "markdownDescription": "Enables the files_put command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the files_put command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-files-put",
+          "markdownDescription": "Denies the files_put command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the info command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-info",
+          "markdownDescription": "Enables the info command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the info command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-info",
+          "markdownDescription": "Denies the info command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the types_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-types-delete",
+          "markdownDescription": "Enables the types_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the types_delete command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-types-delete",
+          "markdownDescription": "Denies the types_delete command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the types_get command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-types-get",
+          "markdownDescription": "Enables the types_get command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the types_get command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-types-get",
+          "markdownDescription": "Denies the types_get command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the types_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-types-list",
+          "markdownDescription": "Enables the types_list command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the types_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-types-list",
+          "markdownDescription": "Denies the types_list command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the types_paths command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-types-paths",
+          "markdownDescription": "Enables the types_paths command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the types_paths command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-types-paths",
+          "markdownDescription": "Denies the types_paths command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the types_resolve command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-types-resolve",
+          "markdownDescription": "Enables the types_resolve command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the types_resolve command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-types-resolve",
+          "markdownDescription": "Denies the types_resolve command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the types_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-types-save",
+          "markdownDescription": "Enables the types_save command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the types_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-types-save",
+          "markdownDescription": "Denies the types_save command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the types_validate command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-types-validate",
+          "markdownDescription": "Enables the types_validate command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the types_validate command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-types-validate",
+          "markdownDescription": "Denies the types_validate command without any pre-configured scope."
+        },
+        {
+          "description": "Allows every solx command: the full manager surface (types, docs, actions, files) plus host info and client connect/disconnect.\n#### This default permission set includes:\n\n- `allow-types-save`\n- `allow-types-get`\n- `allow-types-delete`\n- `allow-types-list`\n- `allow-types-paths`\n- `allow-types-resolve`\n- `allow-types-validate`\n- `allow-docs-save`\n- `allow-docs-get`\n- `allow-docs-delete`\n- `allow-docs-list`\n- `allow-docs-paths`\n- `allow-docs-search`\n- `allow-actions-save`\n- `allow-actions-get`\n- `allow-actions-delete`\n- `allow-actions-list`\n- `allow-actions-paths`\n- `allow-actions-search`\n- `allow-actions-exec`\n- `allow-files-put`\n- `allow-files-get`\n- `allow-files-delete`\n- `allow-files-list`\n- `allow-info`\n- `allow-connect`\n- `allow-disconnect`",
+          "type": "string",
+          "const": "default",
+          "markdownDescription": "Allows every solx command: the full manager surface (types, docs, actions, files) plus host info and client connect/disconnect.\n#### This default permission set includes:\n\n- `allow-types-save`\n- `allow-types-get`\n- `allow-types-delete`\n- `allow-types-list`\n- `allow-types-paths`\n- `allow-types-resolve`\n- `allow-types-validate`\n- `allow-docs-save`\n- `allow-docs-get`\n- `allow-docs-delete`\n- `allow-docs-list`\n- `allow-docs-paths`\n- `allow-docs-search`\n- `allow-actions-save`\n- `allow-actions-get`\n- `allow-actions-delete`\n- `allow-actions-list`\n- `allow-actions-paths`\n- `allow-actions-search`\n- `allow-actions-exec`\n- `allow-files-put`\n- `allow-files-get`\n- `allow-files-delete`\n- `allow-files-list`\n- `allow-info`\n- `allow-connect`\n- `allow-disconnect`"
+        }
+      ]
+    }
+  }
+}

@@ -58,6 +58,7 @@ segment**. A name of `100% #1` becomes `100%25%20%231`.
 | `GET` | `/docs/{ref}` | — | `Document` |
 | `PUT` | `/docs/{ref}` | `DocumentInput` | `Document` |
 | `DELETE` | `/docs/{ref}` | — | `204` |
+| `GET` | `/docs-paths` | — | `Page<PathFacet>` |
 | `GET` | `/search` | — | `Page<Document>` |
 
 `PUT` is create-or-replace, so it is used for both. It always answers `200`
@@ -87,6 +88,7 @@ permanently unreachable.
 | `GET` | `/types/{ref}` | — | `TypeEntity` |
 | `PUT` | `/types/{ref}` | `TypeInput` | `TypeEntity` |
 | `DELETE` | `/types/{ref}` | — | `204` |
+| `GET` | `/types-paths` | — | `Page<PathFacet>` |
 | `POST` | `/validate` | `{ "value": …, "typeRef": "…" }` | `204`, or `422` |
 
 There is no `resolve` route. Resolving a type reference is just splitting it
@@ -101,6 +103,8 @@ into `(path, name)` and fetching it — which `GET /types/{ref}` already is.
 | `PUT` | `/actions/{ref}` | `ActionInput` | `Action` |
 | `DELETE` | `/actions/{ref}` | — | `204` |
 | `POST` | `/actions/{ref}` | params (JSON) | `ActionExecResult` |
+| `GET` | `/actions-paths` | — | `Page<PathFacet>` |
+| `GET` | `/actions-search?q=…&exclude_hidden=…` | — | `Page<Action>` |
 
 `POST` on an action's own URL executes it — RFC 9110's "resource-specific
 processing of the request payload". The body is optional: a parameterless
@@ -140,7 +144,7 @@ is rejected by the file store.
 
 | Method | Route | Notes |
 | --- | --- | --- |
-| `GET` | `/health` | Unauthenticated. Returns `ok`. |
+| `GET` | `/health` | Unauthenticated. Returns `{status, version, commit, commit_date}`. |
 | `POST`/`GET`/`DELETE` | `/mcp` | MCP Streamable HTTP transport, same auth gate. |
 
 ## Errors
@@ -205,3 +209,39 @@ You do not have to hand-roll one:
 
 Both are thin wrappers over exactly the routes above, and are the best
 reference for how a request is meant to be shaped.
+
+## IPC (Tauri)
+
+`solx-tauri-plugin` exposes the same managers to a Tauri webview over IPC,
+for the solx desktop app (solx-explorer). There is no URL or token: the
+host process holds the `App`, which is either local (the server build, also
+served over HTTP by an embedded solx-server unless `server_embedded` is
+`false`) or a `solx-client` proxy (the client build). From JS, use
+`@solx/tauri`'s `connectTauri(invoke)`; commands are `plugin:solx|<name>`
+and need the `solx:default` capability permission.
+
+Each command calls the same manager method as the route beside it, and
+fails with the same tagged `{kind, message}` error body. Arguments are
+named (camelCase from JS); `path`/`name` are normalized exactly like a URL
+reference.
+
+| Command | Arguments | Route |
+| --- | --- | --- |
+| `docs_list` / `docs_paths` | `opts?: ListOptions` | `GET /docs`, `/docs-paths` |
+| `docs_get` / `docs_delete` | `path, name` | `GET`/`DELETE /docs/{ref}` |
+| `docs_save` | `path, name, input` | `PUT /docs/{ref}` |
+| `docs_search` | `query?: SearchQuery` | `GET /search` |
+| `types_list` / `types_paths` | `opts?` | `GET /types`, `/types-paths` |
+| `types_get` / `types_delete` / `types_save` | `path, name[, input]` | `/types/{ref}` |
+| `types_resolve` | `typeRef` | — (`GET /types/{ref}`) |
+| `types_validate` | `value, typeRef` | `POST /validate` |
+| `actions_list` / `actions_paths` | `opts?` | `GET /actions`, `/actions-paths` |
+| `actions_get` / `actions_delete` / `actions_save` | `path, name[, input]` | `/actions/{ref}` |
+| `actions_search` | `query?: ActionSearchQuery` | `GET /actions-search` |
+| `actions_exec` | `path, name, params?` | `POST /actions/{ref}` |
+| `files_list` | `prefix?` | `GET /files` (returns the bare list) |
+| `files_get` | `relPath` | `GET /files/{relPath}` (raw `ArrayBuffer`) |
+| `files_put` | raw bytes body; `x-solx-path` header (percent-encoded) | `PUT /files/{relPath}` (returns the path) |
+| `files_delete` | `relPath` | `DELETE /files/{relPath}` |
+| `info` | — | stands in for `/health`: `{mode, client, version, serverUrl?, embeddedServer?}` |
+| `connect` / `disconnect` | `serverUrl, token` / — | client build only |

@@ -15,6 +15,9 @@
 		{
 			"name": "solx-web",
 			"path": "../solx-web"
+		},
+		{
+			"path": "../solx-explorer"
 		}
 	],
 	"settings": {

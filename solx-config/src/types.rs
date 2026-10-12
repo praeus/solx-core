@@ -131,6 +131,12 @@ pub struct SolxConfig {
     /// open. Off loopback, `None` means no cross-origin browser access.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_cors_origins: Option<Vec<String>>,
+    /// Whether a host that runs the local managers in-process (e.g. the
+    /// solx desktop app's server build) also exposes them over HTTP, as an
+    /// embedded `solx-server` on `server_host`/`server_port`. Defaults to
+    /// `true`. Has no effect on the standalone `solx-server` binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_embedded: Option<bool>,
 
     /// Ring-buffer cap on entries retained per action console. Oldest
     /// entries are evicted once a console exceeds this. Defaults to 5000.

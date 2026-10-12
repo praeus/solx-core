@@ -366,6 +366,12 @@ impl ConfigService {
         }
     }
 
+    /// Whether an in-process host also serves the managers over HTTP. See
+    /// `SolxConfig::server_embedded`. Defaults to `true`.
+    pub fn server_embedded(&self) -> bool {
+        self.snapshot().server_embedded.unwrap_or(true)
+    }
+
     /// Ring-buffer cap on entries retained per action console. Defaults to
     /// 5000 when unset or non-positive.
     pub fn console_max_entries(&self) -> i64 {

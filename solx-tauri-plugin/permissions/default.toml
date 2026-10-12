@@ -1,0 +1,33 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = "Allows every solx command: the full manager surface (types, docs, actions, files) plus host info and client connect/disconnect."
+permissions = [
+    "allow-types-save",
+    "allow-types-get",
+    "allow-types-delete",
+    "allow-types-list",
+    "allow-types-paths",
+    "allow-types-resolve",
+    "allow-types-validate",
+    "allow-docs-save",
+    "allow-docs-get",
+    "allow-docs-delete",
+    "allow-docs-list",
+    "allow-docs-paths",
+    "allow-docs-search",
+    "allow-actions-save",
+    "allow-actions-get",
+    "allow-actions-delete",
+    "allow-actions-list",
+    "allow-actions-paths",
+    "allow-actions-search",
+    "allow-actions-exec",
+    "allow-files-put",
+    "allow-files-get",
+    "allow-files-delete",
+    "allow-files-list",
+    "allow-info",
+    "allow-connect",
+    "allow-disconnect",
+]

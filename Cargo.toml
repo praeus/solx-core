@@ -14,6 +14,7 @@ members = [
     "solx-mcp",
     "solx-client",
     "solx-server",
+    "solx-tauri-plugin",
 ]
 resolver = "2"
 
@@ -63,3 +64,4 @@ solx-manager  = { path = "solx-manager" }
 solx-client   = { path = "solx-client" }
 solx-mcp      = { path = "solx-mcp" }
 solx-server   = { path = "solx-server" }
+solx-tauri-plugin = { path = "solx-tauri-plugin" }

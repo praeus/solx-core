@@ -5,12 +5,20 @@ edition.workspace = true
 license.workspace = true
 description = "Wires the solx manager implementations together (local or remote, the App/Solx assembly), shared by solx-cli, solx-mcp, and solx-server."
 
+[features]
+# `local` pulls in the in-process manager implementations (and with them
+# wasmtime, libsql, keyring, ...). Without it, `App` can only proxy to a
+# remote `solx-server` via `solx-client` — what a thin client (e.g. the
+# Tauri client build) wants.
+default = ["local"]
+local = ["dep:solx-types", "dep:solx-files", "dep:solx-docs", "dep:solx-actions"]
+
 [dependencies]
 solx-surface = { workspace = true }
 solx-config = { workspace = true }
-solx-types = { workspace = true }
-solx-files = { workspace = true }
-solx-docs = { workspace = true }
-solx-actions = { workspace = true }
+solx-types = { workspace = true, optional = true }
+solx-files = { workspace = true, optional = true }
+solx-docs = { workspace = true, optional = true }
+solx-actions = { workspace = true, optional = true }
 solx-client = { workspace = true }
 anyhow = { workspace = true }
