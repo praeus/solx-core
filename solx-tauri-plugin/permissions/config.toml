@@ -1,0 +1,9 @@
+"$schema" = "schemas/schema.json"
+
+[[set]]
+identifier = "config"
+description = "Allows reading and editing solx-config.json, including the command and outbound-URL allowlists. Grant only to a window that never loads package widgets (the desktop app's Settings window) — never alongside widget-hosting content."
+permissions = [
+    "allow-config-get",
+    "allow-config-update",
+]

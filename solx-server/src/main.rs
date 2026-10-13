@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -43,17 +43,8 @@ async fn main() -> anyhow::Result<()> {
     let token = app.config.ensure_server_token().context("ensure server token")?;
 
     let snap = app.config.snapshot();
-    let host = match cli.host {
-        Some(host) => host,
-        None => match snap.server_host.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(s) => s
-                .parse::<IpAddr>()
-                .with_context(|| format!("config server_host {s:?} is not an IP address"))?,
-            None => IpAddr::V4(Ipv4Addr::LOCALHOST),
-        },
-    };
-    let port = cli.port.or(snap.server_port).unwrap_or(solx_config::DEFAULT_SERVER_PORT);
-    let addr = SocketAddr::new(host, port);
+    let addr = solx_server::bind_addr(&snap, cli.host, cli.port)?;
+    let host = addr.ip();
 
     let cors = solx_server::cors_layer(host, snap.server_cors_origins.as_deref().unwrap_or_default());
     let state = AppState { app, token: Arc::from(token.as_str()) };

@@ -1,0 +1,27 @@
+[package]
+name = "solx-tauri-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tauri v2 plugin exposing the solx managers to a webview over IPC — one command per manager-trait method, mirroring solx-server's routes."
+# Tauri derives the plugin's ACL identifier (`solx`, as in `solx:default`)
+# from `links` with its `tauri-plugin-` prefix stripped — not from the crate
+# name — so the crate can follow the workspace's `solx-*` naming.
+links = "tauri-plugin-solx"
+
+[features]
+# In-process managers (and their heavy deps). Off for a thin client, which
+# can only proxy to a remote `solx-server`.
+local = ["solx-manager/local"]
+
+[dependencies]
+solx-surface = { workspace = true }
+solx-config = { workspace = true }
+solx-manager = { path = "../solx-manager", default-features = false }
+tauri = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+percent-encoding = "2"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

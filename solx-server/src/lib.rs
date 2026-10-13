@@ -23,6 +23,7 @@ pub mod error;
 pub mod routes;
 pub mod state;
 
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use axum::middleware;
@@ -115,13 +116,49 @@ pub fn cors_layer(ip: IpAddr, origins: &[String]) -> CorsLayer {
 /// `solx-server` — see `solx-cli`'s `build_app` for the caller.
 pub async fn spawn_embedded(state: AppState, port: u16) -> std::io::Result<SocketAddr> {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    serve(state, addr, CorsLayer::permissive(), std::future::pending()).await
+}
+
+/// Bind `addr` and serve in the background with the given CORS policy until
+/// `shutdown` resolves (then drains in-flight requests). Returns once the
+/// listener is bound. For hosts that embed the server alongside their own
+/// use of the same `Arc<App>` — e.g. the solx desktop app's server build —
+/// and need a configurable bind and a clean stop, which `spawn_embedded`
+/// doesn't offer.
+pub async fn serve(
+    state: AppState,
+    addr: SocketAddr,
+    cors: CorsLayer,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<SocketAddr> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
-    let router = build_router(state);
+    let router = build_router_with_cors(state, cors);
     tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, router).await {
-            tracing::warn!("embedded solx-server on {addr} exited: {e}");
+        if let Err(e) = axum::serve(listener, router).with_graceful_shutdown(shutdown).await {
+            tracing::warn!("embedded solx-server on {bound} exited: {e}");
         }
     });
     Ok(bound)
+}
+
+/// Resolve the address to bind on: explicit `host`/`port` overrides, else
+/// config's `server_host`/`server_port`, else `127.0.0.1` and
+/// `solx_config::DEFAULT_SERVER_PORT`.
+pub fn bind_addr(
+    snap: &solx_config::SolxConfig,
+    host: Option<IpAddr>,
+    port: Option<u16>,
+) -> anyhow::Result<SocketAddr> {
+    let host = match host {
+        Some(host) => host,
+        None => match snap.server_host.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(s) => s
+                .parse::<IpAddr>()
+                .map_err(|_| anyhow::anyhow!("config server_host {s:?} is not an IP address"))?,
+            None => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        },
+    };
+    let port = port.or(snap.server_port).unwrap_or(solx_config::DEFAULT_SERVER_PORT);
+    Ok(SocketAddr::new(host, port))
 }

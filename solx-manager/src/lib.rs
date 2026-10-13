@@ -17,17 +17,25 @@
 //! `solx-mcp` never need to know or care which mode they're in — they only
 //! ever see `Arc<dyn TypeManager/DocManager/ActionManager/FileStore>` via
 //! the `Solx` trait.
+//!
+//! The local managers sit behind the default `local` feature. Built without
+//! it, only remote wiring exists, so a thin client links neither wasmtime
+//! nor libsql.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+#[cfg(feature = "local")]
 use solx_actions::LocalActionManager;
 use solx_config::ConfigService;
+#[cfg(feature = "local")]
 use solx_docs::LocalDocManager;
+#[cfg(feature = "local")]
 use solx_files::LocalFileStore;
 use solx_surface::managers::{ActionManager, DocManager, FileStore, Solx, TypeManager};
+#[cfg(feature = "local")]
 use solx_types::LocalTypeManager;
 
 /// The wired-together backend (local or remote). All fields are `Arc`, so
@@ -39,6 +47,8 @@ pub struct App {
     docs: Arc<dyn DocManager>,
     actions: Arc<dyn ActionManager>,
     files: Arc<dyn FileStore>,
+    /// `Some(server_url)` when proxying to a remote `solx-server`.
+    remote_url: Option<String>,
 }
 
 impl App {
@@ -63,12 +73,14 @@ impl App {
     /// This is what `solx-server` itself must use: it must never
     /// accidentally proxy to itself if its own config happens to contain a
     /// stray `server_url`.
+    #[cfg(feature = "local")]
     pub async fn build_local() -> Result<Arc<Self>> {
         let config = Arc::new(ConfigService::open().context("open config")?);
         Self::wire_local(config).await
     }
 
     /// Like [`Self::build_local`], against an explicit appdata directory.
+    #[cfg(feature = "local")]
     pub async fn build_local_in(appdata: impl Into<PathBuf>) -> Result<Arc<Self>> {
         let config = Arc::new(ConfigService::open_in(appdata).context("open config")?);
         Self::wire_local(config).await
@@ -96,14 +108,20 @@ impl App {
                          (start solx-server against this appdata dir first, or set \
                          SOLX_SERVER_TOKEN)",
                     )?;
-                Self::wire_remote(config, server_url, token)
+                Self::remote(config, server_url, token)
             }
+            #[cfg(feature = "local")]
             None => Self::wire_local(config).await,
+            #[cfg(not(feature = "local"))]
+            None => anyhow::bail!(
+                "no server_url is configured, and this build has no local managers                  (solx-manager was built without the `local` feature)"
+            ),
         }
     }
 
     /// Today's exact wiring, unchanged: open the three local databases and
     /// the local file store, wire `LocalActionManager`'s self-reference.
+    #[cfg(feature = "local")]
     async fn wire_local(config: Arc<ConfigService>) -> Result<Arc<Self>> {
         // Seed the built-in `get-env`/`set-env` environment store once at
         // startup (decoupled from any single exec() call — see
@@ -155,6 +173,7 @@ impl App {
             docs,
             actions,
             files,
+            remote_url: None,
         }))
     }
 
@@ -165,7 +184,12 @@ impl App {
     /// applies here — there's no local `LocalActionManager`/
     /// `LocalDocManager` in this process; all of that lives in whichever
     /// process is running `solx-server`.
-    fn wire_remote(config: Arc<ConfigService>, server_url: String, token: String) -> Result<Arc<Self>> {
+    ///
+    /// Public so a host can choose remote mode explicitly, with a URL/token
+    /// kept outside `config` (e.g. a desktop client's own settings, so it
+    /// doesn't flip every other solx tool sharing the appdata dir to remote).
+    pub fn remote(config: Arc<ConfigService>, server_url: String, token: String) -> Result<Arc<Self>> {
+        let remote_url = Some(server_url.clone());
         let types: Arc<dyn TypeManager> =
             Arc::new(solx_client::RemoteTypeManager::new(server_url.clone(), token.clone()));
         let docs: Arc<dyn DocManager> =
@@ -180,7 +204,13 @@ impl App {
             docs,
             actions,
             files,
+            remote_url,
         }))
+    }
+
+    /// The `solx-server` this app proxies to, or `None` for local managers.
+    pub fn remote_url(&self) -> Option<&str> {
+        self.remote_url.as_deref()
     }
 }
 
