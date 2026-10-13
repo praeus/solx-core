@@ -245,3 +245,12 @@ reference.
 | `files_delete` | `relPath` | `DELETE /files/{relPath}` |
 | `info` | — | stands in for `/health`: `{mode, client, version, serverUrl?, embeddedServer?}` |
 | `connect` / `disconnect` | `serverUrl, token` / — | client build only |
+| `config_get` | — | none — `{raw, effective, path, appdata, restartKeys}` for `solx-config.json`; `solx:config` only |
+| `config_update` | `changes` (top-level keys; `null` removes) | none — validated write, returns `{config, changedKeys, restartRequired}`; `solx:config` only |
+
+The `config_*` commands have no HTTP route, by design, and are not in
+`solx:default`: they need the separate `solx:config` permission, which the
+desktop app grants only to its Settings window. Package widgets run as JS in
+the main window, and config holds the `command_actions`/`allowed_base_urls`
+allowlists that solx keeps out of reach of actions, MCP and scripts. Server
+builds only; a client build refuses them.

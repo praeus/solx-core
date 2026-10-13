@@ -597,6 +597,59 @@ impl ConfigService {
     /// lock every other config write uses, so two `solx-server`s started
     /// concurrently against the same appdata dir can't race into two
     /// different tokens.
+    /// Apply a set of top-level key changes (`null` removes the key) as one
+    /// validated write, returning the keys that actually changed.
+    ///
+    /// The result is checked with [`validate`] *before* it is written, under
+    /// the same lock as the read, so a bad value never reaches disk and
+    /// never trips [`Self::snapshot`]'s fallback to defaults.
+    ///
+    /// Legacy spellings are folded as the other mutators do: writing
+    /// `allowed_base_urls` or `tool_exclude` drops `allowed_webhook_base_urls`
+    /// or `mcp_exclude`. If the caller didn't also mention the legacy key,
+    /// its entries are merged into the new value first, so a caller unaware
+    /// of it loses nothing; one that sends the legacy key (even as `null`)
+    /// has already accounted for it.
+    pub fn update(&self, changes: Map<String, Value>) -> Result<Vec<String>> {
+        let mut changed = Vec::new();
+        self.mutate(|obj| {
+            let before = obj.clone();
+            for (key, value) in &changes {
+                if value.is_null() {
+                    obj.remove(key);
+                } else {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+            for (current, legacy) in LEGACY_KEYS {
+                if !changes.get(*current).is_some_and(|v| !v.is_null()) {
+                    continue;
+                }
+                if !changes.contains_key(*legacy) {
+                    if let (Some(Value::Array(old)), Some(Value::Array(new))) =
+                        (before.get(*legacy), obj.get_mut(*current))
+                    {
+                        for item in old {
+                            if !new.contains(item) {
+                                new.push(item.clone());
+                            }
+                        }
+                    }
+                }
+                obj.remove(*legacy);
+            }
+            validate(&Value::Object(obj.clone()))?;
+            let keys: std::collections::BTreeSet<&String> = before.keys().chain(obj.keys()).collect();
+            changed = keys
+                .into_iter()
+                .filter(|k| before.get(*k) != obj.get(*k))
+                .cloned()
+                .collect();
+            Ok(())
+        })?;
+        Ok(changed)
+    }
+
     pub fn ensure_server_token(&self) -> Result<String> {
         if let Some(token) = self.snapshot().server_token {
             if !token.trim().is_empty() {
@@ -620,6 +673,97 @@ impl ConfigService {
         })?;
         Ok(generated)
     }
+}
+
+/// Keys that are read once when a solx host starts (databases opened,
+/// server bound, env store seeded, startup sweeps run), so a change to one
+/// only takes effect after a restart. Every other key is read per use and
+/// applies to the next action, request or stream.
+pub const RESTART_KEYS: &[&str] = &[
+    "data_directory",
+    "files_directory",
+    "docs_db",
+    "actions_db",
+    "types_db",
+    "env_mappings",
+    "env_vars",
+    "server_url",
+    "server_token",
+    "server_port",
+    "server_host",
+    "server_cors_origins",
+    "server_embedded",
+    "console_ttl_days",
+    "invocation_ttl_days",
+];
+
+/// Legacy key pairs `update` folds together: (current, former).
+const LEGACY_KEYS: &[(&str, &str)] = &[(KEY_BASE_URLS, KEY_BASE_URLS_LEGACY), ("tool_exclude", "mcp_exclude")];
+
+/// Strictly validate a whole raw config object.
+///
+/// [`ConfigService::snapshot`] deliberately never fails — a type error there
+/// yields [`SolxConfig::default()`], which would silently empty both
+/// allowlists and move the database paths. So anything that *writes* a
+/// config built from outside input must check it here first: the same
+/// deserialization without the fallback, plus the value checks the type
+/// system can't express.
+pub fn validate(value: &Value) -> Result<SolxConfig> {
+    let cfg: SolxConfig = serde_json::from_value(value.clone())
+        .map_err(|e| SolxError::Validation(format!("solx-config.json: {e}")))?;
+    let invalid = |msg: String| Err(SolxError::Validation(msg));
+
+    if let Some(host) = cfg.server_host.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if host.parse::<std::net::IpAddr>().is_err() {
+            return invalid(format!("server_host {host:?} is not an IP address"));
+        }
+    }
+    if cfg.server_port == Some(0) {
+        return invalid("server_port must be between 1 and 65535".into());
+    }
+    for origin in cfg.server_cors_origins.iter().flatten() {
+        if origin.trim().is_empty() || !origin.trim().chars().all(|c| c.is_ascii_graphic()) {
+            return invalid(format!("server_cors_origins entry {origin:?} is not a valid origin"));
+        }
+    }
+    for (key, def) in cfg.command_actions.iter().flatten() {
+        if key.trim().is_empty() {
+            return invalid("command_actions keys must not be empty".into());
+        }
+        if def.command.trim().is_empty() {
+            return invalid(format!("command_actions.{key}.command must not be empty"));
+        }
+    }
+    for prefix in merged_base_urls(&cfg) {
+        if !is_base_url(&prefix) {
+            return invalid(format!(
+                "allowed_base_urls entry {prefix:?} must be an http(s) URL prefix with a host, \
+                 e.g. \"https://api.example.com\""
+            ));
+        }
+    }
+    let rules = merged_exclude(&cfg).into_iter().map(|r| ("tool_exclude", r));
+    let rules = rules.chain(cfg.tool_destructive.clone().unwrap_or_default().into_iter().map(|r| ("tool_destructive", r)));
+    for (field, rule) in rules {
+        if rule.path.trim().is_empty() {
+            return invalid(format!("{field} rules need a non-empty path"));
+        }
+    }
+    Ok(cfg)
+}
+
+/// `scheme://host[...]` with an http(s) scheme and a non-empty host — the
+/// shape `solx-actions::net` matches request URLs against. Kept to a syntax
+/// check so this crate doesn't take a URL-parsing dependency.
+fn is_base_url(prefix: &str) -> bool {
+    let rest = match prefix.trim().split_once("://") {
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") => rest,
+        _ => return false,
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+    let host = if host.starts_with('[') { host } else { host.split(':').next().unwrap_or("") };
+    !host.is_empty() && !host.chars().any(char::is_whitespace)
 }
 
 /// Read and parse the config file, with the stamp it had *before* the read.
@@ -879,5 +1023,87 @@ mod tests {
         }))
         .unwrap();
         assert!(policy.is_hidden(&a));
+    }
+
+    fn changes(v: Value) -> Map<String, Value> {
+        match v {
+            Value::Object(m) => m,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn update_rejects_a_bad_value_and_leaves_the_file_untouched() {
+        let (_d, c) = svc();
+        c.set("allowed_base_urls", serde_json::json!(["https://a.example"])).unwrap();
+        let before = fs::read_to_string(c.config_path()).unwrap();
+
+        let err = c.update(changes(serde_json::json!({ "server_port": "abc" }))).unwrap_err();
+        assert!(matches!(err, SolxError::Validation(_)), "{err:?}");
+        for bad in [
+            serde_json::json!({ "server_host": "not-an-ip" }),
+            serde_json::json!({ "server_port": 0 }),
+            serde_json::json!({ "allowed_base_urls": ["example.com"] }),
+            serde_json::json!({ "command_actions": { "x": { "command": " " } } }),
+            serde_json::json!({ "tool_destructive": [{ "path": "" }] }),
+        ] {
+            assert!(c.update(changes(bad.clone())).is_err(), "{bad} should be rejected");
+        }
+        assert_eq!(fs::read_to_string(c.config_path()).unwrap(), before);
+    }
+
+    #[test]
+    fn update_sets_removes_and_reports_changed_keys() {
+        let (_d, c) = svc();
+        c.set("unknown_tool_key", serde_json::json!(1)).unwrap();
+        c.set("console_ttl_days", serde_json::json!(3)).unwrap();
+
+        let changed = c
+            .update(changes(serde_json::json!({
+                "server_port": 9000,
+                "console_ttl_days": null,
+                "stop_grace_secs": 10,
+            })))
+            .unwrap();
+        let changed: Vec<&str> = changed.iter().map(String::as_str).collect();
+        assert_eq!(changed, ["console_ttl_days", "server_port", "stop_grace_secs"]);
+        assert_eq!(c.snapshot().server_port, Some(9000));
+        assert!(c.get("console_ttl_days").is_none());
+        assert_eq!(c.get("unknown_tool_key"), Some(serde_json::json!(1)));
+
+        // Re-sending the same values changes nothing.
+        assert!(c.update(changes(serde_json::json!({ "server_port": 9000 }))).unwrap().is_empty());
+    }
+
+    #[test]
+    fn update_folds_legacy_keys() {
+        let (_d, c) = svc();
+        c.set("allowed_webhook_base_urls", serde_json::json!(["https://old.example"])).unwrap();
+        c.set("mcp_exclude", serde_json::json!([{ "path": "/legacy" }])).unwrap();
+
+        // Unaware of the legacy key: its entries are kept, under the new key.
+        c.update(changes(serde_json::json!({ "allowed_base_urls": ["https://new.example"] }))).unwrap();
+        assert_eq!(
+            c.get("allowed_base_urls"),
+            Some(serde_json::json!(["https://new.example", "https://old.example"]))
+        );
+        assert!(c.get("allowed_webhook_base_urls").is_none());
+
+        // Legacy key named explicitly: the caller's list is taken as-is.
+        c.update(changes(serde_json::json!({ "tool_exclude": [{ "path": "/new" }], "mcp_exclude": null })))
+            .unwrap();
+        assert_eq!(c.get("tool_exclude"), Some(serde_json::json!([{ "path": "/new" }])));
+        assert!(c.get("mcp_exclude").is_none());
+    }
+
+    #[test]
+    fn base_url_shape() {
+        assert!(is_base_url("https://api.example.com"));
+        assert!(is_base_url("http://127.0.0.1:"));
+        assert!(is_base_url("http://localhost:8080/v1/"));
+        assert!(is_base_url("http://[::1]:80"));
+        assert!(!is_base_url("api.example.com"));
+        assert!(!is_base_url("ftp://x"));
+        assert!(!is_base_url("https://"));
     }
 }

@@ -330,6 +330,98 @@ pub(crate) fn disconnect(state: State<'_, SolxState>) -> Result<()> {
     Ok(())
 }
 
+// ── config ── (no HTTP equivalent, by design: `solx:config` permission only)
+//
+// Granted to the desktop app's Settings window alone, never the main
+// window: package widgets run as JS in the main webview, and config holds
+// the `command_actions`/`allowed_base_urls` allowlists that solx keeps out
+// of reach of actions, MCP and scripts.
+
+/// The shared appdata config of a host that owns it. A client build's only
+/// config is its own connection, which `connect`/`disconnect` manage.
+fn host_config(state: &SolxState) -> Result<Arc<ConfigService>> {
+    if matches!(state.backend, Backend::Client { .. }) {
+        return Err(SolxError::Invalid(
+            "solx config is edited on the solx-server host, not from a client".into(),
+        ));
+    }
+    Ok(state.app()?.config.clone())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConfigView {
+    /// `solx-config.json` as stored (snake_case keys, unknown keys included).
+    raw: Value,
+    /// What the accessors resolve unset or invalid keys to, by key.
+    effective: Value,
+    path: String,
+    appdata: String,
+    /// Keys only read at startup; see `solx_config::RESTART_KEYS`.
+    restart_keys: &'static [&'static str],
+}
+
+fn config_view(config: &ConfigService) -> ConfigView {
+    let snap = config.snapshot();
+    let file_name = |p: std::path::PathBuf| p.file_name().map(|f| f.to_string_lossy().into_owned());
+    ConfigView {
+        raw: config.raw_snapshot(),
+        effective: json!({
+            "data_directory": config.db_dir(),
+            "files_directory": config.files_dir(),
+            "docs_db": file_name(config.docs_db_path()),
+            "actions_db": file_name(config.actions_db_path()),
+            "types_db": file_name(config.types_db_path()),
+            "server_host": snap.server_host.filter(|h| !h.trim().is_empty()).unwrap_or_else(|| "127.0.0.1".into()),
+            "server_port": snap.server_port.unwrap_or(solx_config::DEFAULT_SERVER_PORT),
+            "server_embedded": config.server_embedded(),
+            "console_max_entries": config.console_max_entries(),
+            "console_ttl_days": config.console_ttl_days(),
+            "background_timeout_secs": config.background_timeout_secs(),
+            "stop_grace_secs": config.stop_grace_secs(),
+            "invocation_ttl_days": config.invocation_ttl_days(),
+            "http_stream_idle_ttl_secs": config.http_stream_idle_ttl_secs(),
+            "http_stream_max_buffer_bytes": config.http_stream_max_buffer_bytes(),
+        }),
+        path: config.config_path().display().to_string(),
+        appdata: config.appdata().display().to_string(),
+        restart_keys: solx_config::RESTART_KEYS,
+    }
+}
+
+#[command]
+pub(crate) fn config_get(state: State<'_, SolxState>) -> Result<ConfigView> {
+    let config = host_config(&state)?;
+    Ok(config_view(&config))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConfigUpdateResult {
+    config: ConfigView,
+    changed_keys: Vec<String>,
+    /// The changed keys that only take effect after a restart.
+    restart_required: Vec<String>,
+}
+
+/// Apply top-level key changes (`null` removes a key) as one validated
+/// write — see `ConfigService::update`. A rejected change leaves the file
+/// untouched and fails with a `validation` error naming the problem.
+#[command]
+pub(crate) fn config_update(
+    state: State<'_, SolxState>,
+    changes: serde_json::Map<String, Value>,
+) -> Result<ConfigUpdateResult> {
+    let config = host_config(&state)?;
+    let changed_keys = config.update(changes)?;
+    let restart_required = changed_keys
+        .iter()
+        .filter(|k| solx_config::RESTART_KEYS.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    Ok(ConfigUpdateResult { config: config_view(&config), changed_keys, restart_required })
+}
+
 /// Build the client-mode `App` from a previously persisted URL/token, if any.
 pub(crate) fn restore_client(config: &Arc<ConfigService>) -> Option<Arc<solx_manager::App>> {
     let snap = config.snapshot();

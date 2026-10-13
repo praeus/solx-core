@@ -379,6 +379,30 @@
           "markdownDescription": "Denies the actions_search command without any pre-configured scope."
         },
         {
+          "description": "Enables the config_get command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-config-get",
+          "markdownDescription": "Enables the config_get command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the config_get command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-config-get",
+          "markdownDescription": "Denies the config_get command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the config_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-config-update",
+          "markdownDescription": "Enables the config_update command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the config_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-config-update",
+          "markdownDescription": "Denies the config_update command without any pre-configured scope."
+        },
+        {
           "description": "Enables the connect command without any pre-configured scope.",
           "type": "string",
           "const": "allow-connect",
@@ -617,6 +641,12 @@
           "type": "string",
           "const": "deny-types-validate",
           "markdownDescription": "Denies the types_validate command without any pre-configured scope."
+        },
+        {
+          "description": "Allows reading and editing solx-config.json, including the command and outbound-URL allowlists. Grant only to a window that never loads package widgets (the desktop app's Settings window) — never alongside widget-hosting content.\n#### This permission set includes:\n\n- `allow-config-get`\n- `allow-config-update`",
+          "type": "string",
+          "const": "config",
+          "markdownDescription": "Allows reading and editing solx-config.json, including the command and outbound-URL allowlists. Grant only to a window that never loads package widgets (the desktop app's Settings window) — never alongside widget-hosting content.\n#### This permission set includes:\n\n- `allow-config-get`\n- `allow-config-update`"
         },
         {
           "description": "Allows every solx command: the full manager surface (types, docs, actions, files) plus host info and client connect/disconnect.\n#### This default permission set includes:\n\n- `allow-types-save`\n- `allow-types-get`\n- `allow-types-delete`\n- `allow-types-list`\n- `allow-types-paths`\n- `allow-types-resolve`\n- `allow-types-validate`\n- `allow-docs-save`\n- `allow-docs-get`\n- `allow-docs-delete`\n- `allow-docs-list`\n- `allow-docs-paths`\n- `allow-docs-search`\n- `allow-actions-save`\n- `allow-actions-get`\n- `allow-actions-delete`\n- `allow-actions-list`\n- `allow-actions-paths`\n- `allow-actions-search`\n- `allow-actions-exec`\n- `allow-files-put`\n- `allow-files-get`\n- `allow-files-delete`\n- `allow-files-list`\n- `allow-info`\n- `allow-connect`\n- `allow-disconnect`",

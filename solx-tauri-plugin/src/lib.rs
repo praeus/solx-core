@@ -14,7 +14,10 @@
 //!   `solx-server` whose URL/token the UI sets via `connect`, persisted in
 //!   an app-private `ConfigService`.
 //!
-//! Hosts grant access with the `solx:default` capability permission.
+//! Hosts grant access with the `solx:default` capability permission. The
+//! `config_*` commands (editing `solx-config.json`) are a separate
+//! `solx:config` set, meant only for a window that never loads package
+//! widgets — see `commands`' config section.
 
 mod commands;
 mod state;
@@ -76,6 +79,8 @@ fn build<R: Runtime>(state: SolxState) -> TauriPlugin<R> {
             commands::info,
             commands::connect,
             commands::disconnect,
+            commands::config_get,
+            commands::config_update,
         ])
         .setup(move |app, _api| {
             app.manage(state);
@@ -91,15 +96,24 @@ mod tests {
     /// Every command must be granted by `solx:default` and registered in
     /// `generate_handler!` — a command missing from either fails only at
     /// runtime, as a permission or "command not found" error from `invoke`.
+    /// Every command must be granted by exactly one permission set and
+    /// registered in `generate_handler!` — a command missing from either
+    /// fails only at runtime, as a permission or "command not found" error
+    /// from `invoke`. Config commands must stay *out* of `solx:default`,
+    /// which the main window (and so any package widget) holds.
     #[test]
     fn command_list_matches_permissions_and_handler() {
-        let perms = include_str!("../permissions/default.toml");
+        let default = include_str!("../permissions/default.toml");
+        let config = include_str!("../permissions/config.toml");
         let lib = include_str!("lib.rs");
         for cmd in COMMANDS {
             let perm = format!("\"allow-{}\"", cmd.replace('_', "-"));
-            assert!(perms.contains(&perm), "permissions/default.toml is missing {perm}");
+            let (home, other) = if cmd.starts_with("config_") { (config, default) } else { (default, config) };
+            assert!(home.contains(&perm), "{perm} is missing from its permission set");
+            assert!(!other.contains(&perm), "{perm} is in the wrong permission set");
             assert!(lib.contains(&format!("commands::{cmd},")), "generate_handler! is missing {cmd}");
         }
-        assert_eq!(perms.matches("\"allow-").count(), COMMANDS.len());
+        let granted = default.matches("\"allow-").count() + config.matches("\"allow-").count();
+        assert_eq!(granted, COMMANDS.len());
     }
 }

@@ -1,8 +1,9 @@
 // The plugin's command names — the single list `build.rs` generates the
 // `allow-*` permissions from, and that `permissions/default.toml` and
 // `tauri::generate_handler!` in `lib.rs` must match (both checked by unit
-// tests in `lib.rs`). Included textually by both, so it can't depend on
-// anything.
+// tests in `lib.rs`). The `config_*` commands belong to the separate
+// `config` permission set (permissions/config.toml), not `default`.
+// Included textually by both, so it can't depend on anything.
 const COMMANDS: &[&str] = &[
     "types_save",
     "types_get",
@@ -31,4 +32,6 @@ const COMMANDS: &[&str] = &[
     "info",
     "connect",
     "disconnect",
+    "config_get",
+    "config_update",
 ];
