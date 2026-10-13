@@ -1,8 +1,10 @@
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::Response;
+use solx_surface::error::SolxError;
 
+use crate::error::ApiError;
 use crate::state::AppState;
 
 /// Bearer-token middleware: checks `Authorization: Bearer <token>` against
@@ -11,12 +13,16 @@ use crate::state::AppState;
 /// multi-user/permissions system anywhere else either). The server binds
 /// `127.0.0.1` by default. When `server_host` puts it on the network, this
 /// check is the only gate, which is why the comparison is constant-time.
+///
+/// A rejection is a 401 whose body is the usual `SolxError` JSON
+/// (`{"kind":"unauthorized",...}`), so clients can tell "no token" from
+/// "wrong token" instead of seeing an empty body.
 pub async fn require_bearer(
     State(state): State<AppState>,
     headers: HeaderMap,
     request: Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, ApiError> {
     let provided = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -26,7 +32,14 @@ pub async fn require_bearer(
         Some(token) if constant_time_eq(token.as_bytes(), state.token.as_bytes()) => {
             Ok(next.run(request).await)
         }
-        _ => Err(StatusCode::UNAUTHORIZED),
+        Some(_) => Err(SolxError::Unauthorized(
+            "the bearer token does not match this solx-server's server_token".into(),
+        )
+        .into()),
+        None => Err(SolxError::Unauthorized(
+            "missing `Authorization: Bearer <token>` header".into(),
+        )
+        .into()),
     }
 }
 

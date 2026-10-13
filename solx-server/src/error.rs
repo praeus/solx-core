@@ -28,6 +28,7 @@ fn status_for(e: &SolxError) -> StatusCode {
         SolxError::Invalid(_) => StatusCode::BAD_REQUEST,
         SolxError::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
         SolxError::Conflict(_) => StatusCode::CONFLICT,
+        SolxError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
         SolxError::Io(_) | SolxError::Db(_) | SolxError::Exec(_) | SolxError::Config(_) | SolxError::Other(_) => {
             StatusCode::INTERNAL_SERVER_ERROR
         }

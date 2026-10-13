@@ -49,6 +49,10 @@ pub enum SolxError {
     #[error("config error: {0}")]
     Config(String),
 
+    /// Missing or wrong credentials (e.g. `solx-server`'s bearer token).
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     /// Anything else.
     #[error("{0}")]
     Other(String),

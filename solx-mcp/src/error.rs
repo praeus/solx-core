@@ -20,6 +20,7 @@ fn variant_tag(e: &SolxError) -> &'static str {
         SolxError::Db(_) => "db",
         SolxError::Exec(_) => "exec",
         SolxError::Config(_) => "config",
+        SolxError::Unauthorized(_) => "unauthorized",
         SolxError::Other(_) => "other",
     }
 }

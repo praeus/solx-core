@@ -33,29 +33,6 @@
 //! `store.on_fiber(..)`: the guest gets its own stack, and whenever a host
 //! import's future returns `Pending` the fiber suspends and the OS thread
 //! goes back to the executor.
-//!
-//! That is what makes `action-exec` recursion cheap. The previous design
-//! ran each guest inside `spawn_blocking` and bridged host imports back to
-//! the async managers with `Handle::block_on`, so **every nesting level
-//! pinned one blocking-pool thread** for the whole duration of the call
-//! beneath it — a hard ceiling at tokio's `max_blocking_threads` (512 by
-//! default, and that budget is shared across concurrent requests, so real
-//! exhaustion arrives at depth × concurrency). Past the limit
-//! `spawn_blocking` queues rather than erroring, so it presented as a hang.
-//! Now a suspended level holds a fiber stack and no thread at all.
-//!
-//! Note this needs nothing from the guest. `call_async` runs an ordinary
-//! sync-ABI component; only the *host* side is async. Native component-model
-//! async (the `call_concurrent` path, reached by adding the `store` flag to
-//! the bindgen config) would require guests built against the async ABI —
-//! deliberately not used here, so components produced by componentize-qjs's
-//! `Runtime::OptSizeSync` keep working unmodified.
-//!
-//! Two things follow from dropping `spawn_blocking` and are handled in
-//! [`host`]: compiling a component is CPU-heavy and must not land on an
-//! async worker (see `host::compile_component`), and a compute-bound guest
-//! never awaits, so it needs epoch-based preemption to stop it monopolizing
-//! a worker (see `host::engine`).
 
 mod host;
 pub mod actions;

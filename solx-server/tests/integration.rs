@@ -300,7 +300,15 @@ async fn wrong_token_is_rejected() {
     let (_dir, _cfg, base_url, _token) = spawn_server().await;
     let types = RemoteTypeManager::new(base_url, "wrong-token");
     let err = types.list(ListOptions::default()).await.unwrap_err();
-    // A 401 with no SolxError body falls back to SolxError::Other — still
-    // a hard failure, which is what matters here.
-    assert!(matches!(err, SolxError::Other(_)));
+    assert!(matches!(err, SolxError::Unauthorized(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn missing_token_gets_json_401() {
+    let (_dir, _cfg, base_url, _token) = spawn_server().await;
+    let resp = reqwest::get(format!("{base_url}/types")).await.unwrap();
+    assert_eq!(resp.status(), 401);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["kind"], "unauthorized");
+    assert!(body["message"].as_str().unwrap().contains("missing"));
 }
